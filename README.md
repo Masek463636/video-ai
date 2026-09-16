@@ -6,23 +6,29 @@ AI-first short-form video editor. The first product goal is deliberately narrow:
 
 No timeline knowledge should be required from the user.
 
-## V0.3 status
+## V0.4 status — in progress
 
-The local pipeline now has these pieces:
+V0.4 is the quality-control layer on top of the V0.3 pipeline.
+
+Already implemented:
 
 - local speech transcription through optional `faster-whisper`
 - deterministic first-pass director that turns timed words into 1-3 second semantic scenes
-- several search-query variants per scene instead of betting on one query
-- free image/video discovery through Wikimedia Commons (no API key)
-- candidate pooling + semantic/title/description scoring
-- portrait/resolution/video bonuses for Shorts-friendly media
-- duplicate/repetition penalty so neighboring scenes are less likely to look the same
-- optional local OpenCV face detection + cheap saliency fallback
-- focal-point metadata persisted into the ShotPlan
-- focal-point-aware 9:16 crop and zoom/pan in FFmpeg
-- source/license manifest with top candidates and scores for debugging
-- burned ASS captions in a vertical safe zone
-- one-command `create` flow
+- multi-query Wikimedia Commons retrieval
+- candidate pooling + metadata/geometry ranking + repetition penalty
+- optional OpenCV face detection + saliency fallback
+- focal-point-aware 9:16 crop and Ken Burns motion
+- optional local CLIP image/text ranker module (`video-ai[semantic]`)
+- automatic music mood + SFX cue planning to `audio_plan.json`
+- local scene QC pass to `qc.json`
+- one-command `create` flow now emits transcript, materialized plan, audio plan, QC report and final MP4
+
+Still being wired into the automatic path:
+
+- CLIP reranking of the complete candidate pool before download/selection
+- automatic replacement/re-search of scenes that fail QC
+- actual SFX/music mixing (the cue plan exists; renderer mixing comes next)
+- generated-image fallback when stock/archive search has no good result
 
 The first benchmark is a real 22.5-second reference Short supplied by the project owner. We use it as a quality target, not as training data committed to this public repository.
 
@@ -35,64 +41,59 @@ voiceover
 [faster-whisper -> timed words]
    |
    v
-[director -> ShotPlan JSON]
+[director -> ShotPlan]
    |
    v
-[multi-query asset retrieval]
+[multi-query retrieval -> candidate pool]
    |
    v
-[rank + dedupe + focal analysis]
+[metadata rank + dedupe + optional semantic rank]
    |
    v
-[FFmpeg smart crop + motion + captions]
+[focus analysis -> smart 9:16 crop]
+   |
+   +--> [audio-plan.json]
+   +--> [qc.json]
    |
    v
-final.mp4
+[FFmpeg motion + captions -> MP4]
 ```
 
-The `ShotPlan` is the core contract. Transcription, directing, asset providers, ranking and rendering can be replaced independently.
+## Install
 
-## Requirements
+Basic local pipeline:
+
+```powershell
+pip install -e ".[local]"
+```
+
+Full experimental V0.4 stack with local CLIP dependencies:
+
+```powershell
+pip install -e ".[full]"
+```
+
+Requirements:
 
 - Python 3.11+
 - FFmpeg + ffprobe on PATH
-- internet only when downloading stock/archive assets
+- internet for the first model download and stock/archive retrieval
 
-Recommended local install for V0.3:
-
-```bash
-pip install -e ".[local]"
-```
-
-That installs local transcription plus optional OpenCV vision. If OpenCV is not installed, the renderer still works and falls back to centered crops.
-
-## Windows quick start
-
-```powershell
-git clone https://github.com/Masek463636/video-ai.git
-cd video-ai
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[local]"
-```
-
-Make sure `ffmpeg` and `ffprobe` are available on PATH.
-
-Then:
+## One-command flow
 
 ```powershell
 video-ai create "voice.mp3" -o "final.mp4" --work-dir ".\work" --language ru
 ```
 
-On first use faster-whisper downloads the selected model. `small` is the default.
-
-The working directory keeps the intermediate artifacts:
+It creates:
 
 ```text
 work/
   transcript.json
   shot_plan.json
   shot_plan.materialized.json
+  audio_plan.json
+  qc.json
   assets/
     scene_000.jpg
     scene_001.jpg
@@ -103,47 +104,24 @@ work/
     base.mp4
 ```
 
-`assets_manifest.json` stores source URLs, author/credit, license metadata, queries tried, top candidate scores and the chosen visual focus. This is useful both for attribution and for tuning why the AI picked a bad frame.
+## Debug/tuning commands
 
-## Separate commands
-
-```bash
-video-ai transcribe voice.mp3 -o transcript.json --language ru
-video-ai plan transcript.json --audio voice.mp3 -o shot_plan.json
-video-ai assets shot_plan.json --dir assets -o shot_plan.materialized.json --limit 20
-video-ai render shot_plan.materialized.json -o final.mp4 --work-dir render-work
+```powershell
+video-ai audio-plan work\shot_plan.materialized.json -o work\audio_plan.json
+video-ai qc work\shot_plan.materialized.json -o work\qc.json
 ```
 
-Or start from an already-created ShotPlan and do only asset resolution + rendering:
+`audio_plan.json` currently describes the chosen music mood and exact timestamps for cues such as `whoosh`, `impact`, `notification`, `bass_hit` and `cash_pop`.
 
-```bash
-video-ai make shot_plan.json -o final.mp4 --work-dir work --limit 20
-```
-
-## What V0.3 actually improved
-
-V0.2 often accepted the first plausible search result. V0.3 instead builds a candidate pool from several retrieval views and compares them using the scene query + caption, Commons title/description metadata, image geometry/resolution and recent visual history.
-
-For images, V0.3 can also detect the main face locally. If there is no face, a cheap edge-density focus estimate is used. The normalized focus point is then fed into the vertical crop and Ken Burns motion so a landscape photo is less likely to cut off the person's face.
-
-## Current limitation
-
-This is still not a true multimodal AI art director. The ranker does not yet visually understand whether a photo *emotionally* matches the spoken sentence; it mostly combines text metadata, composition heuristics and local face/saliency analysis.
-
-The next quality jump is **V0.4**:
-
-- optional local/multimodal embedding ranker (CLIP/SigLIP-style)
-- music and SFX cue planner
-- visual-quality/self-QC pass
-- automatic reranking/replacement when a scene fails QC
-- generated-image fallback when stock search has nothing useful
+`qc.json` catches obvious failures such as missing assets, repeated assets, extreme scene durations and missing focus metadata before we invest in a final quality pass.
 
 ## Product milestones
 
 - **V0.1** local transcription + timed captions + semantic shot plan ✅
 - **V0.2** free asset discovery + vertical FFmpeg renderer + one-command pipeline ✅
 - **V0.3** candidate pooling/ranking + dedupe + face-aware focal crop ✅
-- **V0.4** multimodal ranking + SFX/music + automatic QC/reranking
+- **V0.4** multimodal ranker module + audio cue planner + QC engine 🟡
+- **V0.4 completion** automatic semantic rerank + failed-scene replacement + real audio mixing
 - **Alpha** Windows desktop: `Upload voiceover -> Create Short`
 - **Later** web/mobile client after the editing engine itself is good enough
 
