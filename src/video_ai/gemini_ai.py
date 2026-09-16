@@ -26,6 +26,9 @@ class VisualJudgement:
     score: int
     reason: str = ""
     mismatch: str = ""
+    tone_match: int = 0
+    quality_score: int = 0
+    quality_issues: list[str] | None = None
 
 
 class GeminiClient:
@@ -45,7 +48,7 @@ class GeminiClient:
         if not self.available or not scenes:
             return []
         scene_rows = [
-            {"index": i, "start": round(s.start, 3), "end": round(s.end, 3), "caption": s.caption or ""}
+            {"index": i, "start": round(s.start, 3), "end": round(s.end, 3), "caption": s.caption or "", "tone": s.tone}
             for i, s in enumerate(scenes)
         ]
         meme_names = meme_names or []
@@ -70,6 +73,7 @@ Return ONLY valid JSON:
       "visual_mode": "image|video|meme",
       "source_mode": "historical_archive|stock_video|meme_library|generic_image",
       "motion_preset": "none|micro_push|slow_push|dramatic_push|pull_back|reveal_left|reveal_right",
+      "tone": "neutral|informational|positive|negative|tragic|tense|shocking|absurd|funny|victorious|mysterious|religious|violent|emotional",
       "visual_description": "exact English description of what should be visible in THIS beat",
       "search_queries": ["3 to 5 concise English searches"],
       "meme_tags": ["optional English reaction tags"],
@@ -84,23 +88,21 @@ Return ONLY valid JSON:
 
 BALANCED EDITING RULES:
 - Keep scene indexes unchanged.
+- Tone describes how the visual should FEEL, not just the nouns it contains.
+- Mass death, casualties, destruction and tragedy must be tragic/negative/violent, never cheerful, vacation-like, luxurious or relaxing.
 - semantic_lock is a HARD FACT LOCK, not general story context.
 - Set semantic_lock=true ONLY when the CURRENT scene caption explicitly names a specific person, named event/war/rebellion, named historical institution, dynasty, or similarly concrete factual entity that the visual must depict accurately.
 - DO NOT hard-lock a person/event merely because it appeared in the previous/next scene or elsewhere in the narration.
-- Pronouns such as he/him/they/it do NOT automatically justify repeating the person's portrait. Use the action, emotion or consequence being spoken instead.
-- If the current beat says stress/failure/sleep/dream/revelation/emotion/consequence without explicitly naming the historical person/event, prefer a contextual or emotional visual instead of repeating a portrait/map.
+- Pronouns do NOT automatically justify repeating the person's portrait. Use the action, emotion or consequence being spoken instead.
 - Never use the same visual idea on consecutive scenes if another honest visual exists.
 - A named person's portrait should usually appear once when introduced, not on every later reference.
 - A map should normally appear at most once in a ~20 second Short unless geography actually changes.
-- Historical accuracy still matters: contextual visuals should remain compatible with country/era where people, uniforms, architecture or institutions are visible.
+- Historical accuracy still matters for contextual visuals.
 - Use historical_archive for exact historical facts and genuinely historical action beats.
-- Use stock_video for generic actions/concepts that can honestly be modern/generic: fire, money, walking, typing, panic, crowd movement, etc. Do not use modern stock if historical clothing/identity is important.
-- Use generic_image for illustrations, dreams, emotions and conceptual beats when a still is stronger than stock.
+- Use stock_video only for generic actions/concepts that can honestly be represented.
+- Use generic_image for illustrations, dreams, emotions and conceptual beats when a still is stronger.
 - Use memes sparingly: usually 0-2 per ~20 seconds. Never use a meme for a hard-locked factual beat.
-- Prefer a strong contextually correct visual over a boring repeated exact visual when the scene is NOT locked.
-- Motion should support meaning: slow_push for calm emphasis, dramatic_push for shocks/revelations, pull_back for consequences/endings, reveal_* for spatial discovery, micro_push for video, none for memes.
-- Search queries for unlocked scenes should describe the current ACTION/EMOTION first, while retaining only the minimum useful historical setting.
-- Search queries for locked scenes must preserve the exact required entity/event.
+- Search queries for unlocked scenes should describe the current ACTION/EMOTION first.
 - Never ask for text overlays/logos/subtitles inside the visual.
 """.strip()
         data = self._generate_json([{"text": prompt}], temperature=0.11)
@@ -119,10 +121,11 @@ BALANCED EDITING RULES:
                 encoded = base64.b64encode(preview.read_bytes()).decode("ascii")
                 parts.append({"inline_data": {"mime_type": "image/jpeg", "data": encoded}})
             prompt = f"""
-You are a strict visual relevance judge for an automatically edited YouTube Short.
+You are a strict visual relevance + tone + quality judge for an automatically edited YouTube Short.
 The supplied images are representative frames from ONE candidate asset.
 
 Narration in this scene: {scene.caption or ''}
+Scene tone: {scene.tone}
 Director wants to show: {scene.visual_description or scene.query}
 Preferred visual type: {scene.visual_mode}
 Required source type: {scene.source_mode}
@@ -136,40 +139,55 @@ Return ONLY JSON:
 {{
   "accept": true,
   "score": 0,
+  "tone_match": 0,
+  "quality_score": 0,
+  "quality_issues": ["short issue labels"],
   "reason": "short explanation",
   "mismatch": "none OR exact mismatch"
 }}
 
-Scoring:
-90-100 directly depicts intended meaning and context.
-75-89 strongly relevant with small compromises.
-60-74 usable but generic/indirect.
-40-59 weak or wrong context.
-0-39 unrelated/misleading.
+Overall score measures semantic relevance.
+Tone_match 0-100 measures emotional compatibility with the narration.
+Quality_score 0-100 measures whether this looks like usable Shorts footage/image.
+
+AUTO-REJECT conditions:
+- tone is tragic/negative/violent and visual looks cheerful, vacation-like, luxurious, playful, celebratory or relaxing;
+- obvious website screenshot, UI screenshot, text-heavy plaque/sign, infographic, poster, watermark, logo or unusable text image unless explicitly requested;
+- subject is tiny or the frame is mostly empty/useless;
+- visibly low-quality, badly compressed, extremely blurry or poor scan when a cleaner alternative should exist;
+- wrong historical era/country/person/event;
+- modern object substitutes for a historical fact when context matters;
+- candidate is visually generic to the point that it does not communicate the scene.
 
 If Semantic lock is true:
 - candidate must be compatible with EVERY required entity/context;
-- wrong war, wrong century, wrong country, wrong named person or modern substitute is an automatic reject;
-- uncertainty about identity should lower the score strongly;
-- a factually safe archival/period fallback is better than a dramatic but wrong image.
+- wrong war, century, country, named person or modern substitute is an automatic reject.
 
 If Semantic lock is false:
-- judge the CURRENT action/emotion/idea first;
-- do not demand the story's main character or event if this beat can be represented more naturally another way;
-- still reject obviously incompatible historical context when it is visually important.
+- judge CURRENT action/emotion/idea first;
+- do not demand the story's main character if another visual honestly represents the beat.
+
+For 9:16 Shorts, prefer a clear main subject and composition that can survive a vertical crop.
 """.strip()
             parts.append({"text": prompt})
             data = self._generate_json(parts, temperature=0.02)
             if not isinstance(data, dict):
                 return None
             score = max(0, min(100, int(float(data.get("score", 0)))))
+            tone_match = max(0, min(100, int(float(data.get("tone_match", 0)))))
+            quality_score = max(0, min(100, int(float(data.get("quality_score", 0)))))
+            issues_raw = data.get("quality_issues") or []
+            issues = [str(x)[:80] for x in issues_raw[:8]] if isinstance(issues_raw, list) else []
             threshold = 76 if scene.semantic_lock else 60
-            accept = bool(data.get("accept", False)) and score >= threshold
+            accept = bool(data.get("accept", False)) and score >= threshold and tone_match >= 58 and quality_score >= 55
             return VisualJudgement(
                 accept=accept,
                 score=score,
                 reason=str(data.get("reason", ""))[:300],
                 mismatch=str(data.get("mismatch", ""))[:200],
+                tone_match=tone_match,
+                quality_score=quality_score,
+                quality_issues=issues,
             )
         except Exception as exc:
             self.last_error = str(exc)
@@ -200,7 +218,7 @@ If Semantic lock is false:
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.1.1",
+                "User-Agent": "video-ai/1.2",
             })
             try:
                 with urllib.request.urlopen(req, timeout=90) as response:
