@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -39,11 +40,12 @@ class ClipRanker:
         scores = [0.0] * len(paths)
         for index, path in enumerate(paths):
             try:
-                image = Image.open(path).convert("RGB")
+                with Image.open(path) as opened:
+                    image = opened.convert("RGB")
+                images.append(image)
+                valid_indexes.append(index)
             except Exception:
                 continue
-            images.append(image)
-            valid_indexes.append(index)
 
         if not images:
             return scores
@@ -65,3 +67,9 @@ class ClipRanker:
         for original_index, value in zip(valid_indexes, similarities):
             scores[original_index] = float(value)
         return scores
+
+
+@lru_cache(maxsize=2)
+def get_clip_ranker(model_name: str = "openai/clip-vit-base-patch32") -> ClipRanker:
+    """Load a semantic model once per process instead of once per scene."""
+    return ClipRanker(model_name)
