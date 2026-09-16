@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-ai"
+version = "0.0.1"
+description = "Local-first AI short video editor"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+video-ai = "video_ai.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
