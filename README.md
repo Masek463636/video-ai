@@ -2,33 +2,31 @@
 
 AI-first short-form video editor. The first product goal is deliberately narrow:
 
-> **voiceover in -> assets + captions + motion -> vertical short out**
+> **voiceover in -> assets + captions + motion + sound -> vertical short out**
 
 No timeline knowledge should be required from the user.
 
-## V0.4 status — in progress
+## V0.4 status
 
-V0.4 is the quality-control layer on top of the V0.3 pipeline.
-
-Already implemented:
+V0.4 now closes the first automatic quality loop:
 
 - local speech transcription through optional `faster-whisper`
-- deterministic first-pass director that turns timed words into 1-3 second semantic scenes
+- deterministic first-pass director that turns timed words into 1-3 second scenes
 - multi-query Wikimedia Commons retrieval
 - candidate pooling + metadata/geometry ranking + repetition penalty
+- optional local **CLIP text-image reranking** (`--semantic`)
+- CLIP similarity + retrieval score persisted into the ShotPlan
 - optional OpenCV face detection + saliency fallback
 - focal-point-aware 9:16 crop and Ken Burns motion
-- optional local CLIP image/text ranker module (`video-ai[semantic]`)
-- automatic music mood + SFX cue planning to `audio_plan.json`
-- local scene QC pass to `qc.json`
-- one-command `create` flow now emits transcript, materialized plan, audio plan, QC report and final MP4
-
-Still being wired into the automatic path:
-
-- CLIP reranking of the complete candidate pool before download/selection
-- automatic replacement/re-search of scenes that fail QC
-- actual SFX/music mixing (the cue plan exists; renderer mixing comes next)
-- generated-image fallback when stock/archive search has no good result
+- scene QC including weak semantic-match detection
+- **automatic failed-scene replacement** from the next ranked candidate
+- configurable QC repair passes
+- automatic music mood + SFX cue planning
+- **real FFmpeg SFX mixing** into the voiceover
+- optional user-supplied background music mixing
+- procedural fallback SFX, so the MVP works without shipping a sound pack
+- one-command `create` flow
+- GitHub Actions unit-test workflow
 
 The first benchmark is a real 22.5-second reference Short supplied by the project owner. We use it as a quality target, not as training data committed to this public repository.
 
@@ -47,27 +45,29 @@ voiceover
 [multi-query retrieval -> candidate pool]
    |
    v
-[metadata rank + dedupe + optional semantic rank]
+[metadata rank + dedupe + optional CLIP rank]
    |
    v
 [focus analysis -> smart 9:16 crop]
    |
-   +--> [audio-plan.json]
-   +--> [qc.json]
+   v
+[QC -> failed scene? -> next candidate -> QC again]
+   |
+   +--> [audio-plan -> SFX/music mix]
    |
    v
-[FFmpeg motion + captions -> MP4]
+[FFmpeg motion + captions + mixed audio -> MP4]
 ```
 
 ## Install
 
-Basic local pipeline:
+Light local pipeline:
 
 ```powershell
 pip install -e ".[local]"
 ```
 
-Full experimental V0.4 stack with local CLIP dependencies:
+Full V0.4 stack with CLIP:
 
 ```powershell
 pip install -e ".[full]"
@@ -77,15 +77,48 @@ Requirements:
 
 - Python 3.11+
 - FFmpeg + ffprobe on PATH
-- internet for the first model download and stock/archive retrieval
+- internet for first model download and stock/archive retrieval
 
-## One-command flow
+## Recommended V0.4 command
 
 ```powershell
-video-ai create "voice.mp3" -o "final.mp4" --work-dir ".\work" --language ru
+video-ai create "voice.mp3" `
+  -o "final.mp4" `
+  --work-dir ".\work" `
+  --language ru `
+  --semantic `
+  --repair-passes 2
 ```
 
-It creates:
+Optional background music:
+
+```powershell
+video-ai create "voice.mp3" `
+  -o "final.mp4" `
+  --work-dir ".\work" `
+  --language ru `
+  --semantic `
+  --music ".\music.mp3"
+```
+
+Optional custom SFX folder:
+
+```text
+sfx/
+  whoosh.wav
+  impact.wav
+  notification.wav
+  bass_hit.wav
+  cash_pop.wav
+```
+
+```powershell
+video-ai create "voice.mp3" -o final.mp4 --work-dir work --semantic --sfx-dir .\sfx
+```
+
+Without a custom SFX pack, V0.4 synthesizes simple royalty-free procedural placeholders locally with FFmpeg.
+
+## Work directory
 
 ```text
 work/
@@ -94,34 +127,50 @@ work/
   shot_plan.materialized.json
   audio_plan.json
   qc.json
+  mixed_audio.m4a
   assets/
     scene_000.jpg
     scene_001.jpg
     assets_manifest.json
+  audio_mix/
+    sfx_*.wav
   render/
     clips/
     captions.ass
     base.mp4
 ```
 
-## Debug/tuning commands
+`assets_manifest.json` includes the queries tried, top candidates, retrieval scores and CLIP similarity where semantic mode was used.
+
+`qc.json` records which scenes passed or failed and why. `create` / `make` automatically retry failed scenes by moving down the ranked candidate list.
+
+## Separate commands
 
 ```powershell
-video-ai audio-plan work\shot_plan.materialized.json -o work\audio_plan.json
-video-ai qc work\shot_plan.materialized.json -o work\qc.json
+video-ai transcribe voice.mp3 -o transcript.json --language ru
+video-ai plan transcript.json --audio voice.mp3 -o shot_plan.json
+video-ai assets shot_plan.json --dir assets -o materialized.json --semantic
+video-ai qc materialized.json -o qc.json
+video-ai render materialized.json -o final.mp4 --work-dir render-work
 ```
 
-`audio_plan.json` currently describes the chosen music mood and exact timestamps for cues such as `whoosh`, `impact`, `notification`, `bass_hit` and `cash_pop`.
+## Current limitations
 
-`qc.json` catches obvious failures such as missing assets, repeated assets, extreme scene durations and missing focus metadata before we invest in a final quality pass.
+V0.4 is still an MVP engine, not a finished consumer editor.
+
+- Wikimedia Commons alone is not enough for every topic; more stock providers are needed.
+- CLIP ranking currently applies to image candidates; video B-roll still uses metadata/geometry ranking.
+- Procedural fallback SFX are functional placeholders, not polished production sound design.
+- There is no generated-image fallback yet when retrieval completely fails.
+- There is no Windows GUI yet.
 
 ## Product milestones
 
-- **V0.1** local transcription + timed captions + semantic shot plan ✅
-- **V0.2** free asset discovery + vertical FFmpeg renderer + one-command pipeline ✅
-- **V0.3** candidate pooling/ranking + dedupe + face-aware focal crop ✅
-- **V0.4** multimodal ranker module + audio cue planner + QC engine 🟡
-- **V0.4 completion** automatic semantic rerank + failed-scene replacement + real audio mixing
+- **V0.1** local transcription + timed captions + shot plan ✅
+- **V0.2** free asset discovery + vertical FFmpeg renderer ✅
+- **V0.3** candidate ranking + dedupe + face-aware crop ✅
+- **V0.4** CLIP rerank + semantic QC + auto-repair + actual SFX/music mixing ✅
+- **V0.5** more stock providers + generated fallback + better subtitle styles + visual QC
 - **Alpha** Windows desktop: `Upload voiceover -> Create Short`
 - **Later** web/mobile client after the editing engine itself is good enough
 
