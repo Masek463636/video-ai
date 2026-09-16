@@ -120,6 +120,14 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
         if not item:
             continue
 
+        # Hard semantic locks are determined BEFORE Gemini from the literal
+        # current caption. Gemini can improve presentation, but cannot invent
+        # a new factual entity/war/person and turn it into a hard requirement.
+        deterministic_lock = bool(scene.semantic_lock)
+        deterministic_entities = list(scene.required_entities)
+        deterministic_context = list(scene.required_context)
+        deterministic_fallback = scene.semantic_fallback
+
         mode = str(item.get("visual_mode", scene.visual_mode)).lower().strip()
         if mode in {"image", "video", "meme", "auto"}:
             scene.visual_mode = mode  # type: ignore[assignment]
@@ -150,25 +158,17 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
             scene.search_queries = cleaned
             scene.query = cleaned[0]
 
-        gemini_lock = bool(item.get("semantic_lock", False))
-        entities = _clean_string_list(item.get("required_entities"), limit=6)
-        context = _clean_string_list(item.get("required_context"), limit=6)
-        fallback = str(item.get("semantic_fallback", "")).strip()[:300]
-
-        # Rule lock is intentionally conservative and only fires for an entity
-        # literally present in THIS caption. Gemini may add another hard lock,
-        # but must not carry a person/event forward from neighbouring scenes.
-        if gemini_lock or scene.semantic_lock:
+        if deterministic_lock:
+            # Preserve ONLY code-verified entities. Gemini-proposed
+            # required_entities are intentionally ignored here.
             scene.semantic_lock = True
-            scene.required_entities = entities or scene.required_entities
-            scene.required_context = context or scene.required_context
-            scene.semantic_fallback = fallback or scene.semantic_fallback or scene.visual_description
+            scene.required_entities = deterministic_entities
+            scene.required_context = deterministic_context
+            scene.semantic_fallback = deterministic_fallback or scene.visual_description
             scene.visual_mode = "image"
             scene.source_mode = "historical_archive"
             scene.meme_filename = None
         else:
-            # No hard lock: keep the scene alive. Context is allowed to guide the
-            # query, but it must not force every beat into the archive bucket.
             scene.semantic_lock = False
             scene.required_entities = []
             scene.required_context = []
@@ -205,15 +205,16 @@ def _explicit_entities(text: str) -> list[str]:
         entities.append("Jesus Christ")
     if "экзам" in lowered and ("импер" in lowered or "чиновник" in lowered or "гос" in lowered):
         entities.append("Imperial examination")
+    if "первая миров" in lowered or "первой миров" in lowered or "world war i" in lowered or "first world war" in lowered:
+        entities.append("World War I")
     return list(dict.fromkeys(entities))
 
 
 def _rule_semantic_lock(text: str, global_context: str) -> tuple[bool, list[str], list[str], str | None]:
     """Hard-lock only facts explicitly named in the current beat.
 
-    The old v1.1 implementation inspected neighbouring captions. That caused a
-    person's name or event to leak across several scenes, producing repeated
-    portraits/maps. Country/era remain context, but never create a lock alone.
+    Gemini is deliberately NOT allowed to create additional hard locks. This
+    keeps plausible visual suggestions from becoming factual assertions.
     """
     entities = _explicit_entities(text)
     if not entities:
