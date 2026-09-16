@@ -35,6 +35,8 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
                 focus_x=(float(raw["focus_x"]) if raw.get("focus_x") is not None else None),
                 focus_y=(float(raw["focus_y"]) if raw.get("focus_y") is not None else None),
                 focus_source=raw.get("focus_source"),
+                asset_score=(float(raw["asset_score"]) if raw.get("asset_score") is not None else None),
+                semantic_score=(float(raw["semantic_score"]) if raw.get("semantic_score") is not None else None),
             )
         )
 
@@ -81,6 +83,8 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "focus_x": scene.focus_x,
                 "focus_y": scene.focus_y,
                 "focus_source": scene.focus_source,
+                "asset_score": scene.asset_score,
+                "semantic_score": scene.semantic_score,
             }
             for scene in plan.scenes
         ],
