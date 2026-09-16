@@ -71,21 +71,22 @@ def build_shot_plan(transcript: Transcript, audio: str | Path, *, target_scene_s
             asset_kind="blank", motion=_MOTIONS[index % len(_MOTIONS)], caption=caption, visual_mode=mode,
         ))
 
-    _apply_gemini_direction(full_text, scenes)
-    return ShotPlan(audio=Path(audio), scenes=scenes)
+    source, model = _apply_gemini_direction(full_text, scenes)
+    return ShotPlan(audio=Path(audio), scenes=scenes, director_source=source, director_model=model)
 
 
-def _apply_gemini_direction(full_text: str, scenes: list[Scene]) -> None:
+def _apply_gemini_direction(full_text: str, scenes: list[Scene]) -> tuple[str, str | None]:
     try:
         from .gemini_ai import get_gemini_client
         client = get_gemini_client()
         if client is None:
-            return
+            return "rules", None
         directed = client.direct(full_text, scenes)
     except Exception:
-        return
+        return "rules", None
 
     by_index = {int(item.get("index")): item for item in directed if str(item.get("index", "")).isdigit()}
+    applied = 0
     for index, scene in enumerate(scenes):
         item = by_index.get(index)
         if not item:
@@ -114,6 +115,11 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene]) -> None:
             meme_query = " ".join(str(tag).strip() for tag in tags if str(tag).strip())
             if meme_query:
                 scene.visual_description = f"{scene.visual_description or ''} {meme_query} reaction meme".strip()
+        applied += 1
+
+    if applied == 0:
+        return "rules", None
+    return "gemini", client.last_model
 
 
 def _visual_description(text: str, global_context: str, neighborhood: str, mode: VisualMode) -> str:
