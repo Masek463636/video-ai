@@ -33,6 +33,9 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
             visual_description=raw.get("visual_description"),
             search_queries=list(raw.get("search_queries") or []),
             visual_mode=raw.get("visual_mode", "auto"),
+            source_mode=raw.get("source_mode", "auto"),
+            motion_preset=raw.get("motion_preset", "slow_push"),
+            meme_filename=raw.get("meme_filename"),
             focus_x=(float(raw["focus_x"]) if raw.get("focus_x") is not None else None),
             focus_y=(float(raw["focus_y"]) if raw.get("focus_y") is not None else None),
             focus_source=raw.get("focus_source"),
@@ -87,6 +90,9 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "visual_description": scene.visual_description,
                 "search_queries": scene.search_queries,
                 "visual_mode": scene.visual_mode,
+                "source_mode": scene.source_mode,
+                "motion_preset": scene.motion_preset,
+                "meme_filename": scene.meme_filename,
                 "focus_x": scene.focus_x,
                 "focus_y": scene.focus_y,
                 "focus_source": scene.focus_source,
@@ -117,6 +123,10 @@ def validate_shot_plan(plan: ShotPlan) -> None:
             raise ValueError(f"scene {index}: asset_kind={scene.asset_kind!r} requires asset")
         if scene.visual_mode not in {"auto", "image", "video", "meme"}:
             raise ValueError(f"scene {index}: invalid visual_mode={scene.visual_mode!r}")
+        if scene.source_mode not in {"auto", "historical_archive", "stock_video", "meme_library", "generic_image"}:
+            raise ValueError(f"scene {index}: invalid source_mode={scene.source_mode!r}")
+        if scene.motion_preset not in {"none", "micro_push", "slow_push", "dramatic_push", "pull_back", "reveal_left", "reveal_right"}:
+            raise ValueError(f"scene {index}: invalid motion_preset={scene.motion_preset!r}")
         for name, value in (("focus_x", scene.focus_x), ("focus_y", scene.focus_y)):
             if value is not None and not 0.0 <= value <= 1.0:
                 raise ValueError(f"scene {index}: {name} must be between 0 and 1")
