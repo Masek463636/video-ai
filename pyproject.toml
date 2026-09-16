@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-ai"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local-first AI short video editor"
 requires-python = ">=3.11"
 dependencies = []
@@ -12,7 +12,9 @@ dependencies = []
 [project.optional-dependencies]
 transcribe = ["faster-whisper>=1.1.0"]
 vision = ["opencv-python-headless>=4.10", "numpy>=1.26"]
+semantic = ["torch>=2.3", "transformers>=4.44", "pillow>=10.4"]
 local = ["faster-whisper>=1.1.0", "opencv-python-headless>=4.10", "numpy>=1.26"]
+full = ["faster-whisper>=1.1.0", "opencv-python-headless>=4.10", "numpy>=1.26", "torch>=2.3", "transformers>=4.44", "pillow>=10.4"]
 
 [project.scripts]
 video-ai = "video_ai.cli:main"
