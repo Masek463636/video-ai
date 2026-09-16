@@ -10,6 +10,31 @@ MotionKind = Literal["none", "zoom_in", "zoom_out", "pan_left", "pan_right"]
 
 
 @dataclass(slots=True)
+class Word:
+    start: float
+    end: float
+    text: str
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+@dataclass(slots=True)
+class Transcript:
+    words: list[Word]
+    language: str | None = None
+
+    @property
+    def duration(self) -> float:
+        return self.words[-1].end if self.words else 0.0
+
+    @property
+    def text(self) -> str:
+        return " ".join(word.text for word in self.words).strip()
+
+
+@dataclass(slots=True)
 class Scene:
     start: float
     end: float

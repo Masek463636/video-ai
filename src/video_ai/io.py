@@ -46,6 +46,38 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
     return plan
 
 
+def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
+    validate_shot_plan(plan)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        audio = str(plan.audio.resolve().relative_to(path.parent.resolve()))
+    except (ValueError, OSError):
+        audio = str(plan.audio)
+
+    payload = {
+        "audio": audio,
+        "width": plan.width,
+        "height": plan.height,
+        "fps": plan.fps,
+        "scenes": [
+            {
+                "start": scene.start,
+                "end": scene.end,
+                "query": scene.query,
+                "asset": scene.asset,
+                "asset_kind": scene.asset_kind,
+                "motion": scene.motion,
+                "caption": scene.caption,
+            }
+            for scene in plan.scenes
+        ],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
 def validate_shot_plan(plan: ShotPlan) -> None:
     if not plan.scenes:
         raise ValueError("Shot plan has no scenes")
