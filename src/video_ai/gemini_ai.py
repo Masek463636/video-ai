@@ -73,23 +73,30 @@ Return ONLY valid JSON:
       "visual_description": "exact English description of what should be visible",
       "search_queries": ["3 to 5 concise English searches"],
       "meme_tags": ["optional English reaction tags"],
-      "meme_filename": "exact available filename or empty string"
+      "meme_filename": "exact available filename or empty string",
+      "semantic_lock": true,
+      "required_entities": ["specific person/event/place names that MUST match"],
+      "required_context": ["era/country/culture/context that MUST match"],
+      "semantic_fallback": "safe fallback visual if no exact candidate exists"
     }}
   ]
 }}
 
 Editorial rules:
 - Keep scene indexes unchanged.
+- semantic_lock MUST be true for a named historical person, named event/war/rebellion, named place used factually, dynasty/era-specific event, or other concrete fact where a visual metaphor could mislead.
+- For locked scenes, list only truly mandatory entities/context. Example: Hong Xiuquan + Qing China + 19th century. Do not add generic words like man/person.
 - Historical accuracy beats generic motion. For a named historical person/event/era, choose historical_archive + image unless authentic footage is plausibly available.
 - Do NOT use stock_video for specific historical people, named wars, dynasties or events if that would create a misleading modern substitute.
 - Use stock_video only for generic concepts/actions that can honestly be represented: crowd, fire, road, phone, money, city, typing, walking, etc.
-- Use memes sparingly: usually 0-2 per ~20 seconds. If meme is chosen and one of the available files clearly fits, return its exact filename.
+- Use memes sparingly: usually 0-2 per ~20 seconds. Never use a meme for a locked factual scene unless the narration itself is clearly a reaction/joke beat.
 - Prefer a strong still image with intentional camera motion over a semantically wrong video.
 - Motion should support meaning: slow_push for calm emphasis, dramatic_push for shocks/revelations, pull_back for consequences/endings, reveal_* for spatial discovery, micro_push for video/very subtle movement, none for memes.
 - Search queries must preserve country, era, person and event when known.
+- semantic_fallback must remain factually safe, e.g. "Qing dynasty China archival map" rather than an unrelated war photo.
 - Never ask for text overlays/logos/subtitles inside the visual.
 """.strip()
-        data = self._generate_json([{"text": prompt}], temperature=0.12)
+        data = self._generate_json([{"text": prompt}], temperature=0.10)
         raw = data.get("scenes", []) if isinstance(data, dict) else []
         return [item for item in raw if isinstance(item, dict)]
 
@@ -112,6 +119,10 @@ Narration in this scene: {scene.caption or ''}
 Director wants to show: {scene.visual_description or scene.query}
 Preferred visual type: {scene.visual_mode}
 Required source type: {scene.source_mode}
+Semantic lock: {scene.semantic_lock}
+Required entities: {json.dumps(scene.required_entities, ensure_ascii=False)}
+Required context: {json.dumps(scene.required_context, ensure_ascii=False)}
+Safe fallback: {scene.semantic_fallback or ''}
 Candidate title/source: {candidate_title} / {source}
 
 Return ONLY JSON:
@@ -129,14 +140,20 @@ Scoring:
 40-59 weak or wrong context.
 0-39 unrelated/misleading.
 
-Be VERY strict about era, country, identity, event and subject. If source_mode is historical_archive, reject obviously modern stock. If the narration names a specific historical person/event, generic modern substitutes should normally score below 60.
+If Semantic lock is true:
+- candidate must be compatible with EVERY required entity/context;
+- wrong war, wrong century, wrong country, wrong named person or modern substitute is an automatic reject;
+- uncertainty about identity should lower the score strongly;
+- a factually safe archival/map/period fallback is better than a dramatic but wrong image.
+Be VERY strict about era, country, identity, event and subject.
 """.strip()
             parts.append({"text": prompt})
-            data = self._generate_json(parts, temperature=0.03)
+            data = self._generate_json(parts, temperature=0.02)
             if not isinstance(data, dict):
                 return None
             score = max(0, min(100, int(float(data.get("score", 0)))))
-            accept = bool(data.get("accept", False)) and score >= 60
+            threshold = 76 if scene.semantic_lock else 60
+            accept = bool(data.get("accept", False)) and score >= threshold
             return VisualJudgement(
                 accept=accept,
                 score=score,
@@ -172,7 +189,7 @@ Be VERY strict about era, country, identity, event and subject. If source_mode i
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.0",
+                "User-Agent": "video-ai/1.1",
             })
             try:
                 with urllib.request.urlopen(req, timeout=90) as response:
