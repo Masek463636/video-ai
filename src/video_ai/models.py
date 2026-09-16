@@ -7,6 +7,7 @@ from typing import Literal
 
 AssetKind = Literal["image", "video", "blank"]
 MotionKind = Literal["none", "zoom_in", "zoom_out", "pan_left", "pan_right"]
+VisualMode = Literal["auto", "image", "video", "meme"]
 
 
 @dataclass(slots=True)
@@ -43,6 +44,8 @@ class Scene:
     asset_kind: AssetKind = "blank"
     motion: MotionKind = "none"
     caption: str | None = None
+    # Director intent: what kind of visual should this beat try to use first.
+    visual_mode: VisualMode = "auto"
     # Normalized 0..1 coordinates of the visual subject used by smart 9:16 crop.
     focus_x: float | None = None
     focus_y: float | None = None
