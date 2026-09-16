@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .models import Scene, ShotPlan
+from .openverse import search_openverse
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
@@ -37,6 +38,7 @@ class AssetCandidate:
     description: str = ""
     score: float = 0.0
     semantic_score: float | None = None
+    source: str = "commons"
 
 
 def search_commons(query: str, *, limit: int = 20) -> list[AssetCandidate]:
@@ -97,10 +99,42 @@ def search_commons(query: str, *, limit: int = 20) -> list[AssetCandidate]:
             artist=_clean_html(_meta(meta, "Artist")),
             credit=_clean_html(_meta(meta, "Credit")),
             description=description,
+            source="commons",
         )
         candidate.score = _score(candidate, query, query)
         out.append(candidate)
     out.sort(key=lambda c: c.score, reverse=True)
+    return out
+
+
+def search_all(query: str, *, limit: int = 20) -> list[AssetCandidate]:
+    out: list[AssetCandidate] = []
+    try:
+        out.extend(search_commons(query, limit=limit))
+    except Exception:
+        pass
+    try:
+        for item in search_openverse(query, limit=limit):
+            out.append(
+                AssetCandidate(
+                    title=item.title,
+                    page_url=item.page_url,
+                    download_url=item.download_url,
+                    mime="image/jpeg",
+                    width=item.width,
+                    height=item.height,
+                    size=0,
+                    kind="image",
+                    license=item.license,
+                    license_url=item.license_url,
+                    artist=item.artist,
+                    credit=item.artist,
+                    description=item.description,
+                    source="openverse",
+                )
+            )
+    except Exception:
+        pass
     return out
 
 
@@ -115,11 +149,6 @@ def materialize_assets(
     replace_scenes: set[int] | None = None,
     rank_offset: int = 0,
 ) -> list[dict]:
-    """Resolve scene assets with heuristic + optional CLIP reranking.
-
-    `replace_scenes` and `rank_offset` are used by the QC repair pass: failed scenes
-    can be re-selected from the next-best candidate without disturbing good scenes.
-    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     replace_scenes = replace_scenes or set()
@@ -127,7 +156,6 @@ def materialize_assets(
     used_titles: list[str] = []
     manifest: list[dict] = []
 
-    # Existing non-replaced assets count as already used, reducing visual repeats.
     for index, scene in enumerate(plan.scenes):
         if index in replace_scenes:
             continue
@@ -146,16 +174,14 @@ def materialize_assets(
         pool: dict[str, tuple[AssetCandidate, str]] = {}
         variants = list(_query_variants(scene.query, scene.caption))
         for query_index, variant in enumerate(variants):
-            try:
-                candidates = search_commons(variant, limit=limit)
-            except Exception:
-                continue
-            for candidate in candidates:
+            for candidate in search_all(variant, limit=limit):
                 if candidate.download_url in used_urls:
                     continue
                 score = _score(candidate, scene.query, scene.caption or "")
                 score -= query_index * 0.35
                 score -= _repeat_penalty(candidate.title, used_titles)
+                if candidate.source == "openverse":
+                    score += 0.4
                 candidate.score = score
                 existing = pool.get(candidate.download_url)
                 if existing is None or candidate.score > existing[0].score:
@@ -166,24 +192,9 @@ def materialize_assets(
             _semantic_rerank(scene, ranked, top_k=semantic_top_k)
             ranked.sort(key=lambda item: item[0].score, reverse=True)
 
-        if not ranked:
-            scene.asset = None
-            scene.asset_kind = "blank"
-            scene.asset_score = None
-            scene.semantic_score = None
-            manifest.append({
-                "scene": index,
-                "status": "not_found",
-                "query": scene.query,
-                "queries_tried": variants,
-            })
-            continue
-
         chosen: AssetCandidate | None = None
         search_used = ""
         target: Path | None = None
-        # Try candidates in order. If a source fails to download, automatically
-        # fall through to the next one instead of leaving a black scene.
         for candidate, search in ranked[max(0, rank_offset):]:
             suffix = _suffix(candidate)
             candidate_target = out_dir / f"scene_{index:03d}{suffix}"
@@ -197,11 +208,34 @@ def materialize_assets(
             break
 
         if chosen is None or target is None:
+            fallback = _fallback_asset(plan, index)
+            if fallback is not None:
+                scene.asset = fallback.asset
+                scene.asset_kind = fallback.asset_kind
+                scene.focus_x = fallback.focus_x
+                scene.focus_y = fallback.focus_y
+                scene.focus_source = "fallback_previous"
+                scene.asset_score = fallback.asset_score
+                scene.semantic_score = fallback.semantic_score
+                manifest.append({
+                    "scene": index,
+                    "status": "fallback_previous",
+                    "query": scene.query,
+                    "queries_tried": variants,
+                    "path": scene.asset,
+                })
+                continue
+
             scene.asset = None
             scene.asset_kind = "blank"
             scene.asset_score = None
             scene.semantic_score = None
-            manifest.append({"scene": index, "status": "download_failed", "query": scene.query})
+            manifest.append({
+                "scene": index,
+                "status": "not_found",
+                "query": scene.query,
+                "queries_tried": variants,
+            })
             continue
 
         used_urls.add(chosen.download_url)
@@ -220,6 +254,7 @@ def materialize_assets(
             "queries_tried": variants,
             "search_used": search_used,
             "path": str(target),
+            "source": chosen.source,
             "focus": {"x": scene.focus_x, "y": scene.focus_y, "source": scene.focus_source},
             "top_candidates": [
                 {
@@ -229,6 +264,7 @@ def materialize_assets(
                         round(c.semantic_score, 4) if c.semantic_score is not None else None
                     ),
                     "search": q,
+                    "source": c.source,
                 }
                 for c, q in ranked[:8]
             ],
@@ -239,6 +275,14 @@ def materialize_assets(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return manifest
+
+
+def _fallback_asset(plan: ShotPlan, index: int) -> Scene | None:
+    for previous in range(index - 1, -1, -1):
+        scene = plan.scenes[previous]
+        if scene.asset and Path(scene.asset).exists() and scene.asset_kind != "blank":
+            return scene
+    return None
 
 
 def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, top_k: int) -> None:
@@ -271,8 +315,6 @@ def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, 
             return
         for candidate, similarity in zip(valid, similarities):
             candidate.semantic_score = float(similarity)
-            # CLIP cosine similarities often cluster tightly, so give the semantic
-            # signal meaningful weight without deleting the retrieval/composition score.
             candidate.score += float(similarity) * 24.0
 
 
@@ -371,8 +413,10 @@ def _query_variants(query: str, caption: str | None) -> Iterable[str]:
     query = re.sub(r"\s+", " ", query).strip()
     caption = re.sub(r"\s+", " ", caption or "").strip()
     concepts = _simple_ru_concepts(query + " " + caption)
-    keywords = " ".join(list(_tokens(query + " " + caption))[:6])
-    base = [concepts, query, keywords, caption]
+    tokens = list(_tokens(query + " " + caption))
+    keywords = " ".join(tokens[:5])
+    broad = " ".join(tokens[:2])
+    base = [concepts, query, keywords, broad, caption]
     for value in base:
         value = re.sub(r"\s+", " ", value).strip()
         lowered = value.lower()
@@ -385,6 +429,9 @@ def _simple_ru_concepts(text: str) -> str:
     lowered = text.lower()
     rules = {
         "экзам": "student exam classroom",
+        "госэкзам": "student exam government",
+        "чиновник": "government official office",
+        "стресс": "stressed person worried",
         "тест": "student taking test classroom",
         "универ": "university student campus",
         "учеб": "student studying desk",
