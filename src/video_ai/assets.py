@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 import urllib.parse
 import urllib.request
@@ -9,10 +10,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .models import ShotPlan
+from .models import Scene, ShotPlan
+from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/0.2 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/0.3 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 80 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -32,10 +34,11 @@ class AssetCandidate:
     license_url: str = ""
     artist: str = ""
     credit: str = ""
+    description: str = ""
     score: float = 0.0
 
 
-def search_commons(query: str, *, limit: int = 12) -> list[AssetCandidate]:
+def search_commons(query: str, *, limit: int = 20) -> list[AssetCandidate]:
     """Search Wikimedia Commons for renderable images/videos, no API key required."""
     query = query.strip()
     if not query:
@@ -73,6 +76,13 @@ def search_commons(query: str, *, limit: int = 12) -> list[AssetCandidate]:
         if not url:
             continue
         meta = info.get("extmetadata") or {}
+        description = " ".join(
+            x for x in (
+                _clean_html(_meta(meta, "ImageDescription")),
+                _clean_html(_meta(meta, "ObjectName")),
+                _clean_html(_meta(meta, "Categories")),
+            ) if x
+        )
         candidate = AssetCandidate(
             title=str(page.get("title") or "").removeprefix("File:"),
             page_url=str(info.get("descriptionurl") or ""),
@@ -86,8 +96,9 @@ def search_commons(query: str, *, limit: int = 12) -> list[AssetCandidate]:
             license_url=_meta(meta, "LicenseUrl"),
             artist=_clean_html(_meta(meta, "Artist")),
             credit=_clean_html(_meta(meta, "Credit")),
+            description=description,
         )
-        candidate.score = _score(candidate, query)
+        candidate.score = _score(candidate, query, query)
         out.append(candidate)
     out.sort(key=lambda c: c.score, reverse=True)
     return out
@@ -97,49 +108,92 @@ def materialize_assets(
     plan: ShotPlan,
     out_dir: str | Path,
     *,
-    limit: int = 12,
+    limit: int = 20,
     overwrite: bool = False,
 ) -> list[dict]:
-    """Fill blank scene assets from Commons and write a license/source manifest."""
+    """Resolve each scene from a pool of candidates and persist attribution metadata."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     used_urls: set[str] = set()
+    used_titles: list[str] = []
     manifest: list[dict] = []
 
     for index, scene in enumerate(plan.scenes):
         if scene.asset and not overwrite:
             p = Path(scene.asset)
             if p.exists():
+                _apply_focus(scene, p)
                 manifest.append({"scene": index, "status": "existing", "path": str(p)})
                 continue
 
-        chosen: AssetCandidate | None = None
-        search_used = ""
-        for variant in _query_variants(scene.query, scene.caption):
-            candidates = search_commons(variant, limit=limit)
-            chosen = next((c for c in candidates if c.download_url not in used_urls), None)
-            if chosen:
-                search_used = variant
-                break
+        pool: dict[str, tuple[AssetCandidate, str]] = {}
+        variants = list(_query_variants(scene.query, scene.caption))
+        for query_index, variant in enumerate(variants):
+            try:
+                candidates = search_commons(variant, limit=limit)
+            except Exception:
+                continue
+            for candidate in candidates:
+                if candidate.download_url in used_urls:
+                    continue
+                score = _score(candidate, scene.query, scene.caption or "")
+                score -= query_index * 0.35
+                score -= _repeat_penalty(candidate.title, used_titles)
+                candidate.score = score
+                existing = pool.get(candidate.download_url)
+                if existing is None or candidate.score > existing[0].score:
+                    pool[candidate.download_url] = (candidate, variant)
 
-        if not chosen:
+        ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
+        chosen_pair = ranked[0] if ranked else None
+        if not chosen_pair:
             scene.asset = None
             scene.asset_kind = "blank"
-            manifest.append({"scene": index, "status": "not_found", "query": scene.query})
+            manifest.append({
+                "scene": index,
+                "status": "not_found",
+                "query": scene.query,
+                "queries_tried": variants,
+            })
             continue
 
+        chosen, search_used = chosen_pair
         suffix = _suffix(chosen)
         target = out_dir / f"scene_{index:03d}{suffix}"
-        _download(chosen.download_url, target)
+        try:
+            _download(chosen.download_url, target)
+        except Exception as exc:
+            scene.asset = None
+            scene.asset_kind = "blank"
+            manifest.append({
+                "scene": index,
+                "status": "download_failed",
+                "query": scene.query,
+                "error": str(exc),
+            })
+            continue
+
         used_urls.add(chosen.download_url)
+        used_titles.append(chosen.title)
         scene.asset = str(target.resolve())
         scene.asset_kind = chosen.kind  # type: ignore[assignment]
+        _apply_focus(scene, target)
         manifest.append({
             "scene": index,
             "status": "downloaded",
             "query": scene.query,
+            "queries_tried": variants,
             "search_used": search_used,
             "path": str(target),
+            "focus": {
+                "x": scene.focus_x,
+                "y": scene.focus_y,
+                "source": scene.focus_source,
+            },
+            "top_candidates": [
+                {"title": c.title, "score": round(c.score, 3), "search": q}
+                for c, q in ranked[:5]
+            ],
             **asdict(chosen),
         })
 
@@ -147,6 +201,62 @@ def materialize_assets(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return manifest
+
+
+def _apply_focus(scene: Scene, path: Path) -> None:
+    if scene.asset_kind != "image":
+        return
+    x, y, source = detect_focus(path)
+    scene.focus_x = round(x, 4)
+    scene.focus_y = round(y, 4)
+    scene.focus_source = source
+
+
+def _score(candidate: AssetCandidate, query: str, caption: str) -> float:
+    wanted = _tokens(query + " " + caption)
+    title = _tokens(candidate.title)
+    description = _tokens(candidate.description)
+    exact = len(wanted & title)
+    contextual = len(wanted & description)
+    score = exact * 7.0 + contextual * 2.2
+
+    # Reward useful framing/resolution for Shorts rather than just search order.
+    if candidate.width >= 1200 or candidate.height >= 1200:
+        score += 2.5
+    elif candidate.width >= 800 or candidate.height >= 800:
+        score += 1.0
+    ratio = candidate.width / candidate.height if candidate.height else 1.0
+    if 0.48 <= ratio <= 0.75:  # already close to portrait
+        score += 3.0
+    elif 0.75 < ratio <= 1.45:
+        score += 1.5
+    elif ratio > 2.2:
+        score -= 1.5
+    if candidate.kind == "video":
+        score += 1.5  # motion is generally more valuable B-roll than a still
+    if candidate.license:
+        score += 0.5
+    if not wanted:
+        score += 0.0
+    return score
+
+
+def _repeat_penalty(title: str, previous_titles: list[str]) -> float:
+    current = _tokens(title)
+    if not current:
+        return 0.0
+    worst = 0.0
+    for previous in previous_titles[-5:]:
+        other = _tokens(previous)
+        if not other:
+            continue
+        similarity = len(current & other) / max(1, len(current | other))
+        worst = max(worst, similarity)
+    return worst * 8.0
+
+
+def _tokens(value: str) -> set[str]:
+    return {t.lower() for t in _TOKEN_RE.findall(value) if len(t) > 1}
 
 
 def _json_get(url: str) -> dict:
@@ -167,9 +277,7 @@ def _download(url: str, target: Path) -> None:
                 break
             total += len(chunk)
             if total > _MAX_DOWNLOAD_BYTES:
-                raise RuntimeError(
-                    f"asset exceeds {_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB"
-                )
+                raise RuntimeError(f"asset exceeds {_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB")
             output.write(chunk)
 
 
@@ -191,53 +299,48 @@ def _suffix(candidate: AssetCandidate) -> str:
     return suffix or (".jpg" if candidate.kind == "image" else ".webm")
 
 
-def _score(candidate: AssetCandidate, query: str) -> float:
-    q = {t.lower() for t in _TOKEN_RE.findall(query) if len(t) > 1}
-    title = {t.lower() for t in _TOKEN_RE.findall(candidate.title) if len(t) > 1}
-    overlap = len(q & title)
-    score = overlap * 8.0
-    if candidate.kind == "image":
-        score += 2.0
-    if candidate.width >= 1000 and candidate.height >= 700:
-        score += 2.0
-    if candidate.height > candidate.width:
-        score += 1.5
-    if candidate.license:
-        score += 0.5
-    return score
-
-
 def _query_variants(query: str, caption: str | None) -> Iterable[str]:
+    """Generate several retrieval views instead of betting the scene on one query."""
     seen: set[str] = set()
-    base = [query.strip(), (caption or "").strip()]
-    english = _simple_ru_concepts(" ".join(base))
-    if english:
-        base.append(english)
+    query = re.sub(r"\s+", " ", query).strip()
+    caption = re.sub(r"\s+", " ", caption or "").strip()
+    concepts = _simple_ru_concepts(query + " " + caption)
+    keywords = " ".join(list(_tokens(query + " " + caption))[:6])
+    base = [concepts, query, keywords, caption]
     for value in base:
         value = re.sub(r"\s+", " ", value).strip()
-        if value and value.lower() not in seen:
-            seen.add(value.lower())
+        lowered = value.lower()
+        if value and lowered not in seen:
+            seen.add(lowered)
             yield value
 
 
 def _simple_ru_concepts(text: str) -> str:
     lowered = text.lower()
     rules = {
-        "экзам": "student exam",
-        "тест": "student test",
-        "универ": "university student",
-        "учеб": "student studying",
-        "школ": "school student",
-        "расстро": "sad student",
-        "груст": "sad person",
-        "деньг": "money cash",
+        "экзам": "student exam classroom",
+        "тест": "student taking test classroom",
+        "универ": "university student campus",
+        "учеб": "student studying desk",
+        "школ": "school student classroom",
+        "расстро": "sad disappointed student",
+        "груст": "sad disappointed person",
+        "радост": "happy excited person",
+        "деньг": "money cash finance",
         "работ": "person working office",
-        "телефон": "smartphone",
-        "компьют": "computer",
-        "машин": "car",
-        "игр": "video game",
-        "ютуб": "YouTube creator",
-        "видео": "video camera",
+        "телефон": "person using smartphone",
+        "компьют": "person using computer",
+        "машин": "car driving road",
+        "игр": "video game player gaming",
+        "ютуб": "YouTube creator filming video",
+        "видео": "video camera filming",
+        "друг": "friends talking together",
+        "парень": "young man portrait",
+        "девуш": "young woman portrait",
+        "отнош": "young couple relationship",
+        "страш": "scared person dark",
+        "ноч": "night city dark",
+        "дом": "home apartment interior",
     }
     concepts = [value for stem, value in rules.items() if stem in lowered]
     return " ".join(dict.fromkeys(concepts))
