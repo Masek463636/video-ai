@@ -56,10 +56,7 @@ def _mix_if_requested(plan, audio_plan, work: Path, args) -> Path:
 
 
 def _gemini_manifest_stats(manifest: list[dict]) -> dict:
-    judged = 0
-    accepted = 0
-    rejected = 0
-    fallback_after_rejections = 0
+    judged = accepted = rejected = fallback_after_rejections = 0
     for item in manifest:
         judge = item.get("gemini_judge")
         if isinstance(judge, dict):
@@ -90,7 +87,8 @@ def main() -> None:
 
     p_plan = sub.add_parser("plan", help="Create a structured ShotPlan from a timed transcript")
     p_plan.add_argument("transcript"); p_plan.add_argument("--audio", required=True); p_plan.add_argument("-o", "--output", required=True)
-    p_plan.add_argument("--pace", type=float, default=2.1); p_plan.add_argument("--min-scene", type=float, default=1.25); p_plan.add_argument("--max-scene", type=float, default=3.2)
+    p_plan.add_argument("--pace", type=float, default=1.7); p_plan.add_argument("--min-scene", type=float, default=0.95); p_plan.add_argument("--max-scene", type=float, default=2.7)
+    p_plan.add_argument("--meme-dir", default=None)
 
     p_assets = sub.add_parser("assets", help="Find, rank and download images/videos/memes for a ShotPlan")
     p_assets.add_argument("plan"); p_assets.add_argument("-o", "--output", required=True); p_assets.add_argument("--dir", required=True)
@@ -108,10 +106,10 @@ def main() -> None:
     p_make.add_argument("plan"); p_make.add_argument("-o", "--output", required=True); p_make.add_argument("--work-dir", required=True); p_make.add_argument("--no-captions", action="store_true")
     _add_quality_args(p_make); _add_audio_args(p_make)
 
-    p_create = sub.add_parser("create", help="voiceover -> director -> images/video/memes -> repair -> audio -> MP4")
+    p_create = sub.add_parser("create", help="voiceover -> Editing Brain -> sources -> judge -> render")
     p_create.add_argument("audio"); p_create.add_argument("-o", "--output", required=True); p_create.add_argument("--work-dir", required=True)
-    p_create.add_argument("--model", default="small"); p_create.add_argument("--language", default=None); p_create.add_argument("--pace", type=float, default=2.1)
-    p_create.add_argument("--min-scene", type=float, default=1.25); p_create.add_argument("--max-scene", type=float, default=3.2); p_create.add_argument("--no-captions", action="store_true")
+    p_create.add_argument("--model", default="small"); p_create.add_argument("--language", default=None); p_create.add_argument("--pace", type=float, default=1.7)
+    p_create.add_argument("--min-scene", type=float, default=0.95); p_create.add_argument("--max-scene", type=float, default=2.7); p_create.add_argument("--no-captions", action="store_true")
     _add_quality_args(p_create); _add_audio_args(p_create)
 
     args = parser.parse_args()
@@ -124,8 +122,10 @@ def main() -> None:
         transcript=transcribe_local(args.media,model_size=args.model,language=args.language); output=save_transcript(transcript,args.output)
         print(json.dumps({"ok":True,"output":str(output),"language":transcript.language,"words":len(transcript.words),"duration":round(transcript.duration,3)},ensure_ascii=False,indent=2)); return
     if args.command == "plan":
-        transcript=load_transcript(args.transcript); plan=build_shot_plan(transcript,Path(args.audio),target_scene_seconds=args.pace,min_scene_seconds=args.min_scene,max_scene_seconds=args.max_scene); output=save_shot_plan(plan,args.output)
-        print(json.dumps({"ok":True,"output":str(output),"scenes":len(plan.scenes),"duration":round(plan.scenes[-1].end,3),"director_source":plan.director_source,"director_model":plan.director_model,"visuals":[{"mode":s.visual_mode,"description":s.visual_description,"queries":s.search_queries} for s in plan.scenes]},ensure_ascii=False,indent=2)); return
+        transcript=load_transcript(args.transcript)
+        plan=build_shot_plan(transcript,Path(args.audio),target_scene_seconds=args.pace,min_scene_seconds=args.min_scene,max_scene_seconds=args.max_scene,meme_dir=args.meme_dir)
+        output=save_shot_plan(plan,args.output)
+        print(json.dumps({"ok":True,"output":str(output),"scenes":len(plan.scenes),"duration":round(plan.scenes[-1].end,3),"director_source":plan.director_source,"director_model":plan.director_model,"visuals":[{"mode":s.visual_mode,"source":s.source_mode,"motion":s.motion_preset,"meme":s.meme_filename,"description":s.visual_description,"queries":s.search_queries} for s in plan.scenes]},ensure_ascii=False,indent=2)); return
     if args.command == "assets":
         plan=load_shot_plan(args.plan); manifest=materialize_assets(plan,args.dir,limit=args.limit,overwrite=args.overwrite,semantic=args.semantic,semantic_top_k=args.semantic_top_k,meme_dir=args.meme_dir); output=save_shot_plan(plan,args.output)
         payload={"ok":True,"output":str(output),"downloaded":sum(i.get("status")=="downloaded" for i in manifest),"scenes":len(plan.scenes),"manifest":str(Path(args.dir)/"assets_manifest.json"),"director_source":plan.director_source,"director_model":plan.director_model}
@@ -141,7 +141,7 @@ def main() -> None:
         work=Path(args.work_dir); work.mkdir(parents=True,exist_ok=True)
         if args.command=="create":
             transcript=transcribe_local(args.audio,model_size=args.model,language=args.language); transcript_path=save_transcript(transcript,work/"transcript.json")
-            plan=build_shot_plan(transcript,Path(args.audio),target_scene_seconds=args.pace,min_scene_seconds=args.min_scene,max_scene_seconds=args.max_scene); save_shot_plan(plan,work/"shot_plan.json")
+            plan=build_shot_plan(transcript,Path(args.audio),target_scene_seconds=args.pace,min_scene_seconds=args.min_scene,max_scene_seconds=args.max_scene,meme_dir=args.meme_dir); save_shot_plan(plan,work/"shot_plan.json")
         else:
             transcript_path=None; plan=load_shot_plan(args.plan)
         manifest,qc_results=_resolve_and_repair(plan,work,args); materialized=save_shot_plan(plan,work/"shot_plan.materialized.json")
@@ -149,7 +149,12 @@ def main() -> None:
         original_audio=plan.audio; mixed_audio=_mix_if_requested(plan,audio_plan,work,args); plan.audio=mixed_audio
         try: output=render_plan(plan,args.output,work_dir=work/"render",captions=not args.no_captions)
         finally: plan.audio=original_audio
-        payload={"ok":True,"output":str(output),"plan":str(materialized),"audio_plan":str(audio_plan_path),"mixed_audio":str(mixed_audio),"qc":str(qc_path),"scenes":len(plan.scenes),"downloaded":sum(i.get("status")=="downloaded" for i in manifest),"qc_failed":sorted(failed_scene_indexes(qc_results)),"semantic":bool(args.semantic),"visual_kinds":[s.asset_kind for s in plan.scenes],"visual_modes":[s.visual_mode for s in plan.scenes],"director_source":plan.director_source,"director_model":plan.director_model}
+        payload={
+            "ok":True,"output":str(output),"plan":str(materialized),"audio_plan":str(audio_plan_path),"mixed_audio":str(mixed_audio),"qc":str(qc_path),
+            "scenes":len(plan.scenes),"downloaded":sum(i.get("status")=="downloaded" for i in manifest),"qc_failed":sorted(failed_scene_indexes(qc_results)),"semantic":bool(args.semantic),
+            "visual_kinds":[s.asset_kind for s in plan.scenes],"visual_modes":[s.visual_mode for s in plan.scenes],"source_modes":[s.source_mode for s in plan.scenes],"motion_presets":[s.motion_preset for s in plan.scenes],"meme_files":[s.meme_filename for s in plan.scenes],
+            "director_source":plan.director_source,"director_model":plan.director_model,
+        }
         payload.update(_gemini_manifest_stats(manifest))
         if transcript_path is not None: payload["transcript"]=str(transcript_path)
         print(json.dumps(payload,ensure_ascii=False,indent=2)); return
