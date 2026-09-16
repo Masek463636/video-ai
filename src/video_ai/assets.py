@@ -15,10 +15,11 @@ from .openverse import search_openverse
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/0.4 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/0.5 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 80 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
+_FALLBACK_MOTIONS = ("zoom_in", "pan_right", "zoom_out", "pan_left")
 
 
 @dataclass(slots=True)
@@ -108,34 +109,35 @@ def search_commons(query: str, *, limit: int = 20) -> list[AssetCandidate]:
 
 
 def search_all(query: str, *, limit: int = 20) -> list[AssetCandidate]:
-    out: list[AssetCandidate] = []
+    """Search every free provider and deduplicate by the downloadable URL."""
+    pool: dict[str, AssetCandidate] = {}
     try:
-        out.extend(search_commons(query, limit=limit))
+        for candidate in search_commons(query, limit=limit):
+            pool.setdefault(candidate.download_url, candidate)
     except Exception:
         pass
     try:
         for item in search_openverse(query, limit=limit):
-            out.append(
-                AssetCandidate(
-                    title=item.title,
-                    page_url=item.page_url,
-                    download_url=item.download_url,
-                    mime="image/jpeg",
-                    width=item.width,
-                    height=item.height,
-                    size=0,
-                    kind="image",
-                    license=item.license,
-                    license_url=item.license_url,
-                    artist=item.artist,
-                    credit=item.artist,
-                    description=item.description,
-                    source="openverse",
-                )
+            candidate = AssetCandidate(
+                title=item.title,
+                page_url=item.page_url,
+                download_url=item.download_url,
+                mime="image/jpeg",
+                width=item.width,
+                height=item.height,
+                size=0,
+                kind="image",
+                license=item.license,
+                license_url=item.license_url,
+                artist=item.artist,
+                credit=item.artist,
+                description=item.description,
+                source="openverse",
             )
+            pool.setdefault(candidate.download_url, candidate)
     except Exception:
         pass
-    return out
+    return list(pool.values())
 
 
 def materialize_assets(
@@ -149,6 +151,12 @@ def materialize_assets(
     replace_scenes: set[int] | None = None,
     rank_offset: int = 0,
 ) -> list[dict]:
+    """Resolve every scene to a visual and guarantee best-effort visual coverage.
+
+    V0.5 resolves scenes in two phases. Phase one searches/ranks/downloads real
+    assets. Phase two fills any holes from the nearest successfully resolved scene,
+    including *future* scenes, so an early miss cannot become a black opening.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     replace_scenes = replace_scenes or set()
@@ -173,16 +181,23 @@ def materialize_assets(
 
         pool: dict[str, tuple[AssetCandidate, str]] = {}
         variants = list(_query_variants(scene.query, scene.caption))
+        english_context = _simple_ru_concepts(f"{scene.query} {scene.caption or ''}")
+
         for query_index, variant in enumerate(variants):
             for candidate in search_all(variant, limit=limit):
                 if candidate.download_url in used_urls:
                     continue
-                score = _score(candidate, scene.query, scene.caption or "")
-                score -= query_index * 0.35
+
+                # Critical V0.5 fix: score English metadata against the English
+                # retrieval meaning, not only against the original Russian words.
+                ranking_query = " ".join(x for x in (variant, english_context) if x).strip()
+                score = _score(candidate, ranking_query, english_context)
+                score -= query_index * 0.28
                 score -= _repeat_penalty(candidate.title, used_titles)
                 if candidate.source == "openverse":
                     score += 0.4
                 candidate.score = score
+
                 existing = pool.get(candidate.download_url)
                 if existing is None or candidate.score > existing[0].score:
                     pool[candidate.download_url] = (candidate, variant)
@@ -200,7 +215,11 @@ def materialize_assets(
             candidate_target = out_dir / f"scene_{index:03d}{suffix}"
             try:
                 _download(candidate.download_url, candidate_target)
+                if not candidate_target.exists() or candidate_target.stat().st_size < 1024:
+                    candidate_target.unlink(missing_ok=True)
+                    continue
             except Exception:
+                candidate_target.unlink(missing_ok=True)
                 continue
             chosen = candidate
             search_used = search
@@ -208,26 +227,11 @@ def materialize_assets(
             break
 
         if chosen is None or target is None:
-            fallback = _fallback_asset(plan, index)
-            if fallback is not None:
-                scene.asset = fallback.asset
-                scene.asset_kind = fallback.asset_kind
-                scene.focus_x = fallback.focus_x
-                scene.focus_y = fallback.focus_y
-                scene.focus_source = "fallback_previous"
-                scene.asset_score = fallback.asset_score
-                scene.semantic_score = fallback.semantic_score
-                manifest.append({
-                    "scene": index,
-                    "status": "fallback_previous",
-                    "query": scene.query,
-                    "queries_tried": variants,
-                    "path": scene.asset,
-                })
-                continue
-
             scene.asset = None
             scene.asset_kind = "blank"
+            scene.focus_x = None
+            scene.focus_y = None
+            scene.focus_source = None
             scene.asset_score = None
             scene.semantic_score = None
             manifest.append({
@@ -271,18 +275,68 @@ def materialize_assets(
             **asdict(chosen),
         })
 
+    ensure_visual_coverage(plan, manifest)
     (out_dir / "assets_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return manifest
 
 
-def _fallback_asset(plan: ShotPlan, index: int) -> Scene | None:
-    for previous in range(index - 1, -1, -1):
-        scene = plan.scenes[previous]
+def ensure_visual_coverage(plan: ShotPlan, manifest: list[dict] | None = None) -> set[int]:
+    """Fill unresolved scenes from the nearest real asset, forward or backward.
+
+    This is intentionally a last-resort continuity layer. Search/QC can still mark
+    reused visuals as weak and try replacing them, but the renderer no longer gets
+    a black opening just because scene 0 failed while scene 3 succeeded.
+    """
+    good = [
+        index
+        for index, scene in enumerate(plan.scenes)
+        if scene.asset and Path(scene.asset).exists() and scene.asset_kind != "blank"
+    ]
+    if not good:
+        return set()
+
+    filled: set[int] = set()
+    by_scene = {
+        int(item.get("scene")): item
+        for item in (manifest or [])
+        if isinstance(item.get("scene"), int)
+    }
+
+    for index, scene in enumerate(plan.scenes):
         if scene.asset and Path(scene.asset).exists() and scene.asset_kind != "blank":
-            return scene
-    return None
+            continue
+
+        source_index = min(
+            good,
+            key=lambda other: (abs(other - index), 0 if other < index else 1, other),
+        )
+        source = plan.scenes[source_index]
+        scene.asset = source.asset
+        scene.asset_kind = source.asset_kind
+        scene.focus_x = source.focus_x
+        scene.focus_y = source.focus_y
+        scene.focus_source = f"fallback_nearest:{source_index}"
+        scene.asset_score = source.asset_score
+        scene.semantic_score = source.semantic_score
+        scene.motion = _FALLBACK_MOTIONS[index % len(_FALLBACK_MOTIONS)]  # type: ignore[assignment]
+        filled.add(index)
+
+        item = by_scene.get(index)
+        if item is not None:
+            item["status"] = "fallback_nearest"
+            item["fallback_from_scene"] = source_index
+            item["path"] = scene.asset
+        elif manifest is not None:
+            manifest.append({
+                "scene": index,
+                "status": "fallback_nearest",
+                "fallback_from_scene": source_index,
+                "path": scene.asset,
+            })
+
+    return filled
 
 
 def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, top_k: int) -> None:
@@ -295,7 +349,7 @@ def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, 
     except Exception:
         return
 
-    prompt = (scene.caption or scene.query or "").strip()
+    prompt = _semantic_prompt(scene)
     with tempfile.TemporaryDirectory(prefix="video-ai-clip-") as temp_dir:
         paths: list[Path] = []
         valid: list[AssetCandidate] = []
@@ -316,6 +370,12 @@ def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, 
         for candidate, similarity in zip(valid, similarities):
             candidate.semantic_score = float(similarity)
             candidate.score += float(similarity) * 24.0
+
+
+def _semantic_prompt(scene: Scene) -> str:
+    original = f"{scene.query} {scene.caption or ''}".strip()
+    concepts = _simple_ru_concepts(original)
+    return concepts or (scene.caption or scene.query or "people documentary photo").strip()
 
 
 def _apply_focus(scene: Scene, path: Path) -> None:
@@ -412,11 +472,21 @@ def _query_variants(query: str, caption: str | None) -> Iterable[str]:
     seen: set[str] = set()
     query = re.sub(r"\s+", " ", query).strip()
     caption = re.sub(r"\s+", " ", caption or "").strip()
-    concepts = _simple_ru_concepts(query + " " + caption)
-    tokens = list(_tokens(query + " " + caption))
+    full_text = f"{query} {caption}".strip()
+    concepts = _simple_ru_concepts(full_text)
+    tokens = list(_tokens(full_text))
     keywords = " ".join(tokens[:5])
     broad = " ".join(tokens[:2])
-    base = [concepts, query, keywords, broad, caption]
+
+    base = [
+        concepts,
+        *_generic_visual_queries(full_text),
+        query,
+        keywords,
+        broad,
+        caption,
+        "people documentary photo",
+    ]
     for value in base:
         value = re.sub(r"\s+", " ", value).strip()
         lowered = value.lower()
@@ -425,13 +495,38 @@ def _query_variants(query: str, caption: str | None) -> Iterable[str]:
             yield value
 
 
+def _generic_visual_queries(text: str) -> list[str]:
+    lowered = text.lower()
+    queries: list[str] = []
+    rules: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+        (("экзам", "тест", "учеб"), ("student exam", "student classroom", "student studying")),
+        (("стресс", "нерв", "расстро", "груст"), ("stressed person", "worried young man", "sad person portrait")),
+        (("чиновник", "правитель", "власт"), ("government office", "government official", "historic government building")),
+        (("китай", "китайск"), ("China historical", "Chinese people historical", "China city")),
+        (("сон", "спал", "снилось"), ("sleeping person dream", "surreal dream", "person sleeping")),
+        (("галлюцин", "виден", "увидел"), ("surreal vision", "dream vision", "dramatic portrait")),
+        (("иисус", "христ", "религи", "бог"), ("Jesus painting", "religious painting", "Christian art")),
+        (("арм", "солдат", "войск"), ("soldiers army historical", "military formation", "historical soldiers")),
+        (("восстан", "бунт", "битв"), ("historical rebellion", "battle painting", "crowd uprising")),
+        (("деньг", "цена", "миллион", "тысяч"), ("money cash", "finance concept", "counting money")),
+        (("телефон", "сообщен", "звон"), ("person using smartphone", "smartphone closeup", "phone notification")),
+        (("машин", "авто"), ("car driving", "car road", "car interior")),
+        (("компьют", "ютуб", "видео"), ("computer screen creator", "video creator desk", "camera filming")),
+        (("дом", "квартир"), ("home interior", "apartment room", "house exterior")),
+    )
+    for stems, variants in rules:
+        if any(stem in lowered for stem in stems):
+            queries.extend(variants)
+    return list(dict.fromkeys(queries))
+
+
 def _simple_ru_concepts(text: str) -> str:
     lowered = text.lower()
     rules = {
         "экзам": "student exam classroom",
-        "госэкзам": "student exam government",
+        "госэкзам": "student civil service exam",
         "чиновник": "government official office",
-        "стресс": "stressed person worried",
+        "стресс": "stressed worried person",
         "тест": "student taking test classroom",
         "универ": "university student campus",
         "учеб": "student studying desk",
@@ -454,6 +549,16 @@ def _simple_ru_concepts(text: str) -> str:
         "страш": "scared person dark",
         "ноч": "night city dark",
         "дом": "home apartment interior",
+        "китай": "China Chinese historical",
+        "сон": "sleeping person dream",
+        "галлюцин": "surreal hallucination vision",
+        "иисус": "Jesus Christian religious painting",
+        "христ": "Jesus Christian religious painting",
+        "бог": "religious painting divine vision",
+        "арм": "soldiers army historical",
+        "солдат": "soldiers army historical",
+        "восстан": "historical rebellion uprising",
+        "битв": "historical battle painting",
     }
     concepts = [value for stem, value in rules.items() if stem in lowered]
     return " ".join(dict.fromkeys(concepts))
