@@ -18,11 +18,10 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/0.9 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.0 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
-_FALLBACK_MOTIONS = ("zoom_in", "pan_right", "zoom_out", "pan_left")
 
 
 @dataclass(slots=True)
@@ -98,13 +97,22 @@ def search_commons(query: str, *, limit: int = 20) -> list[AssetCandidate]:
     return out
 
 
-def search_all(query: str, *, limit: int = 20, include_stock_video: bool = False) -> list[AssetCandidate]:
+def search_all(
+    query: str,
+    *,
+    limit: int = 20,
+    include_stock_video: bool = False,
+    archive_only: bool = False,
+) -> list[AssetCandidate]:
     pool: dict[str, AssetCandidate] = {}
     try:
         for candidate in search_commons(query, limit=limit):
             pool.setdefault(candidate.download_url, candidate)
     except Exception:
         pass
+
+    # Openverse is allowed for archive/generic imagery but never used as a source
+    # of modern stock video.
     try:
         for item in search_openverse(query, limit=limit):
             candidate = AssetCandidate(
@@ -126,7 +134,8 @@ def search_all(query: str, *, limit: int = 20, include_stock_video: bool = False
             pool.setdefault(candidate.download_url, candidate)
     except Exception:
         pass
-    if include_stock_video:
+
+    if include_stock_video and not archive_only:
         try:
             for item in search_stock_videos(query, limit=min(limit, 16)):
                 candidate = AssetCandidate(
@@ -187,9 +196,14 @@ def materialize_assets(
         pool: dict[str, tuple[AssetCandidate, str]] = {}
         variants = list(_query_variants(scene))
 
-        if scene.visual_mode == "meme":
-            for meme in search_memes(meme_dir, scene.visual_description or scene.query, limit=12):
+        if scene.visual_mode == "meme" or scene.source_mode == "meme_library":
+            meme_candidates = search_memes(meme_dir, scene.visual_description or scene.query, limit=20)
+            # Exact filename selected by Gemini is a hard priority when available.
+            if scene.meme_filename:
+                meme_candidates.sort(key=lambda m: 0 if m.path.name == scene.meme_filename else 1)
+            for meme in meme_candidates:
                 key = f"local:{meme.path.resolve()}"
+                exact_bonus = 100.0 if scene.meme_filename and meme.path.name == scene.meme_filename else 0.0
                 pool[key] = (
                     AssetCandidate(
                         title=meme.title,
@@ -203,26 +217,42 @@ def materialize_assets(
                         license="local user library",
                         source="local_meme",
                         local_path=str(meme.path.resolve()),
-                        score=20.0 + meme.score,
+                        score=30.0 + meme.score + exact_bonus,
                     ),
                     "local meme library",
                 )
 
-        for query_index, variant in enumerate(variants):
-            include_stock = scene.visual_mode == "video"
-            for candidate in search_all(variant, limit=limit, include_stock_video=include_stock):
-                if candidate.download_url in used_urls:
-                    continue
-                ranking_query = " ".join(x for x in (variant, scene.visual_description or "") if x).strip()
-                candidate.score = (
-                    _score(candidate, ranking_query, scene.visual_description or "")
-                    + _visual_mode_bonus(scene, candidate)
-                    - query_index * 0.32
-                    - _repeat_penalty(candidate.title, used_titles)
-                )
-                existing = pool.get(candidate.download_url)
-                if existing is None or candidate.score > existing[0].score:
-                    pool[candidate.download_url] = (candidate, variant)
+        archive_only = scene.source_mode == "historical_archive"
+        include_stock = scene.source_mode == "stock_video" or (
+            scene.source_mode == "auto" and scene.visual_mode == "video"
+        )
+
+        # A meme-library scene should not wander onto the public stock providers
+        # unless no local meme exists at all.
+        allow_public = scene.source_mode != "meme_library" or not pool
+        if allow_public:
+            for query_index, variant in enumerate(variants):
+                for candidate in search_all(
+                    variant,
+                    limit=limit,
+                    include_stock_video=include_stock,
+                    archive_only=archive_only,
+                ):
+                    if candidate.download_url in used_urls:
+                        continue
+                    if not _source_allowed(scene, candidate):
+                        continue
+                    ranking_query = " ".join(x for x in (variant, scene.visual_description or "") if x).strip()
+                    candidate.score = (
+                        _score(candidate, ranking_query, scene.visual_description or "")
+                        + _visual_mode_bonus(scene, candidate)
+                        + _source_mode_bonus(scene, candidate)
+                        - query_index * 0.32
+                        - _repeat_penalty(candidate.title, used_titles)
+                    )
+                    existing = pool.get(candidate.download_url)
+                    if existing is None or candidate.score > existing[0].score:
+                        pool[candidate.download_url] = (candidate, variant)
 
         ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
         if semantic and ranked:
@@ -281,10 +311,12 @@ def materialize_assets(
             chosen, target, search_used = candidate, candidate_target, search
             break
 
-        # Reliability over perfection: after three Gemini rejections, take the next
-        # rankable candidate rather than producing a black scene.
+        # Do not black-screen after judge rejections. Take a legal fallback from
+        # the same source policy instead of crossing into a forbidden provider.
         if chosen is None and ranked:
             for candidate, search in ranked[max(0, rank_offset) + gemini_checks:]:
+                if not _source_allowed(scene, candidate):
+                    continue
                 suffix = _suffix(candidate)
                 candidate_target = out_dir / f"scene_{index:03d}{suffix}"
                 try:
@@ -312,6 +344,8 @@ def materialize_assets(
                 "status": "not_found",
                 "query": scene.query,
                 "visual_mode": scene.visual_mode,
+                "source_mode": scene.source_mode,
+                "motion_preset": scene.motion_preset,
                 "visual_description": scene.visual_description,
                 "queries_tried": variants,
                 "gemini_rejected": rejected,
@@ -330,6 +364,9 @@ def materialize_assets(
             "status": "downloaded",
             "query": scene.query,
             "visual_mode": scene.visual_mode,
+            "source_mode": scene.source_mode,
+            "motion_preset": scene.motion_preset,
+            "meme_filename": scene.meme_filename,
             "visual_description": scene.visual_description,
             "queries_tried": variants,
             "search_used": search_used,
@@ -368,7 +405,14 @@ def ensure_visual_coverage(plan: ShotPlan, manifest: list[dict] | None = None) -
     for index, scene in enumerate(plan.scenes):
         if scene.asset and Path(scene.asset).exists() and scene.asset_kind != "blank":
             continue
-        source_index = min(good, key=lambda other: (abs(other - index), 0 if other < index else 1, other))
+        # Prefer a fallback with the same source intent. This prevents an archive
+        # miss from suddenly becoming modern stock footage.
+        compatible = [
+            i for i in good
+            if plan.scenes[i].source_mode == scene.source_mode
+            or scene.source_mode in {"auto", "generic_image"}
+        ] or good
+        source_index = min(compatible, key=lambda other: (abs(other - index), 0 if other < index else 1, other))
         source = plan.scenes[source_index]
         scene.asset = source.asset
         scene.asset_kind = source.asset_kind
@@ -377,27 +421,53 @@ def ensure_visual_coverage(plan: ShotPlan, manifest: list[dict] | None = None) -
         scene.focus_source = f"fallback_nearest:{source_index}"
         scene.asset_score = source.asset_score
         scene.semantic_score = source.semantic_score
-        scene.motion = _FALLBACK_MOTIONS[index % len(_FALLBACK_MOTIONS)]  # type: ignore[assignment]
+        scene.motion_preset = "micro_push" if source.asset_kind == "video" else "slow_push"
         filled.add(index)
         if index in by_scene:
             by_scene[index].update({"status": "fallback_nearest", "fallback_from_scene": source_index, "path": scene.asset})
     return filled
 
 
+def _source_allowed(scene: Scene, candidate: AssetCandidate) -> bool:
+    if scene.source_mode == "historical_archive":
+        return candidate.source in {"commons", "openverse"} and candidate.kind == "image"
+    if scene.source_mode == "stock_video":
+        return candidate.source in {"pexels", "pixabay", "commons", "openverse"}
+    if scene.source_mode == "meme_library":
+        return candidate.source == "local_meme"
+    if scene.source_mode == "generic_image":
+        return candidate.kind == "image"
+    return True
+
+
 def _query_variants(scene: Scene) -> Iterable[str]:
     seen: set[str] = set()
     base = [*(scene.search_queries or []), scene.visual_description or "", scene.query]
-    if scene.visual_mode == "video":
-        base += [f"{scene.visual_description or scene.query} documentary footage", "historical documentary footage"]
+    if scene.source_mode == "historical_archive":
+        base += [f"{scene.visual_description or scene.query} archival engraving", f"{scene.visual_description or scene.query} historical painting"]
+    elif scene.visual_mode == "video":
+        base += [f"{scene.visual_description or scene.query} documentary footage", f"{scene.visual_description or scene.query} b roll"]
     elif scene.visual_mode == "meme":
-        base += [f"{scene.visual_description or scene.query} reaction", "funny reaction face meme"]
+        base += [f"{scene.visual_description or scene.query} reaction"]
     else:
-        base += [f"{scene.visual_description or scene.query} archival photo"]
+        base += [f"{scene.visual_description or scene.query} photo illustration"]
     for value in base:
         value = re.sub(r"\s+", " ", value).strip()
         if value and value.lower() not in seen:
             seen.add(value.lower())
             yield value
+
+
+def _source_mode_bonus(scene: Scene, candidate: AssetCandidate) -> float:
+    if scene.source_mode == "historical_archive":
+        return 30.0 if candidate.source == "commons" else 16.0 if candidate.source == "openverse" else -100.0
+    if scene.source_mode == "stock_video":
+        return 22.0 if candidate.source in {"pexels", "pixabay"} and candidate.kind == "video" else 2.0
+    if scene.source_mode == "meme_library":
+        return 100.0 if candidate.source == "local_meme" else -100.0
+    if scene.source_mode == "generic_image":
+        return 8.0 if candidate.kind == "image" else -10.0
+    return 0.0
 
 
 def _visual_mode_bonus(scene: Scene, candidate: AssetCandidate) -> float:
@@ -406,10 +476,7 @@ def _visual_mode_bonus(scene: Scene, candidate: AssetCandidate) -> float:
     if scene.visual_mode == "image":
         return 4.0 if candidate.kind == "image" else -1.0
     if scene.visual_mode == "meme":
-        if candidate.source == "local_meme":
-            return 25.0
-        haystack = f"{candidate.title} {candidate.description}".lower()
-        return 8.0 if any(word in haystack for word in ("meme", "reaction", "funny", "laugh", "surprise")) else 0.0
+        return 30.0 if candidate.source == "local_meme" else -10.0
     return 0.0
 
 
