@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .models import MotionKind, Scene, ShotPlan, Transcript, Word
+from .models import MotionKind, Scene, ShotPlan, Transcript, VisualMode, Word
 
 
 _SENTENCE_END = re.compile(r"[.!?…]+$")
@@ -28,7 +28,7 @@ _GLOBAL_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("китай", "китайск"), "China Chinese"),
     (("тайпин",), "Taiping Rebellion"),
     (("сюцюан", "хун сю", "hong xiu"), "Hong Xiuquan"),
-    (("ссср", "советск", "советск"), "Soviet Union Soviet"),
+    (("ссср", "советск"), "Soviet Union Soviet"),
     (("украин",), "Ukraine Ukrainian"),
     (("росси", "русск"), "Russia Russian"),
     (("америк", "сша"), "United States American"),
@@ -65,6 +65,17 @@ _HISTORY_STEMS = (
     "битв", "револю", "xix", "xviii", "xx век",
 )
 
+_VIDEO_STEMS = (
+    "идет", "идут", "беж", "летит", "летел", "едет", "едут", "горит", "взрыв",
+    "арм", "солдат", "войск", "битв", "восстан", "толп", "марш", "атак", "стрел",
+    "поех", "плыв", "движ", "танцу", "дерет", "сраж",
+)
+
+_MEME_STEMS = (
+    "вдруг", "и тут", "прикол", "шок", "жесть", "серьезно", "неожидан", "пиздец",
+    "лол", "смеш", "офиг", "охрен", "что за", "ну и",
+)
+
 
 def build_shot_plan(
     transcript: Transcript,
@@ -76,10 +87,8 @@ def build_shot_plan(
 ) -> ShotPlan:
     """Turn word timestamps into context-aware short-form scenes.
 
-    V0.6 keeps the director local/deterministic, but it no longer treats every
-    2-second chunk as an isolated sentence. A global visual context is inferred
-    from the whole narration and injected into every scene query. This prevents a
-    historical China story from suddenly searching for a modern generic student.
+    V0.7 adds visual intent. Each scene gets an image/video/meme preference so
+    the renderer is no longer fed a monotonous sequence of still photos.
     """
     if min_scene_seconds <= 0 or target_scene_seconds < min_scene_seconds:
         raise ValueError("invalid scene duration settings")
@@ -101,6 +110,7 @@ def build_shot_plan(
         previous_caption = captions[index - 1] if index > 0 else ""
         next_caption = captions[index + 1] if index + 1 < len(captions) else ""
         neighborhood = " ".join(x for x in (previous_caption, caption, next_caption) if x)
+        visual_mode = _choose_visual_mode(caption, index=index, duration=words[-1].end - words[0].start)
         scenes.append(
             Scene(
                 start=round(words[0].start, 3),
@@ -109,10 +119,24 @@ def build_shot_plan(
                 asset_kind="blank",
                 motion=_MOTIONS[index % len(_MOTIONS)],
                 caption=caption,
+                visual_mode=visual_mode,
             )
         )
 
     return ShotPlan(audio=Path(audio), scenes=scenes)
+
+
+def _choose_visual_mode(text: str, *, index: int, duration: float) -> VisualMode:
+    lowered = text.lower()
+    if any(stem in lowered for stem in _MEME_STEMS):
+        return "meme"
+    if any(stem in lowered for stem in _VIDEO_STEMS):
+        return "video"
+    # Force some motion variety in otherwise static narration. The source search
+    # can still fall back to an image if no suitable open video exists.
+    if index > 0 and index % 3 == 0 and duration >= 1.6:
+        return "video"
+    return "image"
 
 
 def _chunk_words(
@@ -214,8 +238,6 @@ def _global_visual_context(text: str) -> str:
     if historical:
         parts.append("historical archival illustration")
 
-    # Strong cross-context hints. These are still generic rules, not tied to one
-    # benchmark: country + era should influence every shot in the story.
     joined = " ".join(parts).lower()
     if "china" in joined and "19th century" in joined:
         parts.append("Qing dynasty")
