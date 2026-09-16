@@ -5,9 +5,11 @@ import json
 from pathlib import Path
 
 from .assets import materialize_assets
+from .audio_plan import build_audio_plan, save_audio_plan
 from .director import build_shot_plan
 from .io import load_shot_plan, save_shot_plan
 from .probe import probe
+from .qc import inspect_plan, save_qc
 from .renderer import render_plan
 from .transcript import load_transcript, save_transcript, transcribe_local
 
@@ -43,6 +45,14 @@ def main() -> None:
     p_assets.add_argument("--limit", type=int, default=20, help="Commons candidates per search")
     p_assets.add_argument("--overwrite", action="store_true")
 
+    p_audio = sub.add_parser("audio-plan", help="Plan music mood and SFX cues from a ShotPlan")
+    p_audio.add_argument("plan")
+    p_audio.add_argument("-o", "--output", required=True)
+
+    p_qc = sub.add_parser("qc", help="Run local quality checks on a materialized ShotPlan")
+    p_qc.add_argument("plan")
+    p_qc.add_argument("-o", "--output", required=True)
+
     p_render = sub.add_parser("render", help="Render a materialized ShotPlan to MP4")
     p_render.add_argument("plan")
     p_render.add_argument("-o", "--output", required=True)
@@ -57,7 +67,7 @@ def main() -> None:
     p_make.add_argument("--limit", type=int, default=20)
     p_make.add_argument("--no-captions", action="store_true")
 
-    p_create = sub.add_parser("create", help="One command: voiceover -> transcript -> scenes -> ranked assets -> MP4")
+    p_create = sub.add_parser("create", help="One command: voiceover -> transcript -> scenes -> ranked assets -> QC -> MP4")
     p_create.add_argument("audio")
     p_create.add_argument("-o", "--output", required=True)
     p_create.add_argument("--work-dir", required=True)
@@ -121,6 +131,30 @@ def main() -> None:
         }, ensure_ascii=False, indent=2))
         return
 
+    if args.command == "audio-plan":
+        plan = load_shot_plan(args.plan)
+        audio_plan = build_audio_plan(plan)
+        output = save_audio_plan(audio_plan, args.output)
+        print(json.dumps({
+            "ok": True,
+            "output": str(output),
+            "mood": audio_plan.mood,
+            "cues": len(audio_plan.cues),
+        }, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "qc":
+        plan = load_shot_plan(args.plan)
+        results = inspect_plan(plan)
+        output = save_qc(results, args.output)
+        print(json.dumps({
+            "ok": all(item.ok for item in results),
+            "output": str(output),
+            "average_score": round(sum(item.score for item in results) / max(1, len(results)), 3),
+            "failed_scenes": [item.scene for item in results if not item.ok],
+        }, ensure_ascii=False, indent=2))
+        return
+
     if args.command == "render":
         plan = load_shot_plan(args.plan)
         output = render_plan(
@@ -133,14 +167,20 @@ def main() -> None:
     if args.command == "make":
         plan = load_shot_plan(args.plan)
         work = Path(args.work_dir)
+        work.mkdir(parents=True, exist_ok=True)
         manifest = materialize_assets(plan, work / "assets", limit=args.limit)
         materialized = save_shot_plan(plan, work / "shot_plan.materialized.json")
+        audio_plan_path = save_audio_plan(build_audio_plan(plan), work / "audio_plan.json")
+        qc_results = inspect_plan(plan)
+        qc_path = save_qc(qc_results, work / "qc.json")
         output = render_plan(
             plan, args.output, work_dir=work / "render", captions=not args.no_captions
         )
         print(json.dumps({
             "ok": True, "output": str(output), "plan": str(materialized),
+            "audio_plan": str(audio_plan_path), "qc": str(qc_path),
             "downloaded": sum(item.get("status") == "downloaded" for item in manifest),
+            "qc_failed": [item.scene for item in qc_results if not item.ok],
         }, ensure_ascii=False, indent=2))
         return
 
@@ -156,6 +196,9 @@ def main() -> None:
         save_shot_plan(plan, work / "shot_plan.json")
         manifest = materialize_assets(plan, work / "assets", limit=args.limit)
         materialized = save_shot_plan(plan, work / "shot_plan.materialized.json")
+        audio_plan_path = save_audio_plan(build_audio_plan(plan), work / "audio_plan.json")
+        qc_results = inspect_plan(plan)
+        qc_path = save_qc(qc_results, work / "qc.json")
         output = render_plan(
             plan, args.output, work_dir=work / "render", captions=not args.no_captions
         )
@@ -164,8 +207,11 @@ def main() -> None:
             "output": str(output),
             "transcript": str(transcript_path),
             "plan": str(materialized),
+            "audio_plan": str(audio_plan_path),
+            "qc": str(qc_path),
             "scenes": len(plan.scenes),
             "downloaded": sum(item.get("status") == "downloaded" for item in manifest),
+            "qc_failed": [item.scene for item in qc_results if not item.ok],
         }, ensure_ascii=False, indent=2))
         return
 
