@@ -62,17 +62,23 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     base = path.parent.resolve()
 
-    def relative(value: str | Path | None) -> str | None:
+    def portable(value: str | Path | None) -> str | None:
+        """Store paths relative to the plan only when the target is actually inside it.
+
+        Older versions returned the original relative string on failure. A plan saved
+        inside work/ therefore turned voice.mp3 into work/voice.mp3 when reloaded.
+        Outside paths are now stored as absolute paths so rerendering is reliable.
+        """
         if value is None:
             return None
-        p = Path(value)
+        resolved = Path(value).resolve()
         try:
-            return str(p.resolve().relative_to(base))
+            return str(resolved.relative_to(base))
         except (ValueError, OSError):
-            return str(p)
+            return str(resolved)
 
     payload = {
-        "audio": relative(plan.audio),
+        "audio": portable(plan.audio),
         "width": plan.width,
         "height": plan.height,
         "fps": plan.fps,
@@ -83,7 +89,7 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "start": scene.start,
                 "end": scene.end,
                 "query": scene.query,
-                "asset": relative(scene.asset),
+                "asset": portable(scene.asset),
                 "asset_kind": scene.asset_kind,
                 "motion": scene.motion,
                 "caption": scene.caption,
