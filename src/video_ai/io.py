@@ -32,6 +32,9 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
                 asset_kind=raw.get("asset_kind", "blank"),
                 motion=raw.get("motion", "none"),
                 caption=raw.get("caption"),
+                focus_x=(float(raw["focus_x"]) if raw.get("focus_x") is not None else None),
+                focus_y=(float(raw["focus_y"]) if raw.get("focus_y") is not None else None),
+                focus_source=raw.get("focus_source"),
             )
         )
 
@@ -75,6 +78,9 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "asset_kind": scene.asset_kind,
                 "motion": scene.motion,
                 "caption": scene.caption,
+                "focus_x": scene.focus_x,
+                "focus_y": scene.focus_y,
+                "focus_source": scene.focus_source,
             }
             for scene in plan.scenes
         ],
@@ -98,3 +104,6 @@ def validate_shot_plan(plan: ShotPlan) -> None:
         previous_end = scene.end
         if scene.asset_kind != "blank" and not scene.asset:
             raise ValueError(f"scene {index}: asset_kind={scene.asset_kind!r} requires asset")
+        for name, value in (("focus_x", scene.focus_x), ("focus_y", scene.focus_y)):
+            if value is not None and not 0.0 <= value <= 1.0:
+                raise ValueError(f"scene {index}: {name} must be between 0 and 1")
