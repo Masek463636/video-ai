@@ -51,12 +51,14 @@ def transcribe_local(
     *,
     model_size: str = "small",
     language: str | None = None,
+    device: str = "cpu",
 ) -> Transcript:
-    """Transcribe locally with faster-whisper when the optional extra is installed.
+    """Transcribe locally with faster-whisper.
 
-    The model downloads once on first use and then runs locally. Keeping this behind
-    an optional import means the core renderer remains lightweight and free of paid
-    transcription APIs.
+    CPU/int8 is the default for the MVP because it works on ordinary Windows
+    machines without requiring a CUDA/cuBLAS/cuDNN installation. GPU support can
+    be exposed later as an explicit opt-in once the required NVIDIA runtime is
+    present and verified.
     """
     try:
         from faster_whisper import WhisperModel
@@ -66,7 +68,9 @@ def transcribe_local(
             "pip install 'video-ai[transcribe]'"
         ) from exc
 
-    model = WhisperModel(model_size, device="auto", compute_type="int8")
+    selected_device = (device or "cpu").lower()
+    compute_type = "int8" if selected_device == "cpu" else "float16"
+    model = WhisperModel(model_size, device=selected_device, compute_type=compute_type)
     segments, info = model.transcribe(
         str(media),
         language=language,
