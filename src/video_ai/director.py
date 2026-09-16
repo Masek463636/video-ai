@@ -70,7 +70,50 @@ def build_shot_plan(transcript: Transcript, audio: str | Path, *, target_scene_s
             query=queries[0], search_queries=queries, visual_description=description,
             asset_kind="blank", motion=_MOTIONS[index % len(_MOTIONS)], caption=caption, visual_mode=mode,
         ))
+
+    _apply_gemini_direction(full_text, scenes)
     return ShotPlan(audio=Path(audio), scenes=scenes)
+
+
+def _apply_gemini_direction(full_text: str, scenes: list[Scene]) -> None:
+    try:
+        from .gemini_ai import get_gemini_client
+        client = get_gemini_client()
+        if client is None:
+            return
+        directed = client.direct(full_text, scenes)
+    except Exception:
+        return
+
+    by_index = {int(item.get("index")): item for item in directed if str(item.get("index", "")).isdigit()}
+    for index, scene in enumerate(scenes):
+        item = by_index.get(index)
+        if not item:
+            continue
+        mode = str(item.get("visual_mode", scene.visual_mode)).lower().strip()
+        if mode in {"image", "video", "meme", "auto"}:
+            scene.visual_mode = mode  # type: ignore[assignment]
+        description = str(item.get("visual_description", "")).strip()
+        if description:
+            scene.visual_description = description[:500]
+        queries = item.get("search_queries") or []
+        cleaned = []
+        seen = set()
+        for value in queries:
+            q = re.sub(r"\s+", " ", str(value)).strip()
+            if q and q.lower() not in seen:
+                seen.add(q.lower())
+                cleaned.append(q[:180])
+            if len(cleaned) >= 5:
+                break
+        if cleaned:
+            scene.search_queries = cleaned
+            scene.query = cleaned[0]
+        if scene.visual_mode == "meme":
+            tags = item.get("meme_tags") or []
+            meme_query = " ".join(str(tag).strip() for tag in tags if str(tag).strip())
+            if meme_query:
+                scene.visual_description = f"{scene.visual_description or ''} {meme_query} reaction meme".strip()
 
 
 def _visual_description(text: str, global_context: str, neighborhood: str, mode: VisualMode) -> str:
@@ -86,12 +129,11 @@ def _search_queries(text: str, global_context: str, neighborhood: str, mode: Vis
     suffix = "video b roll" if mode == "video" else "reaction meme" if mode == "meme" else "photo illustration"
     candidates = [
         f"{global_context} {hints[0] if hints else ''} {suffix}",
-        f"{description}",
+        description,
         f"{global_context} {local_keywords} {suffix}",
         f"{hints[0] if hints else local_keywords} {suffix}",
     ]
-    out: list[str] = []
-    seen: set[str] = set()
+    out: list[str] = []; seen: set[str] = set()
     for q in candidates:
         q = re.sub(r"\s+", " ", q).strip()
         if q and q.lower() not in seen:
