@@ -46,6 +46,8 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
         width=int(data.get("width", 1080)),
         height=int(data.get("height", 1920)),
         fps=int(data.get("fps", 30)),
+        director_source=str(data.get("director_source", "rules")),
+        director_model=(str(data["director_model"]) if data.get("director_model") else None),
     )
     validate_shot_plan(plan)
     return plan
@@ -71,6 +73,8 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
         "width": plan.width,
         "height": plan.height,
         "fps": plan.fps,
+        "director_source": plan.director_source,
+        "director_model": plan.director_model,
         "scenes": [
             {
                 "start": scene.start,
