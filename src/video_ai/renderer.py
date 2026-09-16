@@ -56,80 +56,91 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
 
 
 def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
-    """Render intentional Editing Brain motion, not cyclic Ken Burns.
+    """Composition-aware AE-like still-image motion.
 
-    All presets use an aggressive S-curve similar to an AE Easy Ease graph:
-    almost no velocity at the ends, fastest through the middle.
+    v1.0 uses a strong rational S curve: velocity is almost zero at both ends,
+    then clearly accelerates through the middle. Reveal moves are selected from
+    the detected subject position instead of blindly following scene order.
     """
     w,h,fps=plan.width,plan.height,plan.fps
     frames=max(2,int(math.ceil(duration*fps))); denominator=max(1,frames-1)
     fx=_clamp_focus(scene.focus_x); fy=_clamp_focus(scene.focus_y)
-    preset=_resolved_preset(scene)
+    preset=_composition_preset(scene, fx)
 
-    # Extra overscan gives reveal presets room to move without showing borders.
-    overscan=1.18 if preset in {"reveal_left","reveal_right"} else 1.15
+    overscan=1.16 if preset in {"reveal_left","reveal_right"} else 1.13
     big_w=int(math.ceil(w*overscan/2)*2); big_h=int(math.ceil(h*overscan/2)*2)
     base=f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase,crop={big_w}:{big_h}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}'"
 
     t_on=f"min(max(on/{denominator},0),1)"
     t_n=f"min(max(n/{denominator},0),1)"
-    ease_on=_ease_expr(t_on)
-    ease_n=_ease_expr(t_n)
+    power=4 if preset=="dramatic_push" else 3
+    ease_on=_ae_ease_expr(t_on,power)
+    ease_n=_ae_ease_expr(t_n,power)
 
     if preset=="none":
         return base+f",crop={w}:{h}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
 
     if preset in {"micro_push","slow_push","dramatic_push","pull_back"}:
-        if preset=="micro_push": start,end=1.012,1.040
-        elif preset=="slow_push": start,end=1.008,1.075
-        elif preset=="dramatic_push": start,end=1.000,1.125
-        else: start,end=1.105,1.015
+        if preset=="micro_push": start,end=1.000,1.026
+        elif preset=="slow_push": start,end=1.000,1.060
+        elif preset=="dramatic_push": start,end=1.000,1.105
+        else: start,end=1.082,1.000
         delta=end-start
         zoom=f"{start:.5f}+({delta:.5f})*{ease_on}"
         return base+","+f"zoompan=z='{zoom}':x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':d=1:s={w}x{h}:fps={fps}"
 
     if preset in {"reveal_left","reveal_right"}:
-        direction="-1" if preset=="reveal_left" else "1"
-        # Start off-center, then settle on the detected subject instead of panning
-        # endlessly across the whole image.
-        start_offset=f"({direction})*(iw-ow)*0.44"
-        settle=f"(1-{ease_n})"
-        x_pan=f"max(0,min(iw-ow,{fx:.5f}*iw-ow/2+({start_offset})*{settle}))"
+        # Start away from the subject and ease into a stable composition. The move
+        # is intentionally short; it should feel like a reframing, not a slideshow pan.
+        direction="1" if preset=="reveal_left" else "-1"
+        offset=f"({direction})*(iw-ow)*0.32*(1-{ease_n})"
+        x_pan=f"max(0,min(iw-ow,{fx:.5f}*iw-ow/2+{offset}))"
         return base+f",crop={w}:{h}:x='{x_pan}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
 
     return base+f",crop={w}:{h}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
 
 
 def _video_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
-    """Keep real B-roll mostly natural; only add a subtle push when requested."""
+    """Real B-roll stays natural; Editing Brain only adds a nearly invisible push."""
     fx=_clamp_focus(scene.focus_x); fy=_clamp_focus(scene.focus_y)
     preset=_resolved_preset(scene)
     base=f"scale={plan.width}:{plan.height}:force_original_aspect_ratio=increase,crop={plan.width}:{plan.height}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}'"
-    if preset not in {"micro_push","slow_push","dramatic_push"}:
+    if preset not in {"micro_push","slow_push"}:
         return base+f",fps={plan.fps}"
 
-    # For video, avoid obvious artificial camera travel. A tiny scale animation
-    # produces a subtle push without making footage feel warped.
     frames=max(2,int(math.ceil(duration*plan.fps))); denominator=max(1,frames-1)
     t=f"min(max(n/{denominator},0),1)"
-    ease=_ease_expr(t)
-    strength=0.018 if preset=="micro_push" else 0.030 if preset=="slow_push" else 0.045
+    ease=_ae_ease_expr(t,3)
+    strength=0.010 if preset=="micro_push" else 0.018
     scale=f"1+({strength:.5f})*{ease}"
     return base+f",scale='iw*({scale})':'ih*({scale})':eval=frame,crop={plan.width}:{plan.height},fps={plan.fps}"
+
+
+def _composition_preset(scene: Scene, focus_x: float) -> str:
+    preset=_resolved_preset(scene)
+    if preset not in {"reveal_left","reveal_right"}:
+        return preset
+    # If the subject is near centre, a lateral move has no compositional reason
+    # and looks like an automatic slideshow. Use a gentle push instead.
+    if 0.40 <= focus_x <= 0.60:
+        return "slow_push"
+    # Subject on the left: start farther right and settle left; inverse for right.
+    return "reveal_left" if focus_x < 0.40 else "reveal_right"
 
 
 def _resolved_preset(scene: Scene) -> str:
     preset=getattr(scene,"motion_preset","none") or "none"
     if preset!="none": return preset
-    # Backwards compatibility for older saved plans.
     mapping={"zoom_in":"slow_push","zoom_out":"pull_back","pan_left":"reveal_left","pan_right":"reveal_right"}
     return mapping.get(scene.motion,"none")
 
 
-def _ease_expr(t: str) -> str:
-    # smootherstep: zero first/second derivative at both ends, close to a strong
-    # hand-tuned Easy Ease curve for short-form camera motion.
-    return f"((6*pow({t},5))-(15*pow({t},4))+(10*pow({t},3)))"
+def _ae_ease_expr(t: str, power: int = 3) -> str:
+    # Symmetric rational ease. Compared with smoothstep it spends visibly more
+    # time near zero velocity at both ends, closer to a pronounced AE Easy Ease.
+    a=f"pow({t},{power})"
+    b=f"pow(1-({t}),{power})"
+    return f"(({a})/max(0.000001,({a})+({b})))"
 
 
 def _clamp_focus(value: float | None) -> float:
