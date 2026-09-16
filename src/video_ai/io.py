@@ -36,6 +36,10 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
             source_mode=raw.get("source_mode", "auto"),
             motion_preset=raw.get("motion_preset", "slow_push"),
             meme_filename=raw.get("meme_filename"),
+            semantic_lock=bool(raw.get("semantic_lock", False)),
+            required_entities=[str(x) for x in (raw.get("required_entities") or []) if str(x).strip()],
+            required_context=[str(x) for x in (raw.get("required_context") or []) if str(x).strip()],
+            semantic_fallback=(str(raw["semantic_fallback"]) if raw.get("semantic_fallback") else None),
             focus_x=(float(raw["focus_x"]) if raw.get("focus_x") is not None else None),
             focus_y=(float(raw["focus_y"]) if raw.get("focus_y") is not None else None),
             focus_source=raw.get("focus_source"),
@@ -63,12 +67,6 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
     base = path.parent.resolve()
 
     def portable(value: str | Path | None) -> str | None:
-        """Store paths relative to the plan only when the target is actually inside it.
-
-        Older versions returned the original relative string on failure. A plan saved
-        inside work/ therefore turned voice.mp3 into work/voice.mp3 when reloaded.
-        Outside paths are now stored as absolute paths so rerendering is reliable.
-        """
         if value is None:
             return None
         resolved = Path(value).resolve()
@@ -99,6 +97,10 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "source_mode": scene.source_mode,
                 "motion_preset": scene.motion_preset,
                 "meme_filename": scene.meme_filename,
+                "semantic_lock": scene.semantic_lock,
+                "required_entities": scene.required_entities,
+                "required_context": scene.required_context,
+                "semantic_fallback": scene.semantic_fallback,
                 "focus_x": scene.focus_x,
                 "focus_y": scene.focus_y,
                 "focus_source": scene.focus_source,
@@ -133,6 +135,8 @@ def validate_shot_plan(plan: ShotPlan) -> None:
             raise ValueError(f"scene {index}: invalid source_mode={scene.source_mode!r}")
         if scene.motion_preset not in {"none", "micro_push", "slow_push", "dramatic_push", "pull_back", "reveal_left", "reveal_right"}:
             raise ValueError(f"scene {index}: invalid motion_preset={scene.motion_preset!r}")
+        if scene.semantic_lock and not (scene.required_entities or scene.required_context or scene.semantic_fallback):
+            raise ValueError(f"scene {index}: semantic_lock requires entities, context or fallback")
         for name, value in (("focus_x", scene.focus_x), ("focus_y", scene.focus_y)):
             if value is not None and not 0.0 <= value <= 1.0:
                 raise ValueError(f"scene {index}: {name} must be between 0 and 1")
