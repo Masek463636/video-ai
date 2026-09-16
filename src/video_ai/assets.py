@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import html
 import json
-import math
 import re
+import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -14,7 +14,7 @@ from .models import Scene, ShotPlan
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/0.3 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/0.4 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 80 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -36,10 +36,10 @@ class AssetCandidate:
     credit: str = ""
     description: str = ""
     score: float = 0.0
+    semantic_score: float | None = None
 
 
 def search_commons(query: str, *, limit: int = 20) -> list[AssetCandidate]:
-    """Search Wikimedia Commons for renderable images/videos, no API key required."""
     query = query.strip()
     if not query:
         return []
@@ -110,16 +110,33 @@ def materialize_assets(
     *,
     limit: int = 20,
     overwrite: bool = False,
+    semantic: bool = False,
+    semantic_top_k: int = 6,
+    replace_scenes: set[int] | None = None,
+    rank_offset: int = 0,
 ) -> list[dict]:
-    """Resolve each scene from a pool of candidates and persist attribution metadata."""
+    """Resolve scene assets with heuristic + optional CLIP reranking.
+
+    `replace_scenes` and `rank_offset` are used by the QC repair pass: failed scenes
+    can be re-selected from the next-best candidate without disturbing good scenes.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    replace_scenes = replace_scenes or set()
     used_urls: set[str] = set()
     used_titles: list[str] = []
     manifest: list[dict] = []
 
+    # Existing non-replaced assets count as already used, reducing visual repeats.
     for index, scene in enumerate(plan.scenes):
-        if scene.asset and not overwrite:
+        if index in replace_scenes:
+            continue
+        if scene.asset and Path(scene.asset).exists():
+            used_titles.append(Path(scene.asset).stem)
+
+    for index, scene in enumerate(plan.scenes):
+        force_replace = index in replace_scenes
+        if scene.asset and not overwrite and not force_replace:
             p = Path(scene.asset)
             if p.exists():
                 _apply_focus(scene, p)
@@ -145,10 +162,15 @@ def materialize_assets(
                     pool[candidate.download_url] = (candidate, variant)
 
         ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
-        chosen_pair = ranked[0] if ranked else None
-        if not chosen_pair:
+        if semantic and ranked:
+            _semantic_rerank(scene, ranked, top_k=semantic_top_k)
+            ranked.sort(key=lambda item: item[0].score, reverse=True)
+
+        if not ranked:
             scene.asset = None
             scene.asset_kind = "blank"
+            scene.asset_score = None
+            scene.semantic_score = None
             manifest.append({
                 "scene": index,
                 "status": "not_found",
@@ -157,26 +179,39 @@ def materialize_assets(
             })
             continue
 
-        chosen, search_used = chosen_pair
-        suffix = _suffix(chosen)
-        target = out_dir / f"scene_{index:03d}{suffix}"
-        try:
-            _download(chosen.download_url, target)
-        except Exception as exc:
+        chosen: AssetCandidate | None = None
+        search_used = ""
+        target: Path | None = None
+        # Try candidates in order. If a source fails to download, automatically
+        # fall through to the next one instead of leaving a black scene.
+        for candidate, search in ranked[max(0, rank_offset):]:
+            suffix = _suffix(candidate)
+            candidate_target = out_dir / f"scene_{index:03d}{suffix}"
+            try:
+                _download(candidate.download_url, candidate_target)
+            except Exception:
+                continue
+            chosen = candidate
+            search_used = search
+            target = candidate_target
+            break
+
+        if chosen is None or target is None:
             scene.asset = None
             scene.asset_kind = "blank"
-            manifest.append({
-                "scene": index,
-                "status": "download_failed",
-                "query": scene.query,
-                "error": str(exc),
-            })
+            scene.asset_score = None
+            scene.semantic_score = None
+            manifest.append({"scene": index, "status": "download_failed", "query": scene.query})
             continue
 
         used_urls.add(chosen.download_url)
         used_titles.append(chosen.title)
         scene.asset = str(target.resolve())
         scene.asset_kind = chosen.kind  # type: ignore[assignment]
+        scene.asset_score = round(chosen.score, 4)
+        scene.semantic_score = (
+            round(chosen.semantic_score, 4) if chosen.semantic_score is not None else None
+        )
         _apply_focus(scene, target)
         manifest.append({
             "scene": index,
@@ -185,14 +220,17 @@ def materialize_assets(
             "queries_tried": variants,
             "search_used": search_used,
             "path": str(target),
-            "focus": {
-                "x": scene.focus_x,
-                "y": scene.focus_y,
-                "source": scene.focus_source,
-            },
+            "focus": {"x": scene.focus_x, "y": scene.focus_y, "source": scene.focus_source},
             "top_candidates": [
-                {"title": c.title, "score": round(c.score, 3), "search": q}
-                for c, q in ranked[:5]
+                {
+                    "title": c.title,
+                    "score": round(c.score, 3),
+                    "semantic_score": (
+                        round(c.semantic_score, 4) if c.semantic_score is not None else None
+                    ),
+                    "search": q,
+                }
+                for c, q in ranked[:8]
             ],
             **asdict(chosen),
         })
@@ -201,6 +239,41 @@ def materialize_assets(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return manifest
+
+
+def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, top_k: int) -> None:
+    image_pairs = [(c, q) for c, q in ranked if c.kind == "image"][:max(1, top_k)]
+    if not image_pairs:
+        return
+    try:
+        from .multimodal import ClipRanker
+        ranker = ClipRanker()
+    except Exception:
+        return
+
+    prompt = (scene.caption or scene.query or "").strip()
+    with tempfile.TemporaryDirectory(prefix="video-ai-clip-") as temp_dir:
+        paths: list[Path] = []
+        valid: list[AssetCandidate] = []
+        for idx, (candidate, _) in enumerate(image_pairs):
+            path = Path(temp_dir) / f"candidate_{idx:02d}{_suffix(candidate)}"
+            try:
+                _download(candidate.download_url, path)
+            except Exception:
+                continue
+            paths.append(path)
+            valid.append(candidate)
+        if not paths:
+            return
+        try:
+            similarities = ranker.score_images(prompt, paths)
+        except Exception:
+            return
+        for candidate, similarity in zip(valid, similarities):
+            candidate.semantic_score = float(similarity)
+            # CLIP cosine similarities often cluster tightly, so give the semantic
+            # signal meaningful weight without deleting the retrieval/composition score.
+            candidate.score += float(similarity) * 24.0
 
 
 def _apply_focus(scene: Scene, path: Path) -> None:
@@ -219,25 +292,21 @@ def _score(candidate: AssetCandidate, query: str, caption: str) -> float:
     exact = len(wanted & title)
     contextual = len(wanted & description)
     score = exact * 7.0 + contextual * 2.2
-
-    # Reward useful framing/resolution for Shorts rather than just search order.
     if candidate.width >= 1200 or candidate.height >= 1200:
         score += 2.5
     elif candidate.width >= 800 or candidate.height >= 800:
         score += 1.0
     ratio = candidate.width / candidate.height if candidate.height else 1.0
-    if 0.48 <= ratio <= 0.75:  # already close to portrait
+    if 0.48 <= ratio <= 0.75:
         score += 3.0
     elif 0.75 < ratio <= 1.45:
         score += 1.5
     elif ratio > 2.2:
         score -= 1.5
     if candidate.kind == "video":
-        score += 1.5  # motion is generally more valuable B-roll than a still
+        score += 1.5
     if candidate.license:
         score += 0.5
-    if not wanted:
-        score += 0.0
     return score
 
 
@@ -260,9 +329,7 @@ def _tokens(value: str) -> set[str]:
 
 
 def _json_get(url: str) -> dict:
-    request = urllib.request.Request(
-        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
-    )
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=25) as response:
         return json.load(response)
 
@@ -300,7 +367,6 @@ def _suffix(candidate: AssetCandidate) -> str:
 
 
 def _query_variants(query: str, caption: str | None) -> Iterable[str]:
-    """Generate several retrieval views instead of betting the scene on one query."""
     seen: set[str] = set()
     query = re.sub(r"\s+", " ", query).strip()
     caption = re.sub(r"\s+", " ", caption or "").strip()
