@@ -9,6 +9,22 @@ AssetKind = Literal["image", "video", "blank"]
 MotionKind = Literal["none", "zoom_in", "zoom_out", "pan_left", "pan_right"]
 VisualMode = Literal["auto", "image", "video", "meme"]
 SourceMode = Literal["auto", "historical_archive", "stock_video", "meme_library", "generic_image"]
+Tone = Literal[
+    "neutral",
+    "informational",
+    "positive",
+    "negative",
+    "tragic",
+    "tense",
+    "shocking",
+    "absurd",
+    "funny",
+    "victorious",
+    "mysterious",
+    "religious",
+    "violent",
+    "emotional",
+]
 MotionPreset = Literal[
     "none",
     "micro_push",
@@ -61,12 +77,17 @@ class Scene:
     motion_preset: MotionPreset = "slow_push"
     meme_filename: str | None = None
 
-    # v1.1 Semantic Lock. When true, the asset selector is not allowed to use a
-    # loose visual metaphor for a concrete person/event/place/era.
+    # v1.1 Semantic Lock. Hard factual requirements only; Gemini cannot invent
+    # new hard entities that are absent from the current caption.
     semantic_lock: bool = False
     required_entities: list[str] = field(default_factory=list)
     required_context: list[str] = field(default_factory=list)
     semantic_fallback: str | None = None
+
+    # v1.2 Semantic Tone Guard. This describes how a visual should FEEL, not
+    # merely what nouns it contains. It prevents e.g. a sunny beach from being
+    # accepted for a mass-casualty sentence.
+    tone: Tone = "neutral"
 
     focus_x: float | None = None
     focus_y: float | None = None
