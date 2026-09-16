@@ -32,15 +32,16 @@ class GeminiClient:
     """Small dependency-free Gemini REST client used by the v0.9 director/judge.
 
     GEMINI_API_KEY enables it. GEMINI_MODEL can override the preferred model.
-    The default uses a stable Flash model to keep the local app predictable.
+    The default prefers current stable Flash models suitable for new projects.
     """
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self.api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         preferred = (model or os.getenv("GEMINI_MODEL", "")).strip()
-        candidates = [preferred] if preferred else ["gemini-2.5-flash"]
+        candidates = [preferred] if preferred else ["gemini-3.5-flash", "gemini-3.1-flash-lite"]
         self.models = [m for m in candidates if m]
         self.last_model: str | None = None
+        self.last_error: str | None = None
 
     @property
     def available(self) -> bool:
@@ -106,12 +107,6 @@ Rules:
         candidate_title: str = "",
         source: str = "",
     ) -> VisualJudgement | None:
-        """Judge one downloaded candidate using a normalized JPEG preview.
-
-        Video candidates are represented by a frame near the beginning. The goal
-        is not cinematic scoring; it is to reject obvious semantic/era/person
-        mismatches before they enter the final timeline.
-        """
         if not self.available:
             return None
         preview = _make_preview(Path(media_path))
@@ -160,7 +155,8 @@ Be especially strict about historical era, country and subject identity. A moder
                 reason=str(data.get("reason", ""))[:300],
                 mismatch=str(data.get("mismatch", ""))[:200],
             )
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             return None
         finally:
             try:
@@ -201,6 +197,7 @@ Be especially strict about historical era, country and subject identity. A moder
                 text = _extract_text(response_data)
                 parsed = _parse_json_text(text)
                 self.last_model = model
+                self.last_error = None
                 return parsed
             except urllib.error.HTTPError as exc:
                 detail = ""
@@ -211,7 +208,8 @@ Be especially strict about historical era, country and subject identity. A moder
                 errors.append(f"{model}: HTTP {exc.code} {detail}")
             except Exception as exc:
                 errors.append(f"{model}: {exc}")
-        raise RuntimeError("Gemini request failed: " + " | ".join(errors))
+        self.last_error = " | ".join(errors)
+        raise RuntimeError("Gemini request failed: " + self.last_error)
 
 
 def get_gemini_client() -> GeminiClient | None:
