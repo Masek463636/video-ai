@@ -32,14 +32,13 @@ class GeminiClient:
     """Small dependency-free Gemini REST client used by the v0.9 director/judge.
 
     GEMINI_API_KEY enables it. GEMINI_MODEL can override the preferred model.
-    A short fallback list keeps the local app usable if model availability differs
-    between Google AI Studio accounts.
+    The default uses a stable Flash model to keep the local app predictable.
     """
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self.api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         preferred = (model or os.getenv("GEMINI_MODEL", "")).strip()
-        candidates = [preferred] if preferred else ["gemini-3.8-flash", "gemini-2.5-flash"]
+        candidates = [preferred] if preferred else ["gemini-2.5-flash"]
         self.models = [m for m in candidates if m]
         self.last_model: str | None = None
 
