@@ -50,14 +50,19 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
     validate_shot_plan(plan)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    base = path.parent.resolve()
 
-    try:
-        audio = str(plan.audio.resolve().relative_to(path.parent.resolve()))
-    except (ValueError, OSError):
-        audio = str(plan.audio)
+    def relative(value: str | Path | None) -> str | None:
+        if value is None:
+            return None
+        p = Path(value)
+        try:
+            return str(p.resolve().relative_to(base))
+        except (ValueError, OSError):
+            return str(p)
 
     payload = {
-        "audio": audio,
+        "audio": relative(plan.audio),
         "width": plan.width,
         "height": plan.height,
         "fps": plan.fps,
@@ -66,7 +71,7 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "start": scene.start,
                 "end": scene.end,
                 "query": scene.query,
-                "asset": scene.asset,
+                "asset": relative(scene.asset),
                 "asset_kind": scene.asset_kind,
                 "motion": scene.motion,
                 "caption": scene.caption,
