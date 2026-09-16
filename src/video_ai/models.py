@@ -39,24 +39,17 @@ class Transcript:
 class Scene:
     start: float
     end: float
-    # Backwards-compatible primary search query.
     query: str
     asset: str | None = None
     asset_kind: AssetKind = "blank"
     motion: MotionKind = "none"
     caption: str | None = None
-    # What the director actually wants the viewer to see, in plain English.
     visual_description: str | None = None
-    # Multiple search attempts ordered from specific to broad.
     search_queries: list[str] = field(default_factory=list)
-    # Director intent: what kind of visual should this beat try to use first.
     visual_mode: VisualMode = "auto"
-    # Normalized 0..1 coordinates of the visual subject used by smart 9:16 crop.
     focus_x: float | None = None
     focus_y: float | None = None
     focus_source: str | None = None
-    # Retrieval/ranking diagnostics. semantic_score is CLIP cosine similarity
-    # when semantic ranking is enabled; otherwise it stays None.
     asset_score: float | None = None
     semantic_score: float | None = None
 
@@ -72,3 +65,7 @@ class ShotPlan:
     width: int = 1080
     height: int = 1920
     fps: int = 30
+    # Diagnostics only: these do not affect rendering and are persisted so a user
+    # can tell whether Gemini actually directed this run or rules fallback was used.
+    director_source: str = "rules"
+    director_model: str | None = None
