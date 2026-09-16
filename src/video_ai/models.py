@@ -52,7 +52,6 @@ class Scene:
     query: str
     asset: str | None = None
     asset_kind: AssetKind = "blank"
-    # Legacy motion stays for loading older plans. v1.0 renders motion_preset first.
     motion: MotionKind = "none"
     caption: str | None = None
     visual_description: str | None = None
@@ -60,8 +59,15 @@ class Scene:
     visual_mode: VisualMode = "auto"
     source_mode: SourceMode = "auto"
     motion_preset: MotionPreset = "slow_push"
-    # When Gemini selects a known local meme it can name the exact file.
     meme_filename: str | None = None
+
+    # v1.1 Semantic Lock. When true, the asset selector is not allowed to use a
+    # loose visual metaphor for a concrete person/event/place/era.
+    semantic_lock: bool = False
+    required_entities: list[str] = field(default_factory=list)
+    required_context: list[str] = field(default_factory=list)
+    semantic_fallback: str | None = None
+
     focus_x: float | None = None
     focus_y: float | None = None
     focus_source: str | None = None
