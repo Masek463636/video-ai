@@ -72,11 +72,11 @@ def build_shot_plan(
         neighborhood = " ".join(x for x in (previous_caption, caption, next_caption) if x)
         duration = words[-1].end - words[0].start
         mode = _choose_visual_mode(caption, index=index, duration=duration)
-        source_mode = _choose_source_mode(caption, neighborhood, global_context, mode)
+        source_mode = _choose_source_mode(caption, global_context, mode)
         motion_preset = _choose_motion_preset(caption, index=index, mode=mode)
-        description = _visual_description(caption, global_context, neighborhood, mode)
+        description = _visual_description(caption, global_context, mode)
         queries = _search_queries(caption, global_context, neighborhood, mode, description)
-        lock, entities, context, fallback = _rule_semantic_lock(caption, neighborhood, global_context)
+        lock, entities, context, fallback = _rule_semantic_lock(caption, global_context)
         if lock:
             mode = "image"
             source_mode = "historical_archive"
@@ -154,6 +154,10 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
         entities = _clean_string_list(item.get("required_entities"), limit=6)
         context = _clean_string_list(item.get("required_context"), limit=6)
         fallback = str(item.get("semantic_fallback", "")).strip()[:300]
+
+        # Rule lock is intentionally conservative and only fires for an entity
+        # literally present in THIS caption. Gemini may add another hard lock,
+        # but must not carry a person/event forward from neighbouring scenes.
         if gemini_lock or scene.semantic_lock:
             scene.semantic_lock = True
             scene.required_entities = entities or scene.required_entities
@@ -162,6 +166,13 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
             scene.visual_mode = "image"
             scene.source_mode = "historical_archive"
             scene.meme_filename = None
+        else:
+            # No hard lock: keep the scene alive. Context is allowed to guide the
+            # query, but it must not force every beat into the archive bucket.
+            scene.semantic_lock = False
+            scene.required_entities = []
+            scene.required_context = []
+            scene.semantic_fallback = None
 
         if scene.visual_mode == "meme" and not scene.semantic_lock:
             scene.source_mode = "meme_library"
@@ -183,27 +194,44 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
     return "gemini", client.last_model
 
 
-def _rule_semantic_lock(text: str, neighborhood: str, global_context: str) -> tuple[bool, list[str], list[str], str | None]:
-    lowered = f"{text} {neighborhood}".lower()
+def _explicit_entities(text: str) -> list[str]:
+    lowered = text.lower()
     entities: list[str] = []
-    context: list[str] = []
     if "сюцюан" in lowered or "хун сю" in lowered or "hong xiu" in lowered:
         entities.append("Hong Xiuquan")
     if "тайпин" in lowered:
         entities.append("Taiping Rebellion")
-    if "китай" in lowered or "china" in global_context.lower():
+    if "иисус" in lowered or "христ" in lowered or "jesus christ" in lowered:
+        entities.append("Jesus Christ")
+    if "экзам" in lowered and ("импер" in lowered or "чиновник" in lowered or "гос" in lowered):
+        entities.append("Imperial examination")
+    return list(dict.fromkeys(entities))
+
+
+def _rule_semantic_lock(text: str, global_context: str) -> tuple[bool, list[str], list[str], str | None]:
+    """Hard-lock only facts explicitly named in the current beat.
+
+    The old v1.1 implementation inspected neighbouring captions. That caused a
+    person's name or event to leak across several scenes, producing repeated
+    portraits/maps. Country/era remain context, but never create a lock alone.
+    """
+    entities = _explicit_entities(text)
+    if not entities:
+        return False, [], [], None
+
+    context: list[str] = []
+    setting = _setting_context(global_context)
+    lowered_setting = setting.lower()
+    if "china" in lowered_setting:
         context.append("China")
-    era = _detect_era((global_context + " " + lowered).lower())
+    era = _detect_era(lowered_setting)
     if era and era != "21st century modern":
         context.append(era)
-    historical_specific = bool(entities) or any(x in lowered for x in ("династ", "импер", "восстан", "револю", "битв", "войн"))
-    if historical_specific and "qing" in global_context.lower():
+    if "qing dynasty" in lowered_setting:
         context.append("Qing dynasty")
-    lock = historical_specific and (bool(entities) or bool(context))
-    fallback = None
-    if lock:
-        fallback = " ".join([*entities, *context, "archival illustration or map"])
-    return lock, list(dict.fromkeys(entities)), list(dict.fromkeys(context)), fallback
+
+    fallback = " ".join([*entities, *context, "archival illustration"])
+    return True, entities, list(dict.fromkeys(context)), fallback
 
 
 def _clean_string_list(value: object, *, limit: int) -> list[str]:
@@ -219,66 +247,105 @@ def _clean_string_list(value: object, *, limit: int) -> list[str]:
     return out
 
 
-def _visual_description(text: str, global_context: str, neighborhood: str, mode: VisualMode) -> str:
-    hints = _scene_visual_hints(neighborhood or text)
+def _setting_context(global_context: str) -> str:
+    """Keep broad setting, remove story entities which should not bleed."""
+    value = global_context
+    for phrase in ("Hong Xiuquan", "Taiping Rebellion"):
+        value = re.sub(re.escape(phrase), " ", value, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _visual_description(text: str, global_context: str, mode: VisualMode) -> str:
+    hints = _scene_visual_hints(text)
     local = hints[0] if hints else "documentary scene related to narration"
-    style = "moving documentary B-roll" if mode == "video" else "reaction meme insert" if mode == "meme" else "documentary archival visual"
-    return " ".join(x for x in (global_context, local, style) if x).strip()
+    explicit = " ".join(_explicit_entities(text))
+    setting = _setting_context(global_context)
+    style = "moving documentary B-roll" if mode == "video" else "reaction meme insert" if mode == "meme" else "documentary visual"
+    return " ".join(x for x in (explicit, setting, local, style) if x).strip()
 
 
 def _search_queries(text: str, global_context: str, neighborhood: str, mode: VisualMode, description: str) -> list[str]:
-    hints = _scene_visual_hints(neighborhood or text)
-    local_keywords = " ".join(_useful_keywords(text, max_terms=4))
+    # Search is driven by the CURRENT caption. Neighbourhood is only a weak
+    # fallback for missing nouns, never a source of hard entities.
+    hints = _scene_visual_hints(text)
+    setting = _setting_context(global_context)
+    explicit = " ".join(_explicit_entities(text))
+    local_keywords = " ".join(_useful_keywords(text, max_terms=5))
+    neighborhood_keywords = " ".join(_useful_keywords(neighborhood, max_terms=3))
     suffix = "video b roll" if mode == "video" else "reaction meme" if mode == "meme" else "photo illustration"
     candidates = [
-        f"{global_context} {hints[0] if hints else ''} {suffix}", description,
-        f"{global_context} {local_keywords} {suffix}", f"{hints[0] if hints else local_keywords} {suffix}",
+        f"{explicit} {setting} {hints[0] if hints else local_keywords} {suffix}",
+        description,
+        f"{setting} {local_keywords} {suffix}",
+        f"{local_keywords or neighborhood_keywords} {suffix}",
     ]
     out: list[str] = []
     seen: set[str] = set()
     for query in candidates:
         query = re.sub(r"\s+", " ", query).strip()
         if query and query.lower() not in seen:
-            out.append(query); seen.add(query.lower())
+            out.append(query)
+            seen.add(query.lower())
     return out or ["documentary people video b roll" if mode == "video" else "documentary photo"]
 
 
 def _choose_visual_mode(text: str, *, index: int, duration: float) -> VisualMode:
     lowered = text.lower()
-    if any(stem in lowered for stem in _MEME_STEMS): return "meme"
-    if any(stem in lowered for stem in _VIDEO_STEMS): return "video"
-    if index > 0 and index % 4 == 3 and duration >= 1.4: return "video"
+    if any(stem in lowered for stem in _MEME_STEMS):
+        return "meme"
+    if any(stem in lowered for stem in _VIDEO_STEMS):
+        return "video"
+    if index > 0 and index % 4 == 3 and duration >= 1.4:
+        return "video"
     return "image"
 
 
-def _choose_source_mode(text: str, neighborhood: str, global_context: str, mode: VisualMode) -> SourceMode:
-    lowered = f"{text} {neighborhood}".lower()
-    if mode == "meme": return "meme_library"
-    if global_context and ("historical archival" in global_context.lower() or any(stem in lowered for stem in _HISTORY_STEMS)):
+def _choose_source_mode(text: str, global_context: str, mode: VisualMode) -> SourceMode:
+    lowered = text.lower()
+    if mode == "meme":
+        return "meme_library"
+
+    # Only locally historical beats default to archives. An overall historical
+    # story no longer turns stress/dream/emotion beats into archive-only scenes.
+    historical_story = "historical archival" in global_context.lower()
+    locally_historical = any(stem in lowered for stem in _HISTORY_STEMS)
+    if historical_story and locally_historical:
         return "historical_archive"
-    if mode == "video": return "stock_video"
+    if mode == "video":
+        return "stock_video"
     return "generic_image"
 
 
 def _choose_motion_preset(text: str, *, index: int, mode: VisualMode) -> MotionPreset:
     lowered = text.lower()
-    if mode == "meme": return "none"
-    if any(stem in lowered for stem in _PULLBACK_STEMS): return "pull_back"
-    if any(stem in lowered for stem in _DRAMATIC_STEMS): return "dramatic_push"
-    if index % 5 == 2: return "reveal_right"
-    if index % 5 == 4: return "reveal_left"
+    if mode == "meme":
+        return "none"
+    if any(stem in lowered for stem in _PULLBACK_STEMS):
+        return "pull_back"
+    if any(stem in lowered for stem in _DRAMATIC_STEMS):
+        return "dramatic_push"
+    if index % 5 == 2:
+        return "reveal_right"
+    if index % 5 == 4:
+        return "reveal_left"
     return "slow_push" if mode == "image" else "micro_push"
 
 
 def _chunk_words(words: list[Word], *, target: float, minimum: float, maximum: float) -> list[list[Word]]:
-    chunks: list[list[Word]] = []; current: list[Word] = []
+    chunks: list[list[Word]] = []
+    current: list[Word] = []
     for word in words:
-        current.append(word); duration = current[-1].end - current[0].start
+        current.append(word)
+        duration = current[-1].end - current[0].start
         if duration >= maximum or (duration >= target and _SENTENCE_END.search(word.text)) or duration >= target + 0.32:
-            if duration >= minimum: chunks.append(current); current = []
+            if duration >= minimum:
+                chunks.append(current)
+                current = []
     if current:
-        if chunks and current[-1].end - current[0].start < minimum * 0.68: chunks[-1].extend(current)
-        else: chunks.append(current)
+        if chunks and current[-1].end - current[0].start < minimum * 0.68:
+            chunks[-1].extend(current)
+        else:
+            chunks.append(current)
     return chunks
 
 
@@ -287,12 +354,16 @@ def _join_words(words: list[Word]) -> str:
 
 
 def _useful_keywords(text: str, *, max_terms: int) -> list[str]:
-    useful: list[str] = []; seen: set[str] = set()
+    useful: list[str] = []
+    seen: set[str] = set()
     for raw in text.split():
         token = _STRIP.sub("", raw).strip("_-").lower()
-        if len(token) < 2 or token in _STOPWORDS or token in seen: continue
-        seen.add(token); useful.append(token)
-        if len(useful) >= max_terms: break
+        if len(token) < 2 or token in _STOPWORDS or token in seen:
+            continue
+        seen.add(token)
+        useful.append(token)
+        if len(useful) >= max_terms:
+            break
     return useful
 
 
@@ -302,29 +373,41 @@ def _scene_visual_hints(text: str) -> list[str]:
 
 
 def _global_visual_context(text: str) -> str:
-    lowered = text.lower(); parts: list[str] = []
+    lowered = text.lower()
+    parts: list[str] = []
     for stems, phrase in _GLOBAL_RULES:
-        if any(stem in lowered for stem in stems): parts.append(phrase)
+        if any(stem in lowered for stem in stems):
+            parts.append(phrase)
     era = _detect_era(lowered)
-    if era: parts.append(era)
-    if era or any(stem in lowered for stem in _HISTORY_STEMS): parts.append("historical archival")
+    if era:
+        parts.append(era)
+    if era or any(stem in lowered for stem in _HISTORY_STEMS):
+        parts.append("historical archival")
     joined = " ".join(parts).lower()
-    if "china" in joined and "19th century" in joined: parts.append("Qing dynasty")
-    if "taiping rebellion" in joined: parts.append("1850s China")
+    if "china" in joined and "19th century" in joined:
+        parts.append("Qing dynasty")
+    if "taiping rebellion" in joined:
+        parts.append("1850s China")
     return " ".join(dict.fromkeys(parts))
 
 
 def _detect_era(text: str) -> str:
-    if re.search(r"\b18\d{2}\b|\b19\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxix\b", text): return "19th century"
-    if re.search(r"\b17\d{2}\b|\b18\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxviii\b", text): return "18th century"
-    if re.search(r"\b19\d{2}\b|\b20\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxx\b", text): return "20th century"
-    if re.search(r"\b20\d{2}\b|\b21\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxxi\b", text): return "21st century modern"
+    if re.search(r"\b18\d{2}\b|\b19\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxix\b", text):
+        return "19th century"
+    if re.search(r"\b17\d{2}\b|\b18\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxviii\b", text):
+        return "18th century"
+    if re.search(r"\b19\d{2}\b|\b20\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxx\b", text):
+        return "20th century"
+    if re.search(r"\b20\d{2}\b|\b21\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxxi\b", text):
+        return "21st century modern"
     return ""
 
 
 def _meme_names(directory: str | Path | None) -> list[str]:
-    if not directory: return []
+    if not directory:
+        return []
     root = Path(directory)
-    if not root.exists() or not root.is_dir(): return []
+    if not root.exists() or not root.is_dir():
+        return []
     allowed = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".jpg", ".jpeg", ".png", ".webp"}
     return sorted(path.name for path in root.rglob("*") if path.is_file() and path.suffix.lower() in allowed)[:250]
