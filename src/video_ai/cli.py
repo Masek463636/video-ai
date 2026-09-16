@@ -36,11 +36,11 @@ def main() -> None:
     p_plan.add_argument("--min-scene", type=float, default=1.25)
     p_plan.add_argument("--max-scene", type=float, default=3.2)
 
-    p_assets = sub.add_parser("assets", help="Find and download visual assets for a ShotPlan")
+    p_assets = sub.add_parser("assets", help="Find, rank and download visual assets for a ShotPlan")
     p_assets.add_argument("plan")
     p_assets.add_argument("-o", "--output", required=True, help="Output materialized ShotPlan JSON")
     p_assets.add_argument("--dir", required=True, help="Directory for downloaded assets")
-    p_assets.add_argument("--limit", type=int, default=12, help="Commons candidates per search")
+    p_assets.add_argument("--limit", type=int, default=20, help="Commons candidates per search")
     p_assets.add_argument("--overwrite", action="store_true")
 
     p_render = sub.add_parser("render", help="Render a materialized ShotPlan to MP4")
@@ -50,14 +50,14 @@ def main() -> None:
     p_render.add_argument("--no-captions", action="store_true")
     p_render.add_argument("--crf", type=int, default=20)
 
-    p_make = sub.add_parser("make", help="Download assets and render an existing ShotPlan")
+    p_make = sub.add_parser("make", help="Rank/download assets and render an existing ShotPlan")
     p_make.add_argument("plan")
     p_make.add_argument("-o", "--output", required=True)
     p_make.add_argument("--work-dir", required=True)
-    p_make.add_argument("--limit", type=int, default=12)
+    p_make.add_argument("--limit", type=int, default=20)
     p_make.add_argument("--no-captions", action="store_true")
 
-    p_create = sub.add_parser("create", help="One command: voiceover -> transcript -> scenes -> assets -> MP4")
+    p_create = sub.add_parser("create", help="One command: voiceover -> transcript -> scenes -> ranked assets -> MP4")
     p_create.add_argument("audio")
     p_create.add_argument("-o", "--output", required=True)
     p_create.add_argument("--work-dir", required=True)
@@ -66,7 +66,7 @@ def main() -> None:
     p_create.add_argument("--pace", type=float, default=2.1)
     p_create.add_argument("--min-scene", type=float, default=1.25)
     p_create.add_argument("--max-scene", type=float, default=3.2)
-    p_create.add_argument("--limit", type=int, default=12)
+    p_create.add_argument("--limit", type=int, default=20)
     p_create.add_argument("--no-captions", action="store_true")
 
     args = parser.parse_args()
