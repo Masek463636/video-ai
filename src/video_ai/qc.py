@@ -16,7 +16,7 @@ class SceneQC:
 
 
 def inspect_plan(plan: ShotPlan) -> list[SceneQC]:
-    """Cheap QC pass that catches obvious unusable scene choices before final render."""
+    """QC pass for obvious visual failures and weak semantic matches."""
     results: list[SceneQC] = []
     previous_asset: str | None = None
     for index, scene in enumerate(plan.scenes):
@@ -48,9 +48,27 @@ def inspect_plan(plan: ShotPlan) -> list[SceneQC]:
             score -= 0.08
             reasons.append("no caption text")
 
+        if scene.semantic_score is not None:
+            if scene.semantic_score < 0.16:
+                score -= 0.35
+                reasons.append("very weak text-image semantic match")
+            elif scene.semantic_score < 0.20:
+                score -= 0.18
+                reasons.append("weak text-image semantic match")
+            elif scene.semantic_score >= 0.28:
+                score += 0.05
+
+        if scene.asset_score is not None and scene.asset_score < 1.0:
+            score -= 0.12
+            reasons.append("weak retrieval score")
+
         score = max(0.0, min(1.0, score))
         results.append(SceneQC(scene=index, ok=score >= 0.55, score=round(score, 3), reasons=reasons))
     return results
+
+
+def failed_scene_indexes(results: list[SceneQC]) -> set[int]:
+    return {item.scene for item in results if not item.ok}
 
 
 def save_qc(results: list[SceneQC], path: str | Path) -> Path:
