@@ -40,6 +40,7 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
             required_entities=[str(x) for x in (raw.get("required_entities") or []) if str(x).strip()],
             required_context=[str(x) for x in (raw.get("required_context") or []) if str(x).strip()],
             semantic_fallback=(str(raw["semantic_fallback"]) if raw.get("semantic_fallback") else None),
+            tone=raw.get("tone", "neutral"),
             focus_x=(float(raw["focus_x"]) if raw.get("focus_x") is not None else None),
             focus_y=(float(raw["focus_y"]) if raw.get("focus_y") is not None else None),
             focus_source=raw.get("focus_source"),
@@ -101,6 +102,7 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "required_entities": scene.required_entities,
                 "required_context": scene.required_context,
                 "semantic_fallback": scene.semantic_fallback,
+                "tone": scene.tone,
                 "focus_x": scene.focus_x,
                 "focus_y": scene.focus_y,
                 "focus_source": scene.focus_source,
@@ -120,6 +122,7 @@ def validate_shot_plan(plan: ShotPlan) -> None:
     if plan.width <= 0 or plan.height <= 0 or plan.fps <= 0:
         raise ValueError("width, height and fps must be positive")
 
+    valid_tones = {"neutral","informational","positive","negative","tragic","tense","shocking","absurd","funny","victorious","mysterious","religious","violent","emotional"}
     previous_end = 0.0
     for index, scene in enumerate(plan.scenes):
         if scene.start < 0 or scene.end <= scene.start:
@@ -135,6 +138,8 @@ def validate_shot_plan(plan: ShotPlan) -> None:
             raise ValueError(f"scene {index}: invalid source_mode={scene.source_mode!r}")
         if scene.motion_preset not in {"none", "micro_push", "slow_push", "dramatic_push", "pull_back", "reveal_left", "reveal_right"}:
             raise ValueError(f"scene {index}: invalid motion_preset={scene.motion_preset!r}")
+        if scene.tone not in valid_tones:
+            raise ValueError(f"scene {index}: invalid tone={scene.tone!r}")
         if scene.semantic_lock and not (scene.required_entities or scene.required_context or scene.semantic_fallback):
             raise ValueError(f"scene {index}: semantic_lock requires entities, context or fallback")
         for name, value in (("focus_x", scene.focus_x), ("focus_y", scene.focus_y)):
