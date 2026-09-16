@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -39,11 +39,16 @@ class Transcript:
 class Scene:
     start: float
     end: float
+    # Backwards-compatible primary search query.
     query: str
     asset: str | None = None
     asset_kind: AssetKind = "blank"
     motion: MotionKind = "none"
     caption: str | None = None
+    # What the director actually wants the viewer to see, in plain English.
+    visual_description: str | None = None
+    # Multiple search attempts ordered from specific to broad.
+    search_queries: list[str] = field(default_factory=list)
     # Director intent: what kind of visual should this beat try to use first.
     visual_mode: VisualMode = "auto"
     # Normalized 0..1 coordinates of the visual subject used by smart 9:16 crop.
