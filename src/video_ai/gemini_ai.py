@@ -51,7 +51,7 @@ class GeminiClient:
         meme_names = meme_names or []
         prompt = f"""
 You are the Editing Brain for a fast-paced vertical YouTube Short.
-Read the ENTIRE narration first, then plan every visual beat like a human editor.
+Read the entire narration for story context, but EDIT EACH TIMED SCENE according to the words actually spoken in that scene.
 
 NARRATION:
 {transcript}
@@ -70,33 +70,40 @@ Return ONLY valid JSON:
       "visual_mode": "image|video|meme",
       "source_mode": "historical_archive|stock_video|meme_library|generic_image",
       "motion_preset": "none|micro_push|slow_push|dramatic_push|pull_back|reveal_left|reveal_right",
-      "visual_description": "exact English description of what should be visible",
+      "visual_description": "exact English description of what should be visible in THIS beat",
       "search_queries": ["3 to 5 concise English searches"],
       "meme_tags": ["optional English reaction tags"],
       "meme_filename": "exact available filename or empty string",
-      "semantic_lock": true,
-      "required_entities": ["specific person/event/place names that MUST match"],
-      "required_context": ["era/country/culture/context that MUST match"],
-      "semantic_fallback": "safe fallback visual if no exact candidate exists"
+      "semantic_lock": false,
+      "required_entities": ["ONLY entities literally named in this scene that must match"],
+      "required_context": ["era/country/culture that is mandatory only when semantic_lock=true"],
+      "semantic_fallback": "safe exact fallback visual, only for locked scenes"
     }}
   ]
 }}
 
-Editorial rules:
+BALANCED EDITING RULES:
 - Keep scene indexes unchanged.
-- semantic_lock MUST be true for a named historical person, named event/war/rebellion, named place used factually, dynasty/era-specific event, or other concrete fact where a visual metaphor could mislead.
-- For locked scenes, list only truly mandatory entities/context. Example: Hong Xiuquan + Qing China + 19th century. Do not add generic words like man/person.
-- Historical accuracy beats generic motion. For a named historical person/event/era, choose historical_archive + image unless authentic footage is plausibly available.
-- Do NOT use stock_video for specific historical people, named wars, dynasties or events if that would create a misleading modern substitute.
-- Use stock_video only for generic concepts/actions that can honestly be represented: crowd, fire, road, phone, money, city, typing, walking, etc.
-- Use memes sparingly: usually 0-2 per ~20 seconds. Never use a meme for a locked factual scene unless the narration itself is clearly a reaction/joke beat.
-- Prefer a strong still image with intentional camera motion over a semantically wrong video.
-- Motion should support meaning: slow_push for calm emphasis, dramatic_push for shocks/revelations, pull_back for consequences/endings, reveal_* for spatial discovery, micro_push for video/very subtle movement, none for memes.
-- Search queries must preserve country, era, person and event when known.
-- semantic_fallback must remain factually safe, e.g. "Qing dynasty China archival map" rather than an unrelated war photo.
+- semantic_lock is a HARD FACT LOCK, not general story context.
+- Set semantic_lock=true ONLY when the CURRENT scene caption explicitly names a specific person, named event/war/rebellion, named historical institution, dynasty, or similarly concrete factual entity that the visual must depict accurately.
+- DO NOT hard-lock a person/event merely because it appeared in the previous/next scene or elsewhere in the narration.
+- Pronouns such as he/him/they/it do NOT automatically justify repeating the person's portrait. Use the action, emotion or consequence being spoken instead.
+- If the current beat says stress/failure/sleep/dream/revelation/emotion/consequence without explicitly naming the historical person/event, prefer a contextual or emotional visual instead of repeating a portrait/map.
+- Never use the same visual idea on consecutive scenes if another honest visual exists.
+- A named person's portrait should usually appear once when introduced, not on every later reference.
+- A map should normally appear at most once in a ~20 second Short unless geography actually changes.
+- Historical accuracy still matters: contextual visuals should remain compatible with country/era where people, uniforms, architecture or institutions are visible.
+- Use historical_archive for exact historical facts and genuinely historical action beats.
+- Use stock_video for generic actions/concepts that can honestly be modern/generic: fire, money, walking, typing, panic, crowd movement, etc. Do not use modern stock if historical clothing/identity is important.
+- Use generic_image for illustrations, dreams, emotions and conceptual beats when a still is stronger than stock.
+- Use memes sparingly: usually 0-2 per ~20 seconds. Never use a meme for a hard-locked factual beat.
+- Prefer a strong contextually correct visual over a boring repeated exact visual when the scene is NOT locked.
+- Motion should support meaning: slow_push for calm emphasis, dramatic_push for shocks/revelations, pull_back for consequences/endings, reveal_* for spatial discovery, micro_push for video, none for memes.
+- Search queries for unlocked scenes should describe the current ACTION/EMOTION first, while retaining only the minimum useful historical setting.
+- Search queries for locked scenes must preserve the exact required entity/event.
 - Never ask for text overlays/logos/subtitles inside the visual.
 """.strip()
-        data = self._generate_json([{"text": prompt}], temperature=0.10)
+        data = self._generate_json([{"text": prompt}], temperature=0.11)
         raw = data.get("scenes", []) if isinstance(data, dict) else []
         return [item for item in raw if isinstance(item, dict)]
 
@@ -144,8 +151,12 @@ If Semantic lock is true:
 - candidate must be compatible with EVERY required entity/context;
 - wrong war, wrong century, wrong country, wrong named person or modern substitute is an automatic reject;
 - uncertainty about identity should lower the score strongly;
-- a factually safe archival/map/period fallback is better than a dramatic but wrong image.
-Be VERY strict about era, country, identity, event and subject.
+- a factually safe archival/period fallback is better than a dramatic but wrong image.
+
+If Semantic lock is false:
+- judge the CURRENT action/emotion/idea first;
+- do not demand the story's main character or event if this beat can be represented more naturally another way;
+- still reject obviously incompatible historical context when it is visually important.
 """.strip()
             parts.append({"text": prompt})
             data = self._generate_json(parts, temperature=0.02)
@@ -189,7 +200,7 @@ Be VERY strict about era, country, identity, event and subject.
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.1",
+                "User-Agent": "video-ai/1.1.1",
             })
             try:
                 with urllib.request.urlopen(req, timeout=90) as response:
