@@ -107,10 +107,7 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
         return
 
     if scene.asset_kind == "video" and scene.asset and Path(scene.asset).exists():
-        vf = (
-            f"scale={plan.width}:{plan.height}:force_original_aspect_ratio=increase,"
-            f"crop={plan.width}:{plan.height},fps={plan.fps}"
-        )
+        vf = _video_filter(scene, plan)
         _run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-stream_loop", "-1", "-i", str(scene.asset), "-vf", vf, *common_out,
@@ -129,25 +126,56 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
     frames = max(2, int(math.ceil(duration * fps)))
     big_w = int(math.ceil(w * 1.16 / 2) * 2)
     big_h = int(math.ceil(h * 1.16 / 2) * 2)
-    base = f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase,crop={big_w}:{big_h}"
+    fx = _clamp_focus(scene.focus_x)
+    fy = _clamp_focus(scene.focus_y)
+    xexpr = _focus_expr("iw", "ow", fx)
+    yexpr = _focus_expr("ih", "oh", fy)
+    base = f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase,crop={big_w}:{big_h}:x='{xexpr}':y='{yexpr}'"
 
     if scene.motion == "zoom_in":
         return (
             base + "," +
             f"zoompan=z='min(1.0+0.12*on/{frames},1.12)':"
-            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps={fps}"
+            f"x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':"
+            f"y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':"
+            f"d=1:s={w}x{h}:fps={fps}"
         )
     if scene.motion == "zoom_out":
         return (
             base + "," +
             f"zoompan=z='max(1.12-0.12*on/{frames},1.0)':"
-            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps={fps}"
+            f"x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':"
+            f"y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':"
+            f"d=1:s={w}x{h}:fps={fps}"
         )
     if scene.motion == "pan_right":
-        return base + f",crop={w}:{h}:x='(iw-ow)*min(n/{frames},1)':y='(ih-oh)/2',fps={fps}"
+        start = max(0.0, fx - 0.12)
+        return base + f",crop={w}:{h}:x='max(0,min(iw-ow,({start:.5f}+0.24*min(n/{frames},1))*iw-ow/2))':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
     if scene.motion == "pan_left":
-        return base + f",crop={w}:{h}:x='(iw-ow)*(1-min(n/{frames},1))':y='(ih-oh)/2',fps={fps}"
-    return base + f",crop={w}:{h},fps={fps}"
+        start = min(1.0, fx + 0.12)
+        return base + f",crop={w}:{h}:x='max(0,min(iw-ow,({start:.5f}-0.24*min(n/{frames},1))*iw-ow/2))':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
+    return base + f",crop={w}:{h}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
+
+
+def _video_filter(scene: Scene, plan: ShotPlan) -> str:
+    fx = _clamp_focus(scene.focus_x)
+    fy = _clamp_focus(scene.focus_y)
+    return (
+        f"scale={plan.width}:{plan.height}:force_original_aspect_ratio=increase,"
+        f"crop={plan.width}:{plan.height}:"
+        f"x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}',"
+        f"fps={plan.fps}"
+    )
+
+
+def _clamp_focus(value: float | None) -> float:
+    if value is None:
+        return 0.5
+    return max(0.0, min(1.0, float(value)))
+
+
+def _focus_expr(inner: str, outer: str, focus: float) -> str:
+    return f"max(0,min({inner}-{outer},{focus:.5f}*{inner}-{outer}/2))"
 
 
 def _write_ass(plan: ShotPlan, path: Path) -> None:
@@ -157,9 +185,7 @@ def _write_ass(plan: ShotPlan, path: Path) -> None:
         if not scene.caption:
             continue
         text = _ass_text(scene.caption)
-        events.append(
-            f"Dialogue: 0,{_ass_time(scene.start)},{_ass_time(scene.end)},Default,,0,0,0,,{text}"
-        )
+        events.append(f"Dialogue: 0,{_ass_time(scene.start)},{_ass_time(scene.end)},Default,,0,0,0,,{text}")
     path.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")
 
 
