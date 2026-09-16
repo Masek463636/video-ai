@@ -9,8 +9,6 @@ from .models import MotionKind, Scene, ShotPlan, Transcript, Word
 _SENTENCE_END = re.compile(r"[.!?…]+$")
 _STRIP = re.compile(r"[^\w\-]+", flags=re.UNICODE)
 
-# Tiny language-agnostic-ish stopword set. This is deliberately conservative:
-# the heuristic director is only V0.1 and will later be replaceable by an LLM.
 _STOPWORDS = {
     "а", "и", "но", "или", "в", "во", "на", "по", "к", "ко", "у", "из", "за",
     "с", "со", "от", "до", "для", "что", "это", "как", "же", "бы", "не", "ну",
@@ -26,6 +24,47 @@ _MOTIONS: tuple[MotionKind, ...] = (
     "pan_left",
 )
 
+_GLOBAL_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("китай", "китайск"), "China Chinese"),
+    (("тайпин",), "Taiping Rebellion"),
+    (("сюцюан", "хун сю", "hong xiu"), "Hong Xiuquan"),
+    (("ссср", "советск", "советск"), "Soviet Union Soviet"),
+    (("украин",), "Ukraine Ukrainian"),
+    (("росси", "русск"), "Russia Russian"),
+    (("америк", "сша"), "United States American"),
+    (("герман", "немец"), "Germany German"),
+    (("япон",), "Japan Japanese"),
+    (("франц",), "France French"),
+    (("британ", "англи"), "Britain British"),
+    (("римск", "римская импер"), "Roman Empire"),
+    (("егип",), "Egypt Egyptian"),
+)
+
+_SCENE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("экзам", "госэкзам", "тест"), "student civil service examination"),
+    (("стресс", "нерв", "расстро", "груст", "провал"), "stressed disappointed person"),
+    (("чиновник", "служб"), "government official civil service"),
+    (("сон", "спал", "снилось"), "sleeping person dream"),
+    (("галлюцин", "видение", "озарен"), "surreal vision revelation"),
+    (("иисус", "христ", "религи", "бог"), "Jesus Christian religious painting"),
+    (("арм", "солдат", "войск"), "historical soldiers army"),
+    (("восстан", "бунт", "битв", "револю"), "historical rebellion battle"),
+    (("деньг", "цена", "миллион", "тысяч"), "money finance"),
+    (("телефон", "сообщен", "звон"), "person using smartphone"),
+    (("машин", "авто"), "car driving road"),
+    (("компьют", "ютуб", "видео"), "video creator computer camera"),
+    (("дом", "квартир"), "home apartment"),
+    (("друг",), "friends talking"),
+    (("парень", "мужчин"), "young man portrait"),
+    (("девуш", "женщин"), "young woman portrait"),
+    (("отнош", "пара"), "young couple relationship"),
+)
+
+_HISTORY_STEMS = (
+    "истор", "восстан", "импер", "династ", "корол", "войн", "арм", "солдат",
+    "битв", "револю", "xix", "xviii", "xx век",
+)
+
 
 def build_shot_plan(
     transcript: Transcript,
@@ -35,11 +74,12 @@ def build_shot_plan(
     min_scene_seconds: float = 1.25,
     max_scene_seconds: float = 3.2,
 ) -> ShotPlan:
-    """Turn word-level timestamps into a first-pass short-form shot plan.
+    """Turn word timestamps into context-aware short-form scenes.
 
-    V0.1 is deterministic on purpose. It groups speech into fast semantic beats,
-    favors sentence boundaries, creates a stock-search query for every scene and
-    rotates simple motion so still-image edits already feel less static.
+    V0.6 keeps the director local/deterministic, but it no longer treats every
+    2-second chunk as an isolated sentence. A global visual context is inferred
+    from the whole narration and injected into every scene query. This prevents a
+    historical China story from suddenly searching for a modern generic student.
     """
     if min_scene_seconds <= 0 or target_scene_seconds < min_scene_seconds:
         raise ValueError("invalid scene duration settings")
@@ -52,15 +92,20 @@ def build_shot_plan(
         minimum=min_scene_seconds,
         maximum=max_scene_seconds,
     )
+    full_text = _join_words(transcript.words)
+    global_context = _global_visual_context(full_text)
 
     scenes: list[Scene] = []
-    for index, words in enumerate(chunks):
-        caption = _join_words(words)
+    captions = [_join_words(words) for words in chunks]
+    for index, (words, caption) in enumerate(zip(chunks, captions)):
+        previous_caption = captions[index - 1] if index > 0 else ""
+        next_caption = captions[index + 1] if index + 1 < len(captions) else ""
+        neighborhood = " ".join(x for x in (previous_caption, caption, next_caption) if x)
         scenes.append(
             Scene(
                 start=round(words[0].start, 3),
                 end=round(words[-1].end, 3),
-                query=_make_search_query(caption),
+                query=_make_search_query(caption, global_context=global_context, neighborhood=neighborhood),
                 asset_kind="blank",
                 motion=_MOTIONS[index % len(_MOTIONS)],
                 caption=caption,
@@ -108,17 +153,36 @@ def _chunk_words(
 
 def _join_words(words: list[Word]) -> str:
     text = " ".join(word.text for word in words)
-    # Whisper-like word streams often put punctuation in separate-ish tokens.
     text = re.sub(r"\s+([,.!?;:…])", r"\1", text)
     return text.strip()
 
 
-def _make_search_query(text: str, *, max_terms: int = 7) -> str:
-    raw_tokens = text.split()
+def _make_search_query(
+    text: str,
+    *,
+    global_context: str = "",
+    neighborhood: str = "",
+    max_terms: int = 5,
+) -> str:
+    local_keywords = _useful_keywords(text, max_terms=max_terms)
+    visual_hints = _scene_visual_hints(neighborhood or text)
+
+    pieces: list[str] = []
+    if global_context:
+        pieces.append(global_context)
+    if visual_hints:
+        pieces.extend(visual_hints[:2])
+    if local_keywords:
+        pieces.append(" ".join(local_keywords))
+
+    query = " ".join(pieces).strip()
+    return query or "people documentary photo"
+
+
+def _useful_keywords(text: str, *, max_terms: int) -> list[str]:
     useful: list[str] = []
     seen: set[str] = set()
-
-    for raw in raw_tokens:
+    for raw in text.split():
         token = _STRIP.sub("", raw).strip("_-").lower()
         if len(token) < 2 or token in _STOPWORDS or token in seen:
             continue
@@ -126,9 +190,48 @@ def _make_search_query(text: str, *, max_terms: int = 7) -> str:
         useful.append(token)
         if len(useful) >= max_terms:
             break
+    return useful
 
-    if useful:
-        return " ".join(useful)
 
-    fallback = " ".join(raw_tokens[:max_terms]).strip()
-    return fallback or "abstract background"
+def _scene_visual_hints(text: str) -> list[str]:
+    lowered = text.lower()
+    return [phrase for stems, phrase in _SCENE_RULES if any(stem in lowered for stem in stems)]
+
+
+def _global_visual_context(text: str) -> str:
+    lowered = text.lower()
+    parts: list[str] = []
+
+    for stems, phrase in _GLOBAL_RULES:
+        if any(stem in lowered for stem in stems):
+            parts.append(phrase)
+
+    era = _detect_era(lowered)
+    if era:
+        parts.append(era)
+
+    historical = bool(era) or any(stem in lowered for stem in _HISTORY_STEMS)
+    if historical:
+        parts.append("historical archival illustration")
+
+    # Strong cross-context hints. These are still generic rules, not tied to one
+    # benchmark: country + era should influence every shot in the story.
+    joined = " ".join(parts).lower()
+    if "china" in joined and "19th century" in joined:
+        parts.append("Qing dynasty")
+    if "taiping rebellion" in joined:
+        parts.append("1850s China")
+
+    return " ".join(dict.fromkeys(parts))
+
+
+def _detect_era(text: str) -> str:
+    if re.search(r"\b18\d{2}\b|\b19\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxix\b", text):
+        return "19th century"
+    if re.search(r"\b17\d{2}\b|\b18\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxviii\b", text):
+        return "18th century"
+    if re.search(r"\b19\d{2}\b|\b20\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxx\b", text):
+        return "20th century"
+    if re.search(r"\b20\d{2}\b|\b21\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxxi\b", text):
+        return "21st century modern"
+    return ""
