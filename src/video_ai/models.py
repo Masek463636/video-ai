@@ -43,6 +43,11 @@ class Scene:
     asset_kind: AssetKind = "blank"
     motion: MotionKind = "none"
     caption: str | None = None
+    # Normalized 0..1 coordinates of the visual subject. V0.3 uses these when
+    # cropping landscape source material into a vertical frame.
+    focus_x: float | None = None
+    focus_y: float | None = None
+    focus_source: str | None = None
 
     @property
     def duration(self) -> float:
