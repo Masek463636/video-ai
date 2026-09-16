@@ -18,7 +18,6 @@ def render_plan(
     captions: bool = True,
     crf: int = 20,
 ) -> Path:
-    """Render a local ShotPlan to a vertical MP4 with the original voiceover."""
     _require("ffmpeg")
     _require("ffprobe")
     output = Path(output)
@@ -122,16 +121,15 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
 
 
 def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
-    """Build a subtle eased Ken Burns move for a still image.
+    """AE-like ease-in/out camera move for still images.
 
-    V0.6 replaces the old linear 12% move with smoothstep easing and a ~5.5%
-    camera move. The motion starts/ends slowly, which removes the mechanical snap
-    visible in the V0.5 benchmark render.
+    Progress follows 0.5 - 0.5*cos(pi*t): zero velocity at both ends and the
+    highest velocity in the middle, which is much closer to Easy Ease by eye.
     """
     w, h, fps = plan.width, plan.height, plan.fps
     frames = max(2, int(math.ceil(duration * fps)))
     denominator = max(1, frames - 1)
-    overscan = 1.10
+    overscan = 1.12
     big_w = int(math.ceil(w * overscan / 2) * 2)
     big_h = int(math.ceil(h * overscan / 2) * 2)
     fx = _clamp_focus(scene.focus_x)
@@ -143,17 +141,15 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
         f"crop={big_w}:{big_h}:x='{xexpr}':y='{yexpr}'"
     )
 
-    # smoothstep(t) = t²(3-2t), t in [0,1]. Repeat the expression rather than
-    # relying on variables unsupported by ffmpeg's expression evaluator.
     t_on = f"min(on/{denominator},1)"
-    ease_on = f"(({t_on})*({t_on})*(3-2*({t_on})))"
+    ease_on = f"(0.5-0.5*cos(PI*({t_on})))"
     t_n = f"min(n/{denominator},1)"
-    ease_n = f"(({t_n})*({t_n})*(3-2*({t_n})))"
+    ease_n = f"(0.5-0.5*cos(PI*({t_n})))"
 
     if scene.motion == "zoom_in":
         return (
             base + "," +
-            f"zoompan=z='1.015+0.055*{ease_on}':"
+            f"zoompan=z='1.01+0.085*{ease_on}':"
             f"x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':"
             f"y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':"
             f"d=1:s={w}x{h}:fps={fps}"
@@ -161,7 +157,7 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
     if scene.motion == "zoom_out":
         return (
             base + "," +
-            f"zoompan=z='1.070-0.055*{ease_on}':"
+            f"zoompan=z='1.095-0.085*{ease_on}':"
             f"x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':"
             f"y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':"
             f"d=1:s={w}x{h}:fps={fps}"
@@ -170,16 +166,10 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
         direction = "1" if scene.motion == "pan_right" else "-1"
         x_pan = (
             f"max(0,min(iw-ow,{fx:.5f}*iw-ow/2+({direction})*"
-            f"({ease_n}-0.5)*(iw-ow)*0.82))"
+            f"({ease_n}-0.5)*(iw-ow)*0.94))"
         )
-        return (
-            base + "," +
-            f"crop={w}:{h}:x='{x_pan}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
-        )
-    return (
-        base + "," +
-        f"crop={w}:{h}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
-    )
+        return base + f",crop={w}:{h}:x='{x_pan}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
+    return base + f",crop={w}:{h}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}',fps={fps}"
 
 
 def _video_filter(scene: Scene, plan: ShotPlan) -> str:
