@@ -8,11 +8,20 @@ class ClipRanker:
     """Optional local image/text similarity ranker.
 
     The heavy ML stack is intentionally optional. Install `video-ai[semantic]` and
-    enable semantic ranking from the CLI. The model is downloaded once and then
-    cached by Hugging Face locally.
+    enable semantic ranking from the CLI. One model instance is reused for all
+    scenes in a process so a 30-scene Short does not reload CLIP 30 times.
     """
 
+    _instances: dict[str, "ClipRanker"] = {}
+
+    def __new__(cls, model_name: str = "openai/clip-vit-base-patch32"):
+        if model_name not in cls._instances:
+            cls._instances[model_name] = super().__new__(cls)
+        return cls._instances[model_name]
+
     def __init__(self, model_name: str = "openai/clip-vit-base-patch32") -> None:
+        if getattr(self, "_initialized", False):
+            return
         try:
             import torch  # type: ignore
             from transformers import CLIPModel, CLIPProcessor  # type: ignore
@@ -26,6 +35,7 @@ class ClipRanker:
         self.processor = CLIPProcessor.from_pretrained(model_name)
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
         self.model.eval()
+        self._initialized = True
 
     def score_images(self, prompt: str, paths: list[str | Path]) -> list[float]:
         if not paths:
@@ -71,5 +81,4 @@ class ClipRanker:
 
 @lru_cache(maxsize=2)
 def get_clip_ranker(model_name: str = "openai/clip-vit-base-patch32") -> ClipRanker:
-    """Load a semantic model once per process instead of once per scene."""
     return ClipRanker(model_name)
