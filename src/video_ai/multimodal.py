@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 
@@ -51,11 +53,10 @@ class ClipRanker:
         for index, path in enumerate(paths):
             p = Path(path)
             try:
-                # Some upstream image proxies occasionally return HTML/error
-                # payloads while keeping an image-looking URL. Sniff the file
-                # before Pillow/libpng touches it so corrupt payloads are silently
-                # skipped instead of spamming "Invalid PNG signature" errors.
-                if not _has_known_image_signature(p):
+                # Signature alone is insufficient: a truncated/corrupt PNG may
+                # have a valid header. Decode-probe one frame silently before
+                # Pillow/CLIP so corrupt upstream payloads cannot spam stderr.
+                if not _has_known_image_signature(p) or not _silent_decode_probe(p):
                     continue
                 with Image.open(p) as opened:
                     opened.verify()
@@ -90,7 +91,8 @@ class ClipRanker:
 
 def _has_known_image_signature(path: Path) -> bool:
     try:
-        header = path.read_bytes()[:16]
+        with path.open("rb") as handle:
+            header = handle.read(16)
     except OSError:
         return False
     if header.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -100,6 +102,23 @@ def _has_known_image_signature(path: Path) -> bool:
     if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
         return True
     return False
+
+
+def _silent_decode_probe(path: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return True
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=12,
+            check=False,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
 
 
 @lru_cache(maxsize=2)
