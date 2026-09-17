@@ -18,6 +18,7 @@ from .models import Scene
 
 _API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 _JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", flags=re.IGNORECASE)
+_SOFT_CONTEXT_RE = re.compile(r"(?:\.|\s)*Soft historical setting:\s*[^.]+\.?", flags=re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -88,18 +89,20 @@ Return ONLY valid JSON:
 
 BALANCED EDITING RULES:
 - Keep scene indexes unchanged.
+- The CURRENT caption is the authority for the visible beat.
+- Global story setting is background knowledge, NOT a mandatory property of every unlocked visual.
+- For generic stress, shock, sleep, emotion, money, fire or other universal concepts, modern/generic B-roll is allowed unless the caption itself makes period identity essential.
 - Tone describes how the visual should FEEL, not just the nouns it contains.
 - Mass death, casualties, destruction and tragedy must be tragic/negative/violent, never cheerful, vacation-like, luxurious or relaxing.
 - semantic_lock is a HARD FACT LOCK, not general story context.
 - Set semantic_lock=true ONLY when the CURRENT scene caption explicitly names a specific person, named event/war/rebellion, named historical institution, dynasty, or similarly concrete factual entity that the visual must depict accurately.
-- DO NOT hard-lock a person/event merely because it appeared in the previous/next scene or elsewhere in the narration.
+- DO NOT hard-lock a person/event merely because it appeared in another scene.
 - Pronouns do NOT automatically justify repeating the person's portrait. Use the action, emotion or consequence being spoken instead.
 - Never use the same visual idea on consecutive scenes if another honest visual exists.
 - A named person's portrait should usually appear once when introduced, not on every later reference.
 - A map should normally appear at most once in a ~20 second Short unless geography actually changes.
-- Historical accuracy still matters for contextual visuals.
 - Use historical_archive for exact historical facts and genuinely historical action beats.
-- Use stock_video only for generic actions/concepts that can honestly be represented.
+- Use stock_video for generic actions/concepts that can honestly be represented.
 - Use generic_image for illustrations, dreams, emotions and conceptual beats when a still is stronger.
 - Use memes sparingly: usually 0-2 per ~20 seconds. Never use a meme for a hard-locked factual beat.
 - Search queries for unlocked scenes should describe the current ACTION/EMOTION first.
@@ -120,13 +123,14 @@ BALANCED EDITING RULES:
             for preview in previews:
                 encoded = base64.b64encode(preview.read_bytes()).decode("ascii")
                 parts.append({"inline_data": {"mime_type": "image/jpeg", "data": encoded}})
+            director_intent = _judge_description(scene)
             prompt = f"""
 You are a visual relevance + tone + quality judge for an automatically edited YouTube Short.
 The supplied images are representative frames from ONE candidate asset.
 
 Narration in this scene: {scene.caption or ''}
 Scene tone: {scene.tone}
-Director wants to show: {scene.visual_description or scene.query}
+Director wants to show: {director_intent}
 Preferred visual type: {scene.visual_mode}
 Required source type: {scene.source_mode}
 Semantic lock: {scene.semantic_lock}
@@ -146,12 +150,16 @@ Return ONLY JSON:
   "mismatch": "none OR exact mismatch"
 }}
 
-Overall score measures semantic relevance.
-Tone_match 0-100 measures emotional compatibility with the narration.
+Overall score measures semantic relevance to the CURRENT narration beat.
+Tone_match 0-100 measures emotional compatibility.
 Quality_score 0-100 measures whether this looks like usable Shorts footage/image.
 
 For SEMANTIC LOCK scenes be strict: wrong person/event/war/country/century is a reject.
-For UNLOCKED scenes, accept contextual or metaphorical visuals when they honestly communicate the current beat. Do not reject merely because the exact historical person is absent.
+For UNLOCKED scenes:
+- judge the current action/emotion/concept first;
+- global historical setting is advisory only unless the current narration explicitly makes era/country identity important;
+- do NOT reject generic emotional/action B-roll merely because it is modern;
+- do reject a visually unrelated asset even if its mood is correct.
 Strongly penalize obvious website screenshots, watermarks, posters, tiny subjects, broken images, extremely poor scans, or a severe tone contradiction.
 For 9:16 Shorts prefer a clear main subject and composition that survives a vertical crop.
 """.strip()
@@ -159,23 +167,33 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             data = self._generate_json(parts, temperature=0.02)
             if not isinstance(data, dict):
                 return None
-            score = max(0, min(100, int(float(data.get("score", 0)))))
+            raw_score = max(0, min(100, int(float(data.get("score", 0)))))
             tone_match = max(0, min(100, int(float(data.get("tone_match", 0)))))
             quality_score = max(0, min(100, int(float(data.get("quality_score", 0)))))
             issues_raw = data.get("quality_issues") or []
             issues = [str(x)[:80] for x in issues_raw[:8]] if isinstance(issues_raw, list) else []
+            mismatch = str(data.get("mismatch", ""))[:200]
+            reason = str(data.get("reason", ""))[:300]
+
+            # assets.py treats score < 30 as a hard reject. For an unlocked
+            # scene, semantic relevance below 45 is too weak to display even if
+            # tone/quality are fine, so map it below that hard threshold and
+            # force recovery search instead of accepting a random-looking shot.
+            score = raw_score
+            if not scene.semantic_lock and raw_score < 45:
+                score = 29
+                mismatch = mismatch if mismatch and mismatch.lower() != "none" else "semantic relevance below minimum"
+                reason = f"Low semantic relevance ({raw_score}/100). {reason}".strip()
+
             if scene.semantic_lock:
                 accept = bool(data.get("accept", False)) and score >= 72 and quality_score >= 45
             else:
-                # Recovery philosophy: this flag is guidance, not a guillotine.
-                # Severe contradictions are filtered again by assets.py; a merely
-                # imperfect candidate can still compete against other candidates.
                 accept = bool(data.get("accept", False)) and score >= 48 and tone_match >= 42 and quality_score >= 42
             return VisualJudgement(
                 accept=accept,
                 score=score,
-                reason=str(data.get("reason", ""))[:300],
-                mismatch=str(data.get("mismatch", ""))[:200],
+                reason=reason,
+                mismatch=mismatch,
                 tone_match=tone_match,
                 quality_score=quality_score,
                 quality_issues=issues,
@@ -209,7 +227,7 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.2.2",
+                "User-Agent": "video-ai/1.2.5",
             })
             try:
                 with urllib.request.urlopen(req, timeout=60) as response:
@@ -234,6 +252,16 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
 def get_gemini_client() -> GeminiClient | None:
     client = GeminiClient()
     return client if client.available else None
+
+
+def _judge_description(scene: Scene) -> str:
+    value = scene.visual_description or scene.query or "documentary scene"
+    if scene.semantic_lock:
+        return value
+    # Compatibility with 1.2.3/1.2.4 plans: older asset code may append this
+    # advisory marker to visual_description. It must never become a Judge rule.
+    value = _SOFT_CONTEXT_RE.sub("", value)
+    return re.sub(r"\s+", " ", value).strip(" .,-") or (scene.caption or scene.query or "documentary scene")
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
