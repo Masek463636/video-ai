@@ -55,6 +55,24 @@ def infer_tone(text: str | None) -> Tone:
     if english_life_loss and (english_mass or any(x in value for x in ("lost", "claimed", "killed"))):
         return "tragic"
 
+    # v1.2.6: current ACTION beats theme. A sentence can mention Jesus/religion
+    # while actually describing an army, rebellion or soldiers. In that case
+    # the visual tone must support the action instead of steering CLIP toward
+    # icons/paintings merely because a religious word is present.
+    violent_action = any(x in value for x in (
+        "битв", "сраж", "атак", "штурм", "убил", "взрыв", "резн",
+        "battle", "fight", "attack", "assault", "explosion", "massacre",
+    ))
+    if violent_action:
+        return "violent"
+
+    military_action = any(x in value for x in (
+        "арм", "войск", "солдат", "крестьянск", "повстан", "мятеж", "восстан",
+        "army", "troops", "soldier", "soldiers", "military", "rebel", "rebellion", "peasant army",
+    ))
+    if military_action:
+        return "tense"
+
     for tone, needles in _TONE_RULES:
         if any(needle in value for needle in needles):
             return tone
