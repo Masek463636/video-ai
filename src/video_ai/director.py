@@ -45,6 +45,17 @@ _MEME_STEMS = ("вдруг", "и тут", "прикол", "шок", "жесть"
 _DRAMATIC_STEMS = ("вдруг", "шок", "галлюцин", "видение", "убит", "погиб", "битв", "войн", "восстан", "огонь", "взрыв")
 _PULLBACK_STEMS = ("итог", "в итоге", "миллион", "погиб", "закончил", "после", "последств")
 
+_QUERY_TAGS: dict[str, tuple[str, ...]] = {
+    "china": ("china", "chinese", "qing", "taiping"),
+    "religion": ("jesus", "christ", "christian", "biblical", "religious", "church", "sacred"),
+    "army": ("army", "soldier", "soldiers", "military", "rebel", "rebellion", "peasants", "battle", "troops"),
+    "emotion": ("stress", "stressed", "anxious", "sad", "upset", "disappointed", "panic", "crying"),
+    "vision": ("vision", "dream", "surreal", "hallucination", "revelation", "mystical"),
+    "exam": ("exam", "examination", "student", "civil service"),
+    "war": ("war", "wwi", "world war", "trench", "battlefield"),
+    "money": ("money", "cash", "finance", "currency"),
+}
+
 
 def build_shot_plan(
     transcript: Transcript,
@@ -125,6 +136,7 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
         deterministic_context = list(scene.required_context)
         deterministic_fallback = scene.semantic_fallback
         local_historical = _locally_historical(scene.caption or "")
+        rule_queries = list(scene.search_queries)
 
         mode = str(item.get("visual_mode", scene.visual_mode)).lower().strip()
         if mode in {"image", "video", "meme", "auto"}:
@@ -151,14 +163,22 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
             q = re.sub(r"\s+", " ", str(value)).strip()
             if not deterministic_lock and not local_historical:
                 q = _strip_historical_constraints(q)
-            if q and q.lower() not in seen:
+            if not q:
+                continue
+            if not deterministic_lock and rule_queries and not _query_matches_intent(q, rule_queries):
+                continue
+            if q.lower() not in seen:
                 seen.add(q.lower())
                 cleaned.append(q[:180])
-            if len(cleaned) >= 5:
+            if len(cleaned) >= 4:
                 break
-        if cleaned:
-            scene.search_queries = cleaned
-            scene.query = cleaned[0]
+
+        # Gemini may enrich search intent, but it may no longer replace the
+        # deterministic current-beat intent wholesale. Rule queries stay first.
+        merged_queries = _merge_queries(rule_queries[:2], cleaned, rule_queries[2:])
+        if merged_queries:
+            scene.search_queries = merged_queries[:5]
+            scene.query = scene.search_queries[0]
 
         if deterministic_lock:
             scene.semantic_lock = True
@@ -180,14 +200,36 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
             scene.visual_mode = "image"
             scene.source_mode = "generic_image"
             scene.visual_description = "Christian religious imagery associated with Jesus Christ, spiritual revelation or biblical symbolism; no unrelated religion"
-            christian_query = "Jesus Christ Christian religious painting spiritual revelation"
-            scene.search_queries = [christian_query, "Christian biblical vision Jesus illustration", *(scene.search_queries or [])][:5]
+            scene.search_queries = _merge_queries(
+                [
+                    "Jesus Christ painting",
+                    "Christian religious painting",
+                    "biblical vision Jesus",
+                    "Jesus Christ religious art",
+                ],
+                scene.search_queries,
+            )[:5]
             scene.query = scene.search_queries[0]
 
         if _explicit_army_action(scene.caption or "") and not scene.semantic_lock:
             scene.source_mode = "historical_archive"
             scene.visual_mode = "image"
             scene.visual_description = "historical peasant rebel army or soldiers marching; documentary archival illustration"
+            if _taiping_story(full_text):
+                army_queries = [
+                    "Taiping Rebellion soldiers",
+                    "19th century Chinese rebel army",
+                    "Chinese peasant rebel army engraving",
+                    "Qing dynasty soldiers historical illustration",
+                ]
+            else:
+                army_queries = [
+                    "historical rebel army engraving",
+                    "peasant soldiers historical illustration",
+                    "historical troops marching engraving",
+                ]
+            scene.search_queries = _merge_queries(army_queries, scene.search_queries)[:5]
+            scene.query = scene.search_queries[0]
 
         if scene.visual_mode == "meme" and not scene.semantic_lock:
             scene.source_mode = "meme_library"
@@ -300,6 +342,67 @@ def _search_queries(text: str, global_context: str, neighborhood: str, mode: Vis
             out.append(query)
             seen.add(query.lower())
     return out or ["documentary people video b roll" if mode == "video" else "documentary photo"]
+
+
+def _query_matches_intent(query: str, baseline_queries: list[str]) -> bool:
+    """Reject obvious Gemini query drift without blocking reasonable synonyms.
+
+    We compare both literal English tokens and coarse semantic tags. If the
+    deterministic query contains a strong intent tag (China, religion, army,
+    emotion, vision, exam, war...), a Gemini query must share at least one tag
+    or a meaningful literal token. Generic beats without a known tag stay open.
+    """
+    baseline = " ".join(baseline_queries[:3]).lower()
+    q = query.lower()
+    baseline_tags = _semantic_query_tags(baseline)
+    query_tags = _semantic_query_tags(q)
+    if baseline_tags and baseline_tags & query_tags:
+        return True
+
+    baseline_tokens = _english_tokens(baseline)
+    query_tokens = _english_tokens(q)
+    overlap = baseline_tokens & query_tokens
+    if len(overlap) >= 2:
+        return True
+    if len(overlap) == 1 and len(query_tokens) <= 7:
+        return True
+
+    # If we have no meaningful English intent signal, do not over-filter.
+    return not baseline_tags
+
+
+def _semantic_query_tags(text: str) -> set[str]:
+    lowered = text.lower()
+    return {
+        tag
+        for tag, needles in _QUERY_TAGS.items()
+        if any(needle in lowered for needle in needles)
+    }
+
+
+def _english_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z][a-z-]{2,}", text.lower())
+        if token not in {"the", "and", "with", "from", "into", "photo", "image", "video", "documentary", "historical", "illustration", "footage", "scene", "visual", "broll", "roll"}
+    }
+
+
+def _merge_queries(*groups: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in group:
+            q = re.sub(r"\s+", " ", str(value)).strip()
+            if q and q.lower() not in seen:
+                seen.add(q.lower())
+                out.append(q)
+    return out
+
+
+def _taiping_story(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in ("тайпин", "сюцюан", "taiping", "hong xiu"))
 
 
 def _strip_historical_constraints(value: str) -> str:
