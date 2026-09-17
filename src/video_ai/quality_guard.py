@@ -81,16 +81,11 @@ def local_quality_guard(
     height: int = 0,
     kind: str = "image",
 ) -> LocalQualityResult:
-    """Cheap local pre-filter before spending a Gemini vision request."""
     path = Path(path)
     issues: list[str] = []
     score = 100
     hay = f"{title} {description}".lower()
 
-    # Upstream proxies can return truncated/corrupt PNG/JPEG bytes while the
-    # extension, magic header and metadata dimensions still look valid. Verify
-    # both the signature and a real one-frame ffmpeg decode before the asset is
-    # allowed anywhere near CLIP, Gemini or the renderer.
     if kind == "image":
         if (
             not path.exists()
@@ -167,13 +162,21 @@ def _silent_decode_probe(path: Path) -> bool:
         return True
     try:
         completed = subprocess.run(
-            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            [
+                ffmpeg,
+                "-v", "error",
+                "-xerror",
+                "-err_detect", "explode",
+                "-i", str(path),
+                "-frames:v", "1",
+                "-f", "null", "-",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=12,
             check=False,
         )
-        return completed.returncode == 0
+        return completed.returncode == 0 and not completed.stderr.strip()
     except Exception:
         return False
 
