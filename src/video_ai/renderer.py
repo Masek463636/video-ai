@@ -196,7 +196,7 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
             start, end = 1.065, 1.000
         delta = end - start
         zoom = f"{start:.5f}+({delta:.5f})*{ease_on}"
-        return base + "," + f"zoompan=z='{zoom}':x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-iw/zoom/2))':d=1:s={rw}x{rh}:fps={fps}" + finish
+        return base + "," + f"zoompan=z='{zoom}':x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':d=1:s={rw}x{rh}:fps={fps}" + finish
 
     if preset in {"reveal_left", "reveal_right"}:
         direction = "1" if preset == "reveal_left" else "-1"
