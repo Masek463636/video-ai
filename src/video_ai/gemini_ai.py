@@ -175,10 +175,6 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             mismatch = str(data.get("mismatch", ""))[:200]
             reason = str(data.get("reason", ""))[:300]
 
-            # assets.py treats score < 30 as a hard reject. For an unlocked
-            # scene, semantic relevance below 45 is too weak to display even if
-            # tone/quality are fine, so map it below that hard threshold and
-            # force recovery search instead of accepting a random-looking shot.
             score = raw_score
             if not scene.semantic_lock and raw_score < 45:
                 score = 29
@@ -227,7 +223,7 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.2.5",
+                "User-Agent": "video-ai/1.3.1",
             })
             try:
                 with urllib.request.urlopen(req, timeout=60) as response:
@@ -258,8 +254,6 @@ def _judge_description(scene: Scene) -> str:
     value = scene.visual_description or scene.query or "documentary scene"
     if scene.semantic_lock:
         return value
-    # Compatibility with 1.2.3/1.2.4 plans: older asset code may append this
-    # advisory marker to visual_description. It must never become a Judge rule.
     value = _SOFT_CONTEXT_RE.sub("", value)
     return re.sub(r"\s+", " ", value).strip(" .,-") or (scene.caption or scene.query or "documentary scene")
 
@@ -288,16 +282,21 @@ def _parse_json_text(text: str) -> Any:
 
 
 def _make_previews(path: Path, *, count: int = 3) -> list[Path]:
-    if not path.exists() or shutil.which("ffmpeg") is None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not path.exists() or ffmpeg is None:
         return []
     suffix = path.suffix.lower()
     is_video = suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".ogv", ".ogg"}
+
+    if not is_video and not _silent_decode_probe(path):
+        return []
+
     temp_dir = Path(tempfile.mkdtemp(prefix="video-ai-gemini-"))
     if not is_video:
         target = temp_dir / "preview_0.jpg"
-        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(path), "-frames:v", "1", "-vf", "scale='min(768,iw)':-2", "-q:v", "4", str(target)]
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(path), "-frames:v", "1", "-vf", "scale='min(768,iw)':-2", "-q:v", "4", str(target)]
         try:
-            subprocess.run(cmd, check=True, timeout=35)
+            subprocess.run(cmd, check=True, timeout=35, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return [target] if target.exists() and target.stat().st_size > 512 else []
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -309,9 +308,9 @@ def _make_previews(path: Path, *, count: int = 3) -> list[Path]:
     for i, fraction in enumerate(times):
         target = temp_dir / f"preview_{i}.jpg"
         seek = max(0.0, duration * fraction if duration > 0 else 0.5 + i * 0.7)
-        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{seek:.3f}", "-i", str(path), "-frames:v", "1", "-vf", "scale='min(768,iw)':-2", "-q:v", "4", str(target)]
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{seek:.3f}", "-i", str(path), "-frames:v", "1", "-vf", "scale='min(768,iw)':-2", "-q:v", "4", str(target)]
         try:
-            subprocess.run(cmd, check=True, timeout=35)
+            subprocess.run(cmd, check=True, timeout=35, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if target.exists() and target.stat().st_size > 512:
                 previews.append(target)
         except Exception:
@@ -319,6 +318,23 @@ def _make_previews(path: Path, *, count: int = 3) -> list[Path]:
     if not previews:
         shutil.rmtree(temp_dir, ignore_errors=True)
     return previews
+
+
+def _silent_decode_probe(path: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return True
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=12,
+            check=False,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
 
 
 def _probe_duration(path: Path) -> float:
