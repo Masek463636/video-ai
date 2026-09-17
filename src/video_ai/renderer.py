@@ -72,12 +72,6 @@ def _display_ranges(plan: ShotPlan, audio_duration: float) -> list[tuple[Scene, 
 
 
 def _visual_spans(plan: ShotPlan, audio_duration: float) -> list[tuple[Scene, float, float]]:
-    """Merge adjacent subtitle scenes that use exactly the same visual asset.
-
-    Captions remain scene-timed in ASS, but camera motion is rendered once across
-    the whole visual span. This removes the visible zoom/pan reset that made the
-    edit feel AI-generated at every subtitle boundary.
-    """
     ranges = _display_ranges(plan, audio_duration)
     if not ranges:
         return []
@@ -107,11 +101,22 @@ def _same_visual(a: Scene, b: Scene) -> bool:
 def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
     duration = max(0.05, duration)
     common = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p", "-r", str(plan.fps), "-t", f"{duration:.3f}", str(output)]
+
     if scene.asset_kind == "image" and scene.asset and Path(scene.asset).exists():
-        _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", str(plan.fps), "-i", str(scene.asset), "-vf", _image_filter(scene, plan, duration), *common])
+        asset = Path(scene.asset)
+        if not _silent_decode_probe(asset):
+            print(f"[render] skipped corrupt image: {asset.name}", flush=True)
+            _render_safe_background(duration, plan, output, crf=crf)
+            return
+        _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", str(plan.fps), "-i", str(asset), "-vf", _image_filter(scene, plan, duration), *common])
         return
+
     if scene.asset_kind == "video" and scene.asset and Path(scene.asset).exists():
         asset = Path(scene.asset)
+        if not _silent_decode_probe(asset):
+            print(f"[render] skipped corrupt video: {asset.name}", flush=True)
+            _render_safe_background(duration, plan, output, crf=crf)
+            return
         vf = _video_filter(scene, plan, duration)
         if scene.source_mode == "meme_library":
             asset_duration = _safe_probe_duration(asset)
@@ -125,11 +130,37 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
             return
         _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-stream_loop", "-1", "-i", str(asset), "-vf", vf, *common])
         return
-    _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c=0x101014:s={plan.width}x{plan.height}:r={plan.fps}:d={duration:.3f}", *common])
+
+    _render_safe_background(duration, plan, output, crf=crf)
+
+
+def _render_safe_background(duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
+    _run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"color=c=0x101014:s={plan.width}x{plan.height}:r={plan.fps}:d={duration:.3f}",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+        "-pix_fmt", "yuv420p", "-r", str(plan.fps), "-t", f"{duration:.3f}", str(output),
+    ])
+
+
+def _silent_decode_probe(path: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return True
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=12,
+            check=False,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
 
 
 def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
-    """Composition-aware AE-like still-image motion."""
     w, h, fps = plan.width, plan.height, plan.fps
     render_scale = 1.5
     rw = int(math.ceil(w * render_scale / 2) * 2)
@@ -165,7 +196,7 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
             start, end = 1.065, 1.000
         delta = end - start
         zoom = f"{start:.5f}+({delta:.5f})*{ease_on}"
-        return base + "," + f"zoompan=z='{zoom}':x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':d=1:s={rw}x{rh}:fps={fps}" + finish
+        return base + "," + f"zoompan=z='{zoom}':x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-iw/zoom/2))':d=1:s={rw}x{rh}:fps={fps}" + finish
 
     if preset in {"reveal_left", "reveal_right"}:
         direction = "1" if preset == "reveal_left" else "-1"
