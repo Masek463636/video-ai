@@ -326,13 +326,21 @@ def _silent_decode_probe(path: Path) -> bool:
         return True
     try:
         completed = subprocess.run(
-            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            [
+                ffmpeg,
+                "-v", "error",
+                "-xerror",
+                "-err_detect", "explode",
+                "-i", str(path),
+                "-frames:v", "1",
+                "-f", "null", "-",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=12,
             check=False,
         )
-        return completed.returncode == 0
+        return completed.returncode == 0 and not completed.stderr.strip()
     except Exception:
         return False
 
