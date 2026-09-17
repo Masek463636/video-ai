@@ -87,12 +87,18 @@ def local_quality_guard(
     score = 100
     hay = f"{title} {description}".lower()
 
-    # Critical v1.3 guard: upstream proxies sometimes save HTML/error bytes
-    # under a .png/.jpg-looking URL. Metadata width/height may still look valid,
-    # so verify the actual payload before CLIP/Gemini/ffmpeg ever sees it.
+    # Upstream proxies can return truncated/corrupt PNG/JPEG bytes while the
+    # extension, magic header and metadata dimensions still look valid. Verify
+    # both the signature and a real one-frame ffmpeg decode before the asset is
+    # allowed anywhere near CLIP, Gemini or the renderer.
     if kind == "image":
-        if not path.exists() or path.stat().st_size < 512 or not _looks_like_supported_image(path):
-            return LocalQualityResult(accept=False, score=0, issues=["invalid_image_payload"])
+        if (
+            not path.exists()
+            or path.stat().st_size < 512
+            or not _looks_like_supported_image(path)
+            or not _silent_decode_probe(path)
+        ):
+            return LocalQualityResult(accept=False, score=0, issues=["undecodable_image"])
 
     for bad in _BAD_TITLE_TERMS:
         pattern = r"(?<!\w)" + re.escape(bad) + r"(?!\w)"
@@ -153,6 +159,23 @@ def _looks_like_supported_image(path: Path) -> bool:
     if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
         return True
     return False
+
+
+def _silent_decode_probe(path: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return True
+    try:
+        completed = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=12,
+            check=False,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
 
 
 def _probe_video_stream(path: str | Path) -> dict:
