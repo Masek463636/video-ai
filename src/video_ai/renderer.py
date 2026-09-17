@@ -10,6 +10,9 @@ from pathlib import Path
 from .models import Scene, ShotPlan
 
 
+_MAX_CONTINUOUS_VISUAL_SECONDS = 2.85
+
+
 def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | None = None, captions: bool = True, crf: int = 20) -> Path:
     _require("ffmpeg")
     _require("ffprobe")
@@ -78,7 +81,12 @@ def _visual_spans(plan: ShotPlan, audio_duration: float) -> list[tuple[Scene, fl
     spans: list[tuple[Scene, float, float]] = []
     current_scene, current_start, current_end = ranges[0]
     for scene, start, end in ranges[1:]:
-        if _same_visual(current_scene, scene) and abs(start - current_end) <= 0.08:
+        can_merge = (
+            _same_visual(current_scene, scene)
+            and abs(start - current_end) <= 0.08
+            and (end - current_start) <= _MAX_CONTINUOUS_VISUAL_SECONDS
+        )
+        if can_merge:
             current_end = end
             continue
         spans.append((current_scene, current_start, current_end))
@@ -93,9 +101,18 @@ def _same_visual(a: Scene, b: Scene) -> bool:
     if a.asset_kind != b.asset_kind or not a.asset or not b.asset:
         return False
     try:
-        return Path(a.asset).resolve() == Path(b.asset).resolve()
+        same_asset = Path(a.asset).resolve() == Path(b.asset).resolve()
     except OSError:
-        return str(a.asset) == str(b.asset)
+        same_asset = str(a.asset) == str(b.asset)
+    if not same_asset:
+        return False
+    if _resolved_preset(a) != _resolved_preset(b):
+        return False
+    if abs(_clamp_focus(a.focus_x) - _clamp_focus(b.focus_x)) > 0.03:
+        return False
+    if abs(_clamp_focus(a.focus_y) - _clamp_focus(b.focus_y)) > 0.03:
+        return False
+    return True
 
 
 def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
