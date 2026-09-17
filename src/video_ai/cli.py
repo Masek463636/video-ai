@@ -10,6 +10,7 @@ from .audio_plan import build_audio_plan, save_audio_plan
 from .director import build_shot_plan
 from .editing_grammar import apply_pre_asset_grammar, diversity_repair_indexes
 from .io import load_shot_plan, save_shot_plan
+from .material_brain import diversity_summary, find_duplicate_scenes, prepare_diversity_repair
 from .probe import probe
 from .qc import failed_scene_indexes, inspect_plan, save_qc
 from .renderer import render_plan
@@ -21,6 +22,7 @@ def _add_quality_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--semantic", action="store_true", help="Use optional local CLIP text-image reranking")
     parser.add_argument("--semantic-top-k", type=int, default=6)
     parser.add_argument("--repair-passes", type=int, default=2, help="QC-driven asset replacement passes")
+    parser.add_argument("--diversity-passes", type=int, default=3, help="Material Brain passes for repeated/near-duplicate visuals")
     parser.add_argument("--meme-dir", default=None, help="Optional local folder of meme/reaction images and videos")
 
 
@@ -40,17 +42,50 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         meme_dir=args.meme_dir,
     )
 
-    diversity_repairs = diversity_repair_indexes(plan)
-    if diversity_repairs:
-        print(f"[grammar] replacing repetitive visual scenes: {diversity_repairs}", flush=True)
+    all_diversity_repairs: set[int] = set()
+
+    # Editing Grammar catches obvious duration/recent-window repetition first.
+    grammar_repairs = diversity_repair_indexes(plan)
+    if grammar_repairs:
+        all_diversity_repairs.update(grammar_repairs)
+        print(f"[grammar] replacing repetitive visual scenes: {grammar_repairs}", flush=True)
         manifest = materialize_assets(
             plan,
             work / "assets",
             limit=args.limit,
             semantic=args.semantic,
             semantic_top_k=args.semantic_top_k,
-            replace_scenes=set(diversity_repairs),
+            replace_scenes=set(grammar_repairs),
             rank_offset=1,
+            meme_dir=args.meme_dir,
+        )
+
+    # v1.3.1 Material Brain works on the actual decoded visuals rather than URLs.
+    # This catches mirrors/resizes and fallback copies that the provider-level
+    # duplicate guard cannot see. Each pass changes the query framing and moves
+    # deeper into the ranked list instead of asking for the same asset again.
+    for pass_index in range(max(0, args.diversity_passes)):
+        duplicate_scenes, matches = find_duplicate_scenes(plan)
+        if not duplicate_scenes:
+            break
+        all_diversity_repairs.update(duplicate_scenes)
+        compact = ", ".join(
+            f"{m.scene}->{m.original_scene}:{m.similarity:.2f}" for m in matches[:8]
+        )
+        print(
+            f"[material] diversity pass {pass_index + 1}: replacing {duplicate_scenes}"
+            + (f" | {compact}" if compact else ""),
+            flush=True,
+        )
+        prepare_diversity_repair(plan, duplicate_scenes, pass_index=pass_index)
+        manifest = materialize_assets(
+            plan,
+            work / "assets",
+            limit=max(args.limit, 24),
+            semantic=args.semantic,
+            semantic_top_k=max(args.semantic_top_k, 8),
+            replace_scenes=set(duplicate_scenes),
+            rank_offset=pass_index + 2,
             meme_dir=args.meme_dir,
         )
 
@@ -70,7 +105,34 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             meme_dir=args.meme_dir,
         )
         qc_results = inspect_plan(plan)
-    return manifest, qc_results, diversity_repairs
+
+    # QC replacement can itself re-introduce an already used visual. Run one
+    # final anti-repeat pass so the final materialized plan, not just the first
+    # selection, is checked for diversity.
+    final_duplicates, final_matches = find_duplicate_scenes(plan)
+    if final_duplicates:
+        all_diversity_repairs.update(final_duplicates)
+        print(f"[material] final anti-repeat pass: {final_duplicates}", flush=True)
+        prepare_diversity_repair(plan, final_duplicates, pass_index=max(1, args.diversity_passes))
+        manifest = materialize_assets(
+            plan,
+            work / "assets",
+            limit=max(args.limit, 28),
+            semantic=args.semantic,
+            semantic_top_k=max(args.semantic_top_k, 8),
+            replace_scenes=set(final_duplicates),
+            rank_offset=max(3, args.diversity_passes + 1),
+            meme_dir=args.meme_dir,
+        )
+        qc_results = inspect_plan(plan)
+
+    summary = diversity_summary(plan)
+    print(
+        f"[material] unique visuals: {summary['unique_visuals']}/{summary['materialized_scenes']}"
+        + (f" | remaining duplicates={summary['duplicate_scenes']}" if summary['duplicate_scenes'] else ""),
+        flush=True,
+    )
+    return manifest, qc_results, sorted(all_diversity_repairs)
 
 
 def _mix_if_requested(plan, audio_plan, work: Path, args) -> Path:
@@ -301,6 +363,7 @@ def main() -> None:
             "director_model": plan.director_model,
             "editing_grammar_scenes": grammar_rewritten,
             "diversity_repair_scenes": diversity_repairs,
+            "material_diversity": diversity_summary(plan),
         }
         payload.update(_gemini_manifest_stats(manifest))
         payload.update(_lock_stats(plan, manifest))
