@@ -18,7 +18,7 @@ class LocalQualityResult:
 
 
 _TONE_RULES: list[tuple[Tone, tuple[str, ...]]] = [
-    ("tragic", ("погиб", "погибл", "смерт", "умер", "жертв", "миллион жиз", "casualt", "death", "killed", "dead", "traged")),
+    ("tragic", ("погиб", "погибл", "смерт", "умер", "жертв", "casualt", "death", "killed", "dead", "traged", "died", "lost their lives", "lost lives")),
     ("violent", ("битв", "войн", "убил", "атак", "взрыв", "резн", "battle", "war ", "attack", "explosion", "massacre")),
     ("shocking", ("шок", "вдруг", "неожидан", "оказалось", "ужас", "shock", "suddenly", "unbelievable")),
     ("tense", ("стресс", "паник", "опас", "угроз", "страх", "напряж", "stress", "panic", "danger", "fear")),
@@ -41,6 +41,20 @@ _BAD_TITLE_TERMS = (
 
 def infer_tone(text: str | None) -> Tone:
     value = (text or "").lower()
+
+    # Mass-casualty wording often contains no literal word "death". Catch
+    # constructions such as "унесло до 30 миллионов жизней" explicitly.
+    russian_life_loss = any(x in value for x in ("жизн", "жертв", "погиб", "смерт"))
+    large_count = any(x in value for x in ("миллион", "млн", "тысяч")) or bool(re.search(r"\b\d{3,}\b", value))
+    loss_verb = any(x in value for x in ("унесл", "лишил", "потер", "погиб", "умер"))
+    if russian_life_loss and (large_count or loss_verb):
+        return "tragic"
+
+    english_life_loss = any(x in value for x in ("lives", "casualties", "deaths", "died", "killed"))
+    english_mass = any(x in value for x in ("million", "thousand", "mass", "hundreds", "tens of"))
+    if english_life_loss and (english_mass or any(x in value for x in ("lost", "claimed", "killed"))):
+        return "tragic"
+
     for tone, needles in _TONE_RULES:
         if any(needle in value for needle in needles):
             return tone
