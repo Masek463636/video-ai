@@ -124,6 +124,7 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
         deterministic_entities = list(scene.required_entities)
         deterministic_context = list(scene.required_context)
         deterministic_fallback = scene.semantic_fallback
+        local_historical = _locally_historical(scene.caption or "")
 
         mode = str(item.get("visual_mode", scene.visual_mode)).lower().strip()
         if mode in {"image", "video", "meme", "auto"}:
@@ -139,6 +140,8 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
 
         description = str(item.get("visual_description", "")).strip()
         if description:
+            if not deterministic_lock and not local_historical:
+                description = _strip_historical_constraints(description)
             scene.visual_description = description[:500]
 
         queries = item.get("search_queries") or []
@@ -146,6 +149,8 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
         seen: set[str] = set()
         for value in queries:
             q = re.sub(r"\s+", " ", str(value)).strip()
+            if not deterministic_lock and not local_historical:
+                q = _strip_historical_constraints(q)
             if q and q.lower() not in seen:
                 seen.add(q.lower())
                 cleaned.append(q[:180])
@@ -168,11 +173,21 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
             scene.required_entities = []
             scene.required_context = []
             scene.semantic_fallback = None
-            # Gemini may use the whole narration for context, but an unlocked
-            # emotional/religious/conceptual beat must not become archive-only
-            # just because the overall story is historical.
-            if scene.source_mode == "historical_archive" and not _locally_historical(scene.caption or ""):
+            if scene.source_mode == "historical_archive" and not local_historical:
                 scene.source_mode = "stock_video" if scene.visual_mode == "video" else "generic_image"
+
+        if _explicit_christian_reference(scene.caption or "") and not scene.semantic_lock:
+            scene.visual_mode = "image"
+            scene.source_mode = "generic_image"
+            scene.visual_description = "Christian religious imagery associated with Jesus Christ, spiritual revelation or biblical symbolism; no unrelated religion"
+            christian_query = "Jesus Christ Christian religious painting spiritual revelation"
+            scene.search_queries = [christian_query, "Christian biblical vision Jesus illustration", *(scene.search_queries or [])][:5]
+            scene.query = scene.search_queries[0]
+
+        if _explicit_army_action(scene.caption or "") and not scene.semantic_lock:
+            scene.source_mode = "historical_archive"
+            scene.visual_mode = "image"
+            scene.visual_description = "historical peasant rebel army or soldiers marching; documentary archival illustration"
 
         if scene.visual_mode == "meme" and not scene.semantic_lock:
             scene.source_mode = "meme_library"
@@ -195,19 +210,20 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
 
 
 def _explicit_entities(text: str) -> list[str]:
-    """Entities that are safe to turn into HARD factual visual locks.
+    """Entities safe to turn into HARD factual visual locks.
 
-    Religious/reference-only names are intentionally excluded. A sentence such
-    as "he believed he was Jesus' brother" should use religious imagery, not
-    force the editor to find a literal archival Jesus portrait.
+    Prefer one primary concrete subject. A beat saying "Hong Xiuquan failed the
+    imperial examination" should hard-lock Hong Xiuquan and use the examination
+    as action/search context, rather than requiring one asset to depict both.
     """
     lowered = text.lower()
     entities: list[str] = []
-    if "сюцюан" in lowered or "хун сю" in lowered or "hong xiu" in lowered:
+    has_hong = "сюцюан" in lowered or "хун сю" in lowered or "hong xiu" in lowered
+    if has_hong:
         entities.append("Hong Xiuquan")
     if "тайпин" in lowered:
         entities.append("Taiping Rebellion")
-    if "экзам" in lowered and ("импер" in lowered or "чиновник" in lowered or "гос" in lowered):
+    if not has_hong and "экзам" in lowered and ("импер" in lowered or "чиновник" in lowered or "гос" in lowered):
         entities.append("Imperial examination")
     if "первая миров" in lowered or "первой миров" in lowered or "world war i" in lowered or "first world war" in lowered:
         entities.append("World War I")
@@ -215,12 +231,7 @@ def _explicit_entities(text: str) -> list[str]:
 
 
 def _rule_semantic_lock(text: str, global_context: str) -> tuple[bool, list[str], list[str], str | None]:
-    """Hard-lock only facts explicitly named in THIS beat.
-
-    Global story setting never becomes required_context here. It belongs to
-    search/ranking as a soft preference, otherwise a comparison with WWI inside
-    a China story incorrectly requires WWI footage to also depict Qing China.
-    """
+    """Hard-lock only facts explicitly named in THIS beat."""
     entities = _explicit_entities(text)
     if not entities:
         return False, [], [], None
@@ -261,8 +272,6 @@ def _setting_context(global_context: str) -> str:
 
 
 def _visual_description(text: str, global_context: str, mode: VisualMode) -> str:
-    # Describe THIS beat only. Global historical setting is deliberately absent
-    # so Gemini Judge does not turn a soft story preference into a hard reject.
     hints = _scene_visual_hints(text)
     local = hints[0] if hints else "documentary scene related to narration"
     explicit = " ".join(_explicit_entities(text))
@@ -291,6 +300,29 @@ def _search_queries(text: str, global_context: str, neighborhood: str, mode: Vis
             out.append(query)
             seen.add(query.lower())
     return out or ["documentary people video b roll" if mode == "video" else "documentary photo"]
+
+
+def _strip_historical_constraints(value: str) -> str:
+    cleaned = value
+    patterns = (
+        r"\b19th[- ]century\b", r"\b1800s\b", r"\bQing dynasty\b",
+        r"\bTaiping Rebellion era\b", r"\bhistorical setting\b",
+        r"\bperiod[- ]appropriate\b", r"\btraditional Chinese (?:clothing|costume|setting)\b",
+        r"\bin Qing China\b", r"\bQing China\b",
+    )
+    for pattern in patterns:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip(" ,.;:-")
+
+
+def _explicit_christian_reference(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in ("иисус", "христ", "jesus", "christ"))
+
+
+def _explicit_army_action(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in ("арм", "войск", "солдат", "крестьян"))
 
 
 def _choose_visual_mode(text: str, *, index: int, duration: float) -> VisualMode:
