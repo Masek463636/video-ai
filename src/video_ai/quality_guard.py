@@ -33,7 +33,7 @@ _TONE_RULES: list[tuple[Tone, tuple[str, ...]]] = [
     ("informational", ("согласно", "статист", "факт", "данн", "according", "statistics", "fact", "data")),
 ]
 
-_BAD_TITLE_WORDS = (
+_BAD_TITLE_TERMS = (
     "screenshot", "screen shot", "website", "webpage", "logo", "watermark", "poster", "banner",
     "sign", "signboard", "plaque", "label", "caption", "text only", "diagram", "infographic",
 )
@@ -56,17 +56,14 @@ def local_quality_guard(
     height: int = 0,
     kind: str = "image",
 ) -> LocalQualityResult:
-    """Cheap local pre-filter before spending a Gemini vision request.
-
-    It intentionally catches only obvious garbage. Ambiguous aesthetic/tone
-    judgements stay with Gemini, where semantic context is available.
-    """
+    """Cheap local pre-filter before spending a Gemini vision request."""
     issues: list[str] = []
     score = 100
     hay = f"{title} {description}".lower()
 
-    for bad in _BAD_TITLE_WORDS:
-        if bad in hay:
+    for bad in _BAD_TITLE_TERMS:
+        pattern = r"(?<!\w)" + re.escape(bad) + r"(?!\w)"
+        if re.search(pattern, hay, flags=re.IGNORECASE):
             issues.append(f"metadata:{bad}")
             score -= 24
             break
@@ -85,7 +82,6 @@ def local_quality_guard(
                 issues.append("extreme_aspect_or_tiny_short_edge")
                 score -= 18
 
-        # Probe local dimensions when provider metadata is missing.
         if (not width or not height) and Path(path).exists():
             probed = _probe_video_stream(path)
             pw, ph = int(probed.get("width") or 0), int(probed.get("height") or 0)
