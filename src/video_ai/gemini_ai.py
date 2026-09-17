@@ -121,7 +121,7 @@ BALANCED EDITING RULES:
                 encoded = base64.b64encode(preview.read_bytes()).decode("ascii")
                 parts.append({"inline_data": {"mime_type": "image/jpeg", "data": encoded}})
             prompt = f"""
-You are a strict visual relevance + tone + quality judge for an automatically edited YouTube Short.
+You are a visual relevance + tone + quality judge for an automatically edited YouTube Short.
 The supplied images are representative frames from ONE candidate asset.
 
 Narration in this scene: {scene.caption or ''}
@@ -150,24 +150,10 @@ Overall score measures semantic relevance.
 Tone_match 0-100 measures emotional compatibility with the narration.
 Quality_score 0-100 measures whether this looks like usable Shorts footage/image.
 
-AUTO-REJECT conditions:
-- tone is tragic/negative/violent and visual looks cheerful, vacation-like, luxurious, playful, celebratory or relaxing;
-- obvious website screenshot, UI screenshot, text-heavy plaque/sign, infographic, poster, watermark, logo or unusable text image unless explicitly requested;
-- subject is tiny or the frame is mostly empty/useless;
-- visibly low-quality, badly compressed, extremely blurry or poor scan when a cleaner alternative should exist;
-- wrong historical era/country/person/event;
-- modern object substitutes for a historical fact when context matters;
-- candidate is visually generic to the point that it does not communicate the scene.
-
-If Semantic lock is true:
-- candidate must be compatible with EVERY required entity/context;
-- wrong war, century, country, named person or modern substitute is an automatic reject.
-
-If Semantic lock is false:
-- judge CURRENT action/emotion/idea first;
-- do not demand the story's main character if another visual honestly represents the beat.
-
-For 9:16 Shorts, prefer a clear main subject and composition that can survive a vertical crop.
+For SEMANTIC LOCK scenes be strict: wrong person/event/war/country/century is a reject.
+For UNLOCKED scenes, accept contextual or metaphorical visuals when they honestly communicate the current beat. Do not reject merely because the exact historical person is absent.
+Strongly penalize obvious website screenshots, watermarks, posters, tiny subjects, broken images, extremely poor scans, or a severe tone contradiction.
+For 9:16 Shorts prefer a clear main subject and composition that survives a vertical crop.
 """.strip()
             parts.append({"text": prompt})
             data = self._generate_json(parts, temperature=0.02)
@@ -178,8 +164,13 @@ For 9:16 Shorts, prefer a clear main subject and composition that can survive a 
             quality_score = max(0, min(100, int(float(data.get("quality_score", 0)))))
             issues_raw = data.get("quality_issues") or []
             issues = [str(x)[:80] for x in issues_raw[:8]] if isinstance(issues_raw, list) else []
-            threshold = 76 if scene.semantic_lock else 60
-            accept = bool(data.get("accept", False)) and score >= threshold and tone_match >= 58 and quality_score >= 55
+            if scene.semantic_lock:
+                accept = bool(data.get("accept", False)) and score >= 72 and quality_score >= 45
+            else:
+                # Recovery philosophy: this flag is guidance, not a guillotine.
+                # Severe contradictions are filtered again by assets.py; a merely
+                # imperfect candidate can still compete against other candidates.
+                accept = bool(data.get("accept", False)) and score >= 48 and tone_match >= 42 and quality_score >= 42
             return VisualJudgement(
                 accept=accept,
                 score=score,
@@ -218,10 +209,10 @@ For 9:16 Shorts, prefer a clear main subject and composition that can survive a 
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.2",
+                "User-Agent": "video-ai/1.2.2",
             })
             try:
-                with urllib.request.urlopen(req, timeout=90) as response:
+                with urllib.request.urlopen(req, timeout=60) as response:
                     response_data = json.load(response)
                 parsed = _parse_json_text(_extract_text(response_data))
                 self.last_model = model
