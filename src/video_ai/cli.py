@@ -48,14 +48,30 @@ def _mix_if_requested(plan, audio_plan, work: Path, args) -> Path:
 
 def _gemini_manifest_stats(manifest: list[dict]) -> dict:
     judged = accepted = rejected = fallback_after_rejections = 0
+    tone_rejected = quality_rejected = local_quality_rejected = 0
     for item in manifest:
         judge = item.get("gemini_judge")
         if isinstance(judge, dict):
             judged += 1
             if judge.get("accept") is True: accepted += 1
             if judge.get("fallback_after_rejections"): fallback_after_rejections += 1
-        rejected += len(item.get("gemini_rejected") or [])
-    return {"gemini_judged_scenes": judged, "gemini_accepted_scenes": accepted, "gemini_rejected_candidates": rejected, "gemini_fallback_scenes": fallback_after_rejections}
+        local_quality_rejected += len(item.get("local_quality_rejected") or [])
+        for rejection in item.get("gemini_rejected") or []:
+            rejected += 1
+            try:
+                if int(rejection.get("tone_match", 100)) < 58: tone_rejected += 1
+                if int(rejection.get("quality_score", 100)) < 55: quality_rejected += 1
+            except (TypeError, ValueError):
+                pass
+    return {
+        "gemini_judged_scenes": judged,
+        "gemini_accepted_scenes": accepted,
+        "gemini_rejected_candidates": rejected,
+        "gemini_fallback_scenes": fallback_after_rejections,
+        "tone_guard_rejected": tone_rejected,
+        "visual_quality_guard_rejected": quality_rejected,
+        "local_quality_guard_rejected": local_quality_rejected,
+    }
 
 
 def _lock_stats(plan, manifest: list[dict] | None = None) -> dict:
@@ -69,6 +85,13 @@ def _lock_stats(plan, manifest: list[dict] | None = None) -> dict:
         "semantic_lock_unresolved": unresolved,
         "semantic_lock_entities": {str(i): plan.scenes[i].required_entities for i in locked},
     }
+
+
+def _tone_stats(plan) -> dict:
+    tones = [s.tone for s in plan.scenes]
+    counts: dict[str, int] = {}
+    for tone in tones: counts[tone] = counts.get(tone, 0) + 1
+    return {"scene_tones": tones, "tone_counts": counts}
 
 
 def main() -> None:
@@ -87,14 +110,14 @@ def main() -> None:
 
     if args.command=="probe": print(json.dumps(probe(args.path),ensure_ascii=False,indent=2)); return
     if args.command=="validate":
-        plan=load_shot_plan(args.path); payload={"ok":True,"audio":str(plan.audio),"scenes":len(plan.scenes),"timeline_duration":plan.scenes[-1].end,"output":f"{plan.width}x{plan.height}@{plan.fps}","director_source":plan.director_source,"director_model":plan.director_model}; payload.update(_lock_stats(plan)); print(json.dumps(payload,ensure_ascii=False,indent=2)); return
+        plan=load_shot_plan(args.path); payload={"ok":True,"audio":str(plan.audio),"scenes":len(plan.scenes),"timeline_duration":plan.scenes[-1].end,"output":f"{plan.width}x{plan.height}@{plan.fps}","director_source":plan.director_source,"director_model":plan.director_model}; payload.update(_lock_stats(plan)); payload.update(_tone_stats(plan)); print(json.dumps(payload,ensure_ascii=False,indent=2)); return
     if args.command=="transcribe":
         transcript=transcribe_local(args.media,model_size=args.model,language=args.language); output=save_transcript(transcript,args.output); print(json.dumps({"ok":True,"output":str(output),"language":transcript.language,"words":len(transcript.words),"duration":round(transcript.duration,3)},ensure_ascii=False,indent=2)); return
     if args.command=="plan":
         transcript=load_transcript(args.transcript); plan=build_shot_plan(transcript,Path(args.audio),target_scene_seconds=args.pace,min_scene_seconds=args.min_scene,max_scene_seconds=args.max_scene,meme_dir=args.meme_dir); output=save_shot_plan(plan,args.output)
-        payload={"ok":True,"output":str(output),"scenes":len(plan.scenes),"duration":round(plan.scenes[-1].end,3),"director_source":plan.director_source,"director_model":plan.director_model,"visuals":[{"mode":s.visual_mode,"source":s.source_mode,"motion":s.motion_preset,"meme":s.meme_filename,"semantic_lock":s.semantic_lock,"entities":s.required_entities,"context":s.required_context,"description":s.visual_description,"queries":s.search_queries} for s in plan.scenes]}; payload.update(_lock_stats(plan)); print(json.dumps(payload,ensure_ascii=False,indent=2)); return
+        payload={"ok":True,"output":str(output),"scenes":len(plan.scenes),"duration":round(plan.scenes[-1].end,3),"director_source":plan.director_source,"director_model":plan.director_model,"visuals":[{"mode":s.visual_mode,"source":s.source_mode,"motion":s.motion_preset,"tone":s.tone,"meme":s.meme_filename,"semantic_lock":s.semantic_lock,"entities":s.required_entities,"context":s.required_context,"description":s.visual_description,"queries":s.search_queries} for s in plan.scenes]}; payload.update(_lock_stats(plan)); payload.update(_tone_stats(plan)); print(json.dumps(payload,ensure_ascii=False,indent=2)); return
     if args.command=="assets":
-        plan=load_shot_plan(args.plan); manifest=materialize_assets(plan,args.dir,limit=args.limit,overwrite=args.overwrite,semantic=args.semantic,semantic_top_k=args.semantic_top_k,meme_dir=args.meme_dir); output=save_shot_plan(plan,args.output); payload={"ok":True,"output":str(output),"downloaded":sum(i.get("status")=="downloaded" for i in manifest),"scenes":len(plan.scenes),"manifest":str(Path(args.dir)/"assets_manifest.json"),"director_source":plan.director_source,"director_model":plan.director_model}; payload.update(_gemini_manifest_stats(manifest)); payload.update(_lock_stats(plan,manifest)); print(json.dumps(payload,ensure_ascii=False,indent=2)); return
+        plan=load_shot_plan(args.plan); manifest=materialize_assets(plan,args.dir,limit=args.limit,overwrite=args.overwrite,semantic=args.semantic,semantic_top_k=args.semantic_top_k,meme_dir=args.meme_dir); output=save_shot_plan(plan,args.output); payload={"ok":True,"output":str(output),"downloaded":sum(i.get("status")=="downloaded" for i in manifest),"scenes":len(plan.scenes),"manifest":str(Path(args.dir)/"assets_manifest.json"),"director_source":plan.director_source,"director_model":plan.director_model}; payload.update(_gemini_manifest_stats(manifest)); payload.update(_lock_stats(plan,manifest)); payload.update(_tone_stats(plan)); print(json.dumps(payload,ensure_ascii=False,indent=2)); return
     if args.command=="audio-plan":
         plan=load_shot_plan(args.plan); audio_plan=build_audio_plan(plan); output=save_audio_plan(audio_plan,args.output); print(json.dumps({"ok":True,"output":str(output),"mood":audio_plan.mood,"cues":len(audio_plan.cues)},ensure_ascii=False,indent=2)); return
     if args.command=="qc":
@@ -110,7 +133,7 @@ def main() -> None:
         manifest,qc_results=_resolve_and_repair(plan,work,args); materialized=save_shot_plan(plan,work/"shot_plan.materialized.json"); audio_plan=build_audio_plan(plan); audio_plan_path=save_audio_plan(audio_plan,work/"audio_plan.json"); qc_path=save_qc(qc_results,work/"qc.json"); original_audio=plan.audio; mixed_audio=_mix_if_requested(plan,audio_plan,work,args); plan.audio=mixed_audio
         try: output=render_plan(plan,args.output,work_dir=work/"render",captions=not args.no_captions)
         finally: plan.audio=original_audio
-        payload={"ok":True,"output":str(output),"plan":str(materialized),"audio_plan":str(audio_plan_path),"mixed_audio":str(mixed_audio),"qc":str(qc_path),"scenes":len(plan.scenes),"downloaded":sum(i.get("status")=="downloaded" for i in manifest),"qc_failed":sorted(failed_scene_indexes(qc_results)),"semantic":bool(args.semantic),"visual_kinds":[s.asset_kind for s in plan.scenes],"visual_modes":[s.visual_mode for s in plan.scenes],"source_modes":[s.source_mode for s in plan.scenes],"motion_presets":[s.motion_preset for s in plan.scenes],"meme_files":[s.meme_filename for s in plan.scenes],"director_source":plan.director_source,"director_model":plan.director_model}; payload.update(_gemini_manifest_stats(manifest)); payload.update(_lock_stats(plan,manifest));
+        payload={"ok":True,"output":str(output),"plan":str(materialized),"audio_plan":str(audio_plan_path),"mixed_audio":str(mixed_audio),"qc":str(qc_path),"scenes":len(plan.scenes),"downloaded":sum(i.get("status")=="downloaded" for i in manifest),"qc_failed":sorted(failed_scene_indexes(qc_results)),"semantic":bool(args.semantic),"visual_kinds":[s.asset_kind for s in plan.scenes],"visual_modes":[s.visual_mode for s in plan.scenes],"source_modes":[s.source_mode for s in plan.scenes],"motion_presets":[s.motion_preset for s in plan.scenes],"meme_files":[s.meme_filename for s in plan.scenes],"director_source":plan.director_source,"director_model":plan.director_model}; payload.update(_gemini_manifest_stats(manifest)); payload.update(_lock_stats(plan,manifest)); payload.update(_tone_stats(plan));
         if transcript_path is not None: payload["transcript"]=str(transcript_path)
         print(json.dumps(payload,ensure_ascii=False,indent=2)); return
 
