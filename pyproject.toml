@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-ai"
-version = "1.2.4"
-description = "Local-first AI short video editor with Recovery selection, advisory story context, Semantic Lock and soft Tone Guard"
+version = "1.2.5"
+description = "Local-first AI short video editor with scoped Director intent, Recovery selection, Semantic Lock and soft Tone Guard"
 requires-python = ">=3.11"
 dependencies = []
 
