@@ -53,9 +53,6 @@ class ClipRanker:
         for index, path in enumerate(paths):
             p = Path(path)
             try:
-                # Signature alone is insufficient: a truncated/corrupt PNG may
-                # have a valid header. Decode-probe one frame silently before
-                # Pillow/CLIP so corrupt upstream payloads cannot spam stderr.
                 if not _has_known_image_signature(p) or not _silent_decode_probe(p):
                     continue
                 with Image.open(p) as opened:
@@ -110,13 +107,21 @@ def _silent_decode_probe(path: Path) -> bool:
         return True
     try:
         completed = subprocess.run(
-            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            [
+                ffmpeg,
+                "-v", "error",
+                "-xerror",
+                "-err_detect", "explode",
+                "-i", str(path),
+                "-frames:v", "1",
+                "-f", "null", "-",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=12,
             check=False,
         )
-        return completed.returncode == 0
+        return completed.returncode == 0 and not completed.stderr.strip()
     except Exception:
         return False
 
