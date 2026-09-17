@@ -30,8 +30,8 @@ _SCENE_RULES = (
     (("чиновник", "служб"), "government official civil service"),
     (("сон", "спал", "снилось"), "sleeping person dream"),
     (("галлюцин", "видение", "озарен"), "surreal vision revelation"),
-    (("иисус", "христ", "религи", "бог"), "Jesus Christian religious painting"),
-    (("арм", "солдат", "войск"), "historical soldiers army marching"),
+    (("иисус", "христ", "религи", "бог"), "Christian religious imagery"),
+    (("арм", "солдат", "войск", "крестьян"), "historical soldiers peasants army marching"),
     (("восстан", "бунт", "битв", "револю"), "historical rebellion battle crowd"),
     (("деньг", "цена", "миллион", "тысяч"), "money finance counting cash"),
     (("телефон", "сообщен", "звон"), "person using smartphone"),
@@ -39,7 +39,7 @@ _SCENE_RULES = (
     (("компьют", "ютуб", "видео"), "video creator computer camera"),
 )
 
-_HISTORY_STEMS = ("истор", "восстан", "импер", "династ", "войн", "арм", "солдат", "битв", "револю", "xix", "xviii", "тайпин", "сюцюан")
+_HISTORY_STEMS = ("истор", "восстан", "импер", "династ", "войн", "арм", "солдат", "битв", "револю", "xix", "xviii", "тайпин", "сюцюан", "крестьян")
 _VIDEO_STEMS = ("идет", "идут", "беж", "летит", "едет", "горит", "взрыв", "толп", "марш", "атак", "движ", "сраж")
 _MEME_STEMS = ("вдруг", "и тут", "прикол", "шок", "жесть", "серьезно", "неожидан", "пиздец", "лол", "смеш", "офиг", "охрен", "что за")
 _DRAMATIC_STEMS = ("вдруг", "шок", "галлюцин", "видение", "убит", "погиб", "битв", "войн", "восстан", "огонь", "взрыв")
@@ -120,9 +120,6 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
         if not item:
             continue
 
-        # Hard semantic locks are determined BEFORE Gemini from the literal
-        # current caption. Gemini can improve presentation, but cannot invent
-        # a new factual entity/war/person and turn it into a hard requirement.
         deterministic_lock = bool(scene.semantic_lock)
         deterministic_entities = list(scene.required_entities)
         deterministic_context = list(scene.required_context)
@@ -159,8 +156,6 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
             scene.query = cleaned[0]
 
         if deterministic_lock:
-            # Preserve ONLY code-verified entities. Gemini-proposed
-            # required_entities are intentionally ignored here.
             scene.semantic_lock = True
             scene.required_entities = deterministic_entities
             scene.required_context = deterministic_context
@@ -173,6 +168,11 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
             scene.required_entities = []
             scene.required_context = []
             scene.semantic_fallback = None
+            # Gemini may use the whole narration for context, but an unlocked
+            # emotional/religious/conceptual beat must not become archive-only
+            # just because the overall story is historical.
+            if scene.source_mode == "historical_archive" and not _locally_historical(scene.caption or ""):
+                scene.source_mode = "stock_video" if scene.visual_mode == "video" else "generic_image"
 
         if scene.visual_mode == "meme" and not scene.semantic_lock:
             scene.source_mode = "meme_library"
@@ -195,14 +195,18 @@ def _apply_gemini_direction(full_text: str, scenes: list[Scene], *, meme_names: 
 
 
 def _explicit_entities(text: str) -> list[str]:
+    """Entities that are safe to turn into HARD factual visual locks.
+
+    Religious/reference-only names are intentionally excluded. A sentence such
+    as "he believed he was Jesus' brother" should use religious imagery, not
+    force the editor to find a literal archival Jesus portrait.
+    """
     lowered = text.lower()
     entities: list[str] = []
     if "сюцюан" in lowered or "хун сю" in lowered or "hong xiu" in lowered:
         entities.append("Hong Xiuquan")
     if "тайпин" in lowered:
         entities.append("Taiping Rebellion")
-    if "иисус" in lowered or "христ" in lowered or "jesus christ" in lowered:
-        entities.append("Jesus Christ")
     if "экзам" in lowered and ("импер" in lowered or "чиновник" in lowered or "гос" in lowered):
         entities.append("Imperial examination")
     if "первая миров" in lowered or "первой миров" in lowered or "world war i" in lowered or "first world war" in lowered:
@@ -211,25 +215,25 @@ def _explicit_entities(text: str) -> list[str]:
 
 
 def _rule_semantic_lock(text: str, global_context: str) -> tuple[bool, list[str], list[str], str | None]:
-    """Hard-lock only facts explicitly named in the current beat.
+    """Hard-lock only facts explicitly named in THIS beat.
 
-    Gemini is deliberately NOT allowed to create additional hard locks. This
-    keeps plausible visual suggestions from becoming factual assertions.
+    Global story setting never becomes required_context here. It belongs to
+    search/ranking as a soft preference, otherwise a comparison with WWI inside
+    a China story incorrectly requires WWI footage to also depict Qing China.
     """
     entities = _explicit_entities(text)
     if not entities:
         return False, [], [], None
 
+    lowered = text.lower()
     context: list[str] = []
-    setting = _setting_context(global_context)
-    lowered_setting = setting.lower()
-    if "china" in lowered_setting:
+    if any(token in lowered for token in ("китай", "китайск", "china", "chinese")):
         context.append("China")
-    era = _detect_era(lowered_setting)
+    if any(token in lowered for token in ("династия цин", "династии цин", "qing dynasty")):
+        context.append("Qing dynasty")
+    era = _detect_era(lowered)
     if era and era != "21st century modern":
         context.append(era)
-    if "qing dynasty" in lowered_setting:
-        context.append("Qing dynasty")
 
     fallback = " ".join([*entities, *context, "archival illustration"])
     return True, entities, list(dict.fromkeys(context)), fallback
@@ -249,7 +253,7 @@ def _clean_string_list(value: object, *, limit: int) -> list[str]:
 
 
 def _setting_context(global_context: str) -> str:
-    """Keep broad setting, remove story entities which should not bleed."""
+    """Broad story setting used for SEARCH only, never as a hard requirement."""
     value = global_context
     for phrase in ("Hong Xiuquan", "Taiping Rebellion"):
         value = re.sub(re.escape(phrase), " ", value, flags=re.IGNORECASE)
@@ -257,17 +261,16 @@ def _setting_context(global_context: str) -> str:
 
 
 def _visual_description(text: str, global_context: str, mode: VisualMode) -> str:
+    # Describe THIS beat only. Global historical setting is deliberately absent
+    # so Gemini Judge does not turn a soft story preference into a hard reject.
     hints = _scene_visual_hints(text)
     local = hints[0] if hints else "documentary scene related to narration"
     explicit = " ".join(_explicit_entities(text))
-    setting = _setting_context(global_context)
     style = "moving documentary B-roll" if mode == "video" else "reaction meme insert" if mode == "meme" else "documentary visual"
-    return " ".join(x for x in (explicit, setting, local, style) if x).strip()
+    return " ".join(x for x in (explicit, local, style) if x).strip()
 
 
 def _search_queries(text: str, global_context: str, neighborhood: str, mode: VisualMode, description: str) -> list[str]:
-    # Search is driven by the CURRENT caption. Neighbourhood is only a weak
-    # fallback for missing nouns, never a source of hard entities.
     hints = _scene_visual_hints(text)
     setting = _setting_context(global_context)
     explicit = " ".join(_explicit_entities(text))
@@ -276,7 +279,7 @@ def _search_queries(text: str, global_context: str, neighborhood: str, mode: Vis
     suffix = "video b roll" if mode == "video" else "reaction meme" if mode == "meme" else "photo illustration"
     candidates = [
         f"{explicit} {setting} {hints[0] if hints else local_keywords} {suffix}",
-        description,
+        f"{setting} {description}",
         f"{setting} {local_keywords} {suffix}",
         f"{local_keywords or neighborhood_keywords} {suffix}",
     ]
@@ -301,13 +304,15 @@ def _choose_visual_mode(text: str, *, index: int, duration: float) -> VisualMode
     return "image"
 
 
+def _locally_historical(text: str) -> bool:
+    lowered = text.lower()
+    return any(stem in lowered for stem in _HISTORY_STEMS) or bool(_explicit_entities(text))
+
+
 def _choose_source_mode(text: str, global_context: str, mode: VisualMode) -> SourceMode:
     lowered = text.lower()
     if mode == "meme":
         return "meme_library"
-
-    # Only locally historical beats default to archives. An overall historical
-    # story no longer turns stress/dream/emotion beats into archive-only scenes.
     historical_story = "historical archival" in global_context.lower()
     locally_historical = any(stem in lowered for stem in _HISTORY_STEMS)
     if historical_story and locally_historical:
