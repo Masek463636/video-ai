@@ -41,9 +41,6 @@ _BAD_TITLE_TERMS = (
 
 def infer_tone(text: str | None) -> Tone:
     value = (text or "").lower()
-
-    # Mass-casualty wording often contains no literal word "death". Catch
-    # constructions such as "унесло до 30 миллионов жизней" explicitly.
     russian_life_loss = any(x in value for x in ("жизн", "жертв", "погиб", "смерт"))
     large_count = any(x in value for x in ("миллион", "млн", "тысяч")) or bool(re.search(r"\b\d{3,}\b", value))
     loss_verb = any(x in value for x in ("унесл", "лишил", "потер", "погиб", "умер"))
@@ -55,10 +52,6 @@ def infer_tone(text: str | None) -> Tone:
     if english_life_loss and (english_mass or any(x in value for x in ("lost", "claimed", "killed"))):
         return "tragic"
 
-    # v1.2.6: current ACTION beats theme. A sentence can mention Jesus/religion
-    # while actually describing an army, rebellion or soldiers. In that case
-    # the visual tone must support the action instead of steering CLIP toward
-    # icons/paintings merely because a religious word is present.
     violent_action = any(x in value for x in (
         "битв", "сраж", "атак", "штурм", "убил", "взрыв", "резн",
         "battle", "fight", "attack", "assault", "explosion", "massacre",
@@ -89,9 +82,17 @@ def local_quality_guard(
     kind: str = "image",
 ) -> LocalQualityResult:
     """Cheap local pre-filter before spending a Gemini vision request."""
+    path = Path(path)
     issues: list[str] = []
     score = 100
     hay = f"{title} {description}".lower()
+
+    # Critical v1.3 guard: upstream proxies sometimes save HTML/error bytes
+    # under a .png/.jpg-looking URL. Metadata width/height may still look valid,
+    # so verify the actual payload before CLIP/Gemini/ffmpeg ever sees it.
+    if kind == "image":
+        if not path.exists() or path.stat().st_size < 512 or not _looks_like_supported_image(path):
+            return LocalQualityResult(accept=False, score=0, issues=["invalid_image_payload"])
 
     for bad in _BAD_TITLE_TERMS:
         pattern = r"(?<!\w)" + re.escape(bad) + r"(?!\w)"
@@ -114,17 +115,21 @@ def local_quality_guard(
                 issues.append("extreme_aspect_or_tiny_short_edge")
                 score -= 18
 
-        if (not width or not height) and Path(path).exists():
+        if not width or not height:
             probed = _probe_video_stream(path)
             pw, ph = int(probed.get("width") or 0), int(probed.get("height") or 0)
-            if pw and ph and max(pw, ph) < 700:
+            if not pw or not ph:
+                return LocalQualityResult(accept=False, score=0, issues=["undecodable_image"])
+            if max(pw, ph) < 700:
                 issues.append("low_resolution")
                 score -= 35
 
-    if kind == "video" and Path(path).exists():
+    if kind == "video" and path.exists():
         probed = _probe_video_stream(path)
         pw, ph = int(probed.get("width") or 0), int(probed.get("height") or 0)
-        if pw and ph and max(pw, ph) < 720:
+        if not pw or not ph:
+            return LocalQualityResult(accept=False, score=0, issues=["undecodable_video"])
+        if max(pw, ph) < 720:
             issues.append("low_video_resolution")
             score -= 20
         duration = _probe_duration(path)
@@ -133,6 +138,21 @@ def local_quality_guard(
             score -= 25
 
     return LocalQualityResult(accept=score >= 55, score=max(0, score), issues=issues)
+
+
+def _looks_like_supported_image(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(16)
+    except OSError:
+        return False
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if header.startswith(b"\xff\xd8\xff"):
+        return True
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return True
+    return False
 
 
 def _probe_video_stream(path: str | Path) -> dict:
