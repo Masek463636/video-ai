@@ -19,7 +19,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.2.2 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.2.3 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -150,8 +150,18 @@ def materialize_assets(
     except Exception:
         gemini = None
 
+    soft_story_context = _infer_soft_story_context(plan)
     for scene in plan.scenes:
         scene.tone = infer_tone(scene.caption)
+        scene.required_context = _local_required_context(scene)
+        if soft_story_context and not scene.semantic_lock and scene.visual_mode != "meme":
+            marker = "Soft historical setting:"
+            if marker not in (scene.visual_description or ""):
+                base = (scene.visual_description or scene.query or "documentary scene").rstrip(" .")
+                scene.visual_description = f"{base}. {marker} {soft_story_context}."
+
+    if soft_story_context:
+        print(f"[context] soft story setting: {soft_story_context}", flush=True)
 
     for index, scene in enumerate(plan.scenes):
         if index not in replace_scenes and scene.asset and Path(scene.asset).exists():
@@ -164,7 +174,7 @@ def materialize_assets(
 
         if scene.asset and not overwrite and not force_replace and Path(scene.asset).exists():
             _apply_focus(scene, Path(scene.asset))
-            manifest.append({"scene": index, "status": "existing", "path": scene.asset, "tone": scene.tone})
+            manifest.append({"scene": index, "status": "existing", "path": scene.asset, "tone": scene.tone, "soft_story_context": soft_story_context})
             print(f"{prefix} existing asset", flush=True)
             continue
 
@@ -210,8 +220,9 @@ def materialize_assets(
                 "semantic_lock": scene.semantic_lock, "required_entities": scene.required_entities,
                 "required_context": scene.required_context, "semantic_fallback": scene.semantic_fallback,
                 "motion_preset": scene.motion_preset, "visual_description": scene.visual_description,
-                "queries_tried": variants, "local_quality_rejected": local_rejected,
-                "gemini_rejected": rejected, "gemini_checks": checked,
+                "soft_story_context": soft_story_context, "queries_tried": variants,
+                "local_quality_rejected": local_rejected, "gemini_rejected": rejected,
+                "gemini_checks": checked,
             })
             print(f"{prefix} no safe candidate -> coverage recovery later", flush=True)
             continue
@@ -236,7 +247,8 @@ def materialize_assets(
             "required_entities": scene.required_entities, "required_context": scene.required_context,
             "semantic_fallback": scene.semantic_fallback, "motion_preset": scene.motion_preset,
             "meme_filename": scene.meme_filename, "visual_description": scene.visual_description,
-            "queries_tried": variants, "search_used": search_used, "path": str(final_target),
+            "soft_story_context": soft_story_context, "queries_tried": variants,
+            "search_used": search_used, "path": str(final_target),
             "source": chosen.source, "kind": chosen.kind, "gemini_judge": judge_info,
             "local_quality_rejected": local_rejected, "gemini_rejected": rejected,
             "gemini_checks": checked, "recovery_used": recovery_used,
@@ -260,6 +272,44 @@ def materialize_assets(
         print(f"[coverage] recovered {len(filled)} empty scene(s) without black frames", flush=True)
     (out_dir / "assets_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
+
+
+def _infer_soft_story_context(plan: ShotPlan) -> str:
+    text = " ".join((scene.caption or "") for scene in plan.scenes).lower()
+    parts: list[str] = []
+    if any(token in text for token in ("тайпин", "сюцюан", "hong xiu", "taiping")):
+        parts.extend(["19th-century China", "Taiping Rebellion era"])
+    elif any(token in text for token in ("китай", "china", "chinese")):
+        parts.append("China")
+    if any(token in text for token in ("династия цин", "династии цин", "qing dynasty")):
+        parts.append("Qing dynasty")
+    return ", ".join(dict.fromkeys(parts))
+
+
+def _local_required_context(scene: Scene) -> list[str]:
+    caption = (scene.caption or "").lower()
+    out: list[str] = []
+    for context in scene.required_context:
+        if _context_explicit_in_caption(context, caption):
+            out.append(context)
+    return list(dict.fromkeys(out))
+
+
+def _context_explicit_in_caption(context: str, caption: str) -> bool:
+    lowered = context.lower()
+    if "china" in lowered or "chinese" in lowered:
+        return any(token in caption for token in ("китай", "китайск", "china", "chinese"))
+    if "qing" in lowered:
+        return any(token in caption for token in ("цин", "qing"))
+    if "19th century" in lowered:
+        return bool(re.search(r"\b18\d{2}\b|\b19\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxix\b", caption))
+    if "20th century" in lowered:
+        return bool(re.search(r"\b19\d{2}\b|\b20\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxx\b", caption))
+    if "21st century" in lowered:
+        return bool(re.search(r"\b20\d{2}\b|\b21\s*(?:-|‑)?\s*(?:й|ый)?\s*век|\bxxi\b", caption))
+    tokens = _tokens(context)
+    caption_tokens = _tokens(caption)
+    return bool(tokens) and tokens.issubset(caption_tokens)
 
 
 def _build_ranked_pool(
@@ -394,7 +444,6 @@ def _select_best_candidate(
             candidate_target, title=candidate.title, description=candidate.description,
             width=candidate.width, height=candidate.height, kind=candidate.kind,
         )
-        # v1.2.2: local quality is a hard gate only for genuinely broken assets.
         if local_guard.score < 38 or _has_severe_local_issue(local_guard.issues):
             local_rejected.append({
                 "title": candidate.title, "source": candidate.source,
@@ -410,7 +459,6 @@ def _select_best_candidate(
             print(f"{prefix} Gemini {checks}/{max_checks}: {candidate.title[:55]}", flush=True)
             judgement = gemini.judge_visual(scene, candidate_target, candidate_title=candidate.title, source=candidate.source)
             if judgement is None:
-                # Network/model hiccup should not automatically create a black frame.
                 combined -= 3.0
             else:
                 judge_info = {
@@ -479,7 +527,6 @@ def ensure_visual_coverage(plan: ShotPlan, manifest: list[dict] | None = None) -
         if scene.semantic_lock:
             compatible = [i for i in good if plan.scenes[i].semantic_lock and _lock_compatible(scene, plan.scenes[i])]
             if not compatible:
-                # Better a period-compatible neutral visual than a black screen.
                 compatible = [i for i in good if _context_compatible(scene, plan.scenes[i])]
         else:
             compatible = [i for i in good if _tone_compatible(scene.tone, plan.scenes[i].tone)]
