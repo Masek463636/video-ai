@@ -149,13 +149,21 @@ def _silent_decode_probe(path: Path) -> bool:
         return True
     try:
         completed = subprocess.run(
-            [ffmpeg, "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "null", "-"],
+            [
+                ffmpeg,
+                "-v", "error",
+                "-xerror",
+                "-err_detect", "explode",
+                "-i", str(path),
+                "-frames:v", "1",
+                "-f", "null", "-",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=12,
             check=False,
         )
-        return completed.returncode == 0
+        return completed.returncode == 0 and not completed.stderr.strip()
     except Exception:
         return False
 
@@ -257,7 +265,19 @@ def _focus_expr(inner: str, outer: str, focus: float) -> str:
 
 
 def _write_ass(plan: ShotPlan, path: Path) -> None:
-    header = f"""[Script Info]\nScriptType: v4.00+\nPlayResX: {plan.width}\nPlayResY: {plan.height}\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Default,Arial,{max(48,int(plan.width*0.066))},&H00FFFFFF,&H00FFFFFF,&H00101010,&H50000000,-1,0,0,0,100,100,0,0,1,5,0,2,80,80,{int(plan.height*0.26)},1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"""
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {plan.width}
+PlayResY: {plan.height}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: Default,Arial,{max(48,int(plan.width*0.066))},&H00FFFFFF,&H00FFFFFF,&H00101010,&H50000000,-1,0,0,0,100,100,0,0,1,5,0,2,80,80,{int(plan.height*0.26)},1
+
+[Events]
+Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+"""
     events: list[str] = []
     for scene in plan.scenes:
         if scene.caption:
@@ -306,4 +326,15 @@ def _require(name: str) -> None:
 
 
 def _run(cmd: list[str]) -> None:
-    subprocess.run(cmd, check=True)
+    completed = subprocess.run(
+        cmd,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return
+    lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
+    detail = " | ".join(lines[-3:])[:800] if lines else f"exit code {completed.returncode}"
+    raise RuntimeError(f"ffmpeg failed: {detail}")
