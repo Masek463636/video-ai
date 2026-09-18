@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-ai"
-version = "1.4.2"
-description = "Local-first AI short video editor with reference-style video-first B-roll, punchy captions, semantic selection and Material Brain diversity"
+version = "1.5.0"
+description = "Local-first AI short video editor with whole-transcript B-roll planning, persistent source allocation, punchy captions and semantic selection"
 requires-python = ">=3.11"
 dependencies = []
 
