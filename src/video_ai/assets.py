@@ -593,7 +593,7 @@ def _source_allowed(scene: Scene, candidate: AssetCandidate) -> bool:
     if scene.source_mode == "historical_archive":
         return candidate.source in {"commons", "openverse"} and candidate.kind == "image"
     if scene.source_mode == "stock_video":
-        return candidate.source in {"pexels", "pixabay", "commons", "openverse"}
+        return candidate.kind == "video" and candidate.source in {"pexels", "pixabay"}
     if scene.source_mode == "meme_library":
         return candidate.source == "local_meme"
     if scene.source_mode == "generic_image":
