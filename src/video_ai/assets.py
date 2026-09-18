@@ -19,7 +19,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.2.3 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.4.1 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -392,7 +392,10 @@ def _build_recovery_pool(
                 continue
             if scene.visual_mode == "image" and candidate.kind != "image":
                 continue
-            if scene.visual_mode == "video" and candidate.kind not in {"video", "image"}:
+            if scene.source_mode == "stock_video":
+                if candidate.kind != "video" or candidate.source not in {"pexels", "pixabay"}:
+                    continue
+            elif scene.visual_mode == "video" and candidate.kind not in {"video", "image"}:
                 continue
             duplicate = _title_similarity(candidate.title, used_titles[-4:])
             if duplicate >= 0.9:
@@ -452,6 +455,20 @@ def _select_best_candidate(
             candidate_target.unlink(missing_ok=True)
             continue
 
+        conflict = _historical_metadata_conflict(scene, candidate)
+        if conflict:
+            rejected.append({
+                "title": candidate.title,
+                "source": candidate.source,
+                "reason": conflict,
+                "mismatch": conflict,
+                "hard_reject": True,
+                "metadata_guard": True,
+            })
+            candidate_target.unlink(missing_ok=True)
+            print(f"{prefix} rejected metadata: {conflict}", flush=True)
+            continue
+
         checks += 1
         judge_info = None
         combined = candidate.score + local_guard.score * 0.035
@@ -504,7 +521,11 @@ def _hard_judge_reject(scene: Scene, judgement) -> bool:
     if scene.semantic_lock:
         return (not judgement.accept) or judgement.score < 70
     mismatch = (judgement.mismatch or "").lower()
-    factual_red_flags = ("wrong person", "wrong event", "wrong war", "wrong century", "wrong country", "modern substitute")
+    factual_red_flags = (
+        "wrong person", "wrong event", "wrong war", "wrong century", "wrong country",
+        "wrong period", "different war", "different conflict", "unrelated conflict",
+        "anachron", "modern substitute", "modern-day", "modern setting",
+    )
     return any(flag in mismatch for flag in factual_red_flags)
 
 
@@ -529,9 +550,20 @@ def ensure_visual_coverage(plan: ShotPlan, manifest: list[dict] | None = None) -
             if not compatible:
                 compatible = [i for i in good if _context_compatible(scene, plan.scenes[i])]
         else:
-            compatible = [i for i in good if _tone_compatible(scene.tone, plan.scenes[i].tone)]
+            compatible = [
+                i for i in good
+                if plan.scenes[i].asset_kind == "video"
+                and plan.scenes[i].source_mode in {"stock_video", "meme_library"}
+                and _tone_compatible(scene.tone, plan.scenes[i].tone)
+            ]
+            if not compatible:
+                compatible = [
+                    i for i in good
+                    if plan.scenes[i].asset_kind == "video"
+                    and not plan.scenes[i].semantic_lock
+                ]
 
-        if not compatible:
+        if not compatible and scene.semantic_lock:
             compatible = list(good)
         if not compatible:
             continue
@@ -585,6 +617,85 @@ def _context_compatible(target: Scene, source: Scene) -> bool:
         return True
     source_text = " ".join([source.caption or "", source.visual_description or "", *source.required_context]).lower()
     return any(ctx.lower() in source_text for ctx in target.required_context)
+
+
+def _historical_metadata_conflict(scene: Scene, candidate: AssetCandidate) -> str | None:
+    """Reject obvious factual conflicts before spending a Gemini judgement.
+
+    This is intentionally conservative: only explicit named wars/conflicts,
+    countries and century markers can trigger it. Generic archival titles pass
+    through to Gemini.
+    """
+    if not scene.semantic_lock:
+        return None
+
+    target = " ".join([
+        *(scene.required_entities or []),
+        *(scene.required_context or []),
+        scene.caption or "",
+        scene.semantic_fallback or "",
+    ]).lower()
+    meta = " ".join([candidate.title or "", candidate.description or ""]).lower()
+
+    target_events = _named_historical_events(target)
+    candidate_events = _named_historical_events(meta)
+    if target_events and candidate_events and not (target_events & candidate_events):
+        return "wrong event/war in candidate metadata"
+
+    target_countries = _named_countries(target)
+    candidate_countries = _named_countries(meta)
+    if target_countries and candidate_countries and not (target_countries & candidate_countries):
+        return "wrong country in candidate metadata"
+
+    target_century = _explicit_century(target)
+    candidate_century = _explicit_century(meta)
+    if target_century and candidate_century and target_century != candidate_century:
+        return "wrong century in candidate metadata"
+
+    return None
+
+
+def _named_historical_events(value: str) -> set[str]:
+    patterns = {
+        "taiping rebellion": ("taiping rebellion", "taiping"),
+        "world war i": ("world war i", "first world war", "wwi", "1914-1918", "1914–1918"),
+        "world war ii": ("world war ii", "second world war", "wwii", "1939-1945", "1939–1945"),
+        "american civil war": ("american civil war", "u.s. civil war", "us civil war"),
+        "crimean war": ("crimean war",),
+        "vietnam war": ("vietnam war",),
+        "korean war": ("korean war",),
+        "napoleonic wars": ("napoleonic war", "napoleonic wars"),
+        "russian civil war": ("russian civil war",),
+    }
+    return {name for name, needles in patterns.items() if any(needle in value for needle in needles)}
+
+
+def _named_countries(value: str) -> set[str]:
+    patterns = {
+        "china": ("china", "chinese", "qing", "китай", "цин"),
+        "russia": ("russia", "russian", "росси", "русск"),
+        "ukraine": ("ukraine", "ukrainian", "украин"),
+        "germany": ("germany", "german", "герман", "немец"),
+        "france": ("france", "french", "франц"),
+        "britain": ("britain", "british", "england", "english", "британ", "англи"),
+        "japan": ("japan", "japanese", "япон"),
+        "united states": ("united states", "american", "u.s.", "usa", "сша"),
+        "vietnam": ("vietnam", "vietnamese"),
+        "korea": ("korea", "korean"),
+    }
+    return {name for name, needles in patterns.items() if any(needle in value for needle in needles)}
+
+
+def _explicit_century(value: str) -> int | None:
+    if re.search(r"\b18\d{2}\b|\b19th[- ]century\b|\bxix\b", value):
+        return 19
+    if re.search(r"\b19\d{2}\b|\b20th[- ]century\b|\bxx\b", value):
+        return 20
+    if re.search(r"\b20\d{2}\b|\b21st[- ]century\b|\bxxi\b", value):
+        return 21
+    if re.search(r"\b17\d{2}\b|\b18th[- ]century\b|\bxviii\b", value):
+        return 18
+    return None
 
 
 def _source_allowed(scene: Scene, candidate: AssetCandidate) -> bool:
