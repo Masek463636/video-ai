@@ -19,7 +19,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.4.1 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.4.2 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -392,10 +392,7 @@ def _build_recovery_pool(
                 continue
             if scene.visual_mode == "image" and candidate.kind != "image":
                 continue
-            if scene.source_mode == "stock_video":
-                if candidate.kind != "video" or candidate.source not in {"pexels", "pixabay"}:
-                    continue
-            elif scene.visual_mode == "video" and candidate.kind not in {"video", "image"}:
+            if scene.visual_mode == "video" and candidate.kind not in {"video", "image"}:
                 continue
             duplicate = _title_similarity(candidate.title, used_titles[-4:])
             if duplicate >= 0.9:
@@ -552,16 +549,9 @@ def ensure_visual_coverage(plan: ShotPlan, manifest: list[dict] | None = None) -
         else:
             compatible = [
                 i for i in good
-                if plan.scenes[i].asset_kind == "video"
-                and plan.scenes[i].source_mode in {"stock_video", "meme_library"}
+                if not plan.scenes[i].semantic_lock
                 and _tone_compatible(scene.tone, plan.scenes[i].tone)
             ]
-            if not compatible:
-                compatible = [
-                    i for i in good
-                    if plan.scenes[i].asset_kind == "video"
-                    and not plan.scenes[i].semantic_lock
-                ]
 
         if not compatible and scene.semantic_lock:
             compatible = list(good)
@@ -704,7 +694,10 @@ def _source_allowed(scene: Scene, candidate: AssetCandidate) -> bool:
     if scene.source_mode == "historical_archive":
         return candidate.source in {"commons", "openverse"} and candidate.kind == "image"
     if scene.source_mode == "stock_video":
-        return candidate.kind == "video" and candidate.source in {"pexels", "pixabay"}
+        return (
+            (candidate.kind == "video" and candidate.source in {"pexels", "pixabay"})
+            or (candidate.kind == "image" and candidate.source in {"commons", "openverse", "pexels", "pixabay"})
+        )
     if scene.source_mode == "meme_library":
         return candidate.source == "local_meme"
     if scene.source_mode == "generic_image":
