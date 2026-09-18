@@ -107,22 +107,35 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         )
         qc_results = inspect_plan(plan)
 
-    # QC replacement can itself re-introduce an already used visual. Run one
-    # final anti-repeat pass so the final materialized plan, not just the first
-    # selection, is checked for diversity.
-    final_duplicates, final_matches = find_duplicate_scenes(plan)
-    if final_duplicates:
+    # QC replacement can itself re-introduce an already used visual. Keep
+    # repairing the FINAL materialized plan, not only the first selection.
+    # Stop when clean or after a small bounded number of passes.
+    for final_pass in range(3):
+        final_duplicates, final_matches = find_duplicate_scenes(plan)
+        if not final_duplicates:
+            break
         all_diversity_repairs.update(final_duplicates)
-        print(f"[material] final anti-repeat pass: {final_duplicates}", flush=True)
-        prepare_diversity_repair(plan, final_duplicates, pass_index=max(1, args.diversity_passes))
+        compact = ", ".join(
+            f"{m.scene}->{m.original_scene}:{m.similarity:.2f}" for m in final_matches[:8]
+        )
+        print(
+            f"[material] final anti-repeat pass {final_pass + 1}: {final_duplicates}"
+            + (f" | {compact}" if compact else ""),
+            flush=True,
+        )
+        prepare_diversity_repair(
+            plan,
+            final_duplicates,
+            pass_index=max(1, args.diversity_passes) + final_pass,
+        )
         manifest = materialize_assets(
             plan,
             work / "assets",
-            limit=max(args.limit, 28),
+            limit=max(args.limit, 28 + final_pass * 4),
             semantic=args.semantic,
             semantic_top_k=max(args.semantic_top_k, 8),
             replace_scenes=set(final_duplicates),
-            rank_offset=max(3, args.diversity_passes + 1),
+            rank_offset=max(3, args.diversity_passes + 1 + final_pass),
             meme_dir=args.meme_dir,
         )
         qc_results = inspect_plan(plan)
