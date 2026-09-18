@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .assets import materialize_assets
+from .assets import MaterialRegistry, materialize_assets
 from .audio_mix import mix_audio
 from .audio_plan import build_audio_plan, save_audio_plan
 from .director import build_shot_plan
@@ -35,6 +35,8 @@ def _add_audio_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[int]]:
+    registry = MaterialRegistry()
+    donor_mode = plan.director_source == "donor_gemini"
     manifest = materialize_assets(
         plan,
         work / "assets",
@@ -42,12 +44,15 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         semantic=args.semantic,
         semantic_top_k=args.semantic_top_k,
         meme_dir=args.meme_dir,
+        registry=registry,
     )
 
     all_diversity_repairs: set[int] = set()
+    if donor_mode:
+        print("[material] donor mode: persistent source registry + final duplicate guard", flush=True)
 
     # Editing Grammar catches obvious duration/recent-window repetition first.
-    grammar_repairs = diversity_repair_indexes(plan)
+    grammar_repairs = [] if donor_mode else diversity_repair_indexes(plan)
     if grammar_repairs:
         all_diversity_repairs.update(grammar_repairs)
         print(f"[grammar] replacing repetitive visual scenes: {grammar_repairs}", flush=True)
@@ -60,13 +65,14 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             replace_scenes=set(grammar_repairs),
             rank_offset=1,
             meme_dir=args.meme_dir,
+            registry=registry,
         )
 
     # v1.3.1 Material Brain works on the actual decoded visuals rather than URLs.
     # This catches mirrors/resizes and fallback copies that the provider-level
     # duplicate guard cannot see. Each pass changes the query framing and moves
     # deeper into the ranked list instead of asking for the same asset again.
-    for pass_index in range(max(0, args.diversity_passes)):
+    for pass_index in range(0 if donor_mode else max(0, args.diversity_passes)):
         duplicate_scenes, matches = find_duplicate_scenes(plan)
         if not duplicate_scenes:
             break
@@ -89,6 +95,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             replace_scenes=set(duplicate_scenes),
             rank_offset=pass_index + 2,
             meme_dir=args.meme_dir,
+            registry=registry,
         )
 
     qc_results = inspect_plan(plan)
@@ -105,13 +112,14 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             replace_scenes=failed,
             rank_offset=pass_index + 1,
             meme_dir=args.meme_dir,
+            registry=registry,
         )
         qc_results = inspect_plan(plan)
 
     # QC replacement can itself re-introduce an already used visual. Keep
     # repairing the FINAL materialized plan, not only the first selection.
     # Stop when clean or after a small bounded number of passes.
-    for final_pass in range(3):
+    for final_pass in range(2 if donor_mode else 3):
         final_duplicates, final_matches = find_duplicate_scenes(plan)
         if not final_duplicates:
             break
@@ -138,6 +146,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             replace_scenes=set(final_duplicates),
             rank_offset=max(3, args.diversity_passes + 1 + final_pass),
             meme_dir=args.meme_dir,
+            registry=registry,
         )
         qc_results = inspect_plan(plan)
 
