@@ -14,6 +14,7 @@ from .material_brain import diversity_summary, find_duplicate_scenes, prepare_di
 from .probe import probe
 from .qc import failed_scene_indexes, inspect_plan, save_qc
 from .renderer import render_plan
+from .reference_style import apply_reference_style
 from .transcript import load_transcript, save_transcript, transcribe_local
 
 
@@ -323,8 +324,11 @@ def main() -> None:
             transcript_path = save_transcript(transcript, work / "transcript.json")
             plan = build_shot_plan(transcript, Path(args.audio), target_scene_seconds=args.pace, min_scene_seconds=args.min_scene, max_scene_seconds=args.max_scene, meme_dir=args.meme_dir)
             grammar_rewritten = apply_pre_asset_grammar(plan)
+            reference_rewritten = apply_reference_style(plan)
             if grammar_rewritten:
                 print(f"[grammar] visual-sequence beats: {grammar_rewritten}", flush=True)
+            if reference_rewritten:
+                print(f"[style] reference video-first beats: {reference_rewritten}", flush=True)
             save_shot_plan(plan, work / "shot_plan.json")
         else:
             transcript_path = None
@@ -362,6 +366,7 @@ def main() -> None:
             "director_source": plan.director_source,
             "director_model": plan.director_model,
             "editing_grammar_scenes": grammar_rewritten,
+            "reference_style_scenes": reference_rewritten if args.command == "create" else [],
             "diversity_repair_scenes": diversity_repairs,
             "material_diversity": diversity_summary(plan),
         }
