@@ -19,7 +19,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.4.2 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.5.0 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -45,6 +45,53 @@ class AssetCandidate:
     semantic_score: float | None = None
     source: str = "commons"
     local_path: str | None = None
+
+
+@dataclass(slots=True)
+class MaterialRegistry:
+    """Persistent source usage across initial selection and every repair pass."""
+    url_counts: dict[str, int] = None  # type: ignore[assignment]
+    title_counts: dict[str, int] = None  # type: ignore[assignment]
+    scene_urls: dict[int, str] = None  # type: ignore[assignment]
+    scene_titles: dict[int, str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        self.url_counts = {} if self.url_counts is None else self.url_counts
+        self.title_counts = {} if self.title_counts is None else self.title_counts
+        self.scene_urls = {} if self.scene_urls is None else self.scene_urls
+        self.scene_titles = {} if self.scene_titles is None else self.scene_titles
+
+    def release_scene(self, index: int) -> None:
+        url = self.scene_urls.pop(index, None)
+        title = self.scene_titles.pop(index, None)
+        if url:
+            left = self.url_counts.get(url, 0) - 1
+            if left > 0:
+                self.url_counts[url] = left
+            else:
+                self.url_counts.pop(url, None)
+        if title:
+            key = title.casefold().strip()
+            left = self.title_counts.get(key, 0) - 1
+            if left > 0:
+                self.title_counts[key] = left
+            else:
+                self.title_counts.pop(key, None)
+
+    def register_scene(self, index: int, url: str, title: str) -> None:
+        self.release_scene(index)
+        self.scene_urls[index] = url
+        self.scene_titles[index] = title
+        self.url_counts[url] = self.url_counts.get(url, 0) + 1
+        key = title.casefold().strip()
+        if key:
+            self.title_counts[key] = self.title_counts.get(key, 0) + 1
+
+    def used_urls(self) -> set[str]:
+        return set(self.url_counts)
+
+    def used_titles(self) -> list[str]:
+        return list(self.title_counts)
 
 
 def search_commons(query: str, *, limit: int = 20) -> list[AssetCandidate]:
@@ -135,12 +182,16 @@ def materialize_assets(
     replace_scenes: set[int] | None = None,
     rank_offset: int = 0,
     meme_dir: str | Path | None = None,
+    registry: MaterialRegistry | None = None,
 ) -> list[dict]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     replace_scenes = replace_scenes or set()
-    used_urls: set[str] = set()
-    used_titles: list[str] = []
+    registry = registry or MaterialRegistry()
+    for scene_index in replace_scenes:
+        registry.release_scene(scene_index)
+    used_urls = registry.used_urls()
+    used_titles = registry.used_titles()
     manifest: list[dict] = []
     total_scenes = len(plan.scenes)
 
@@ -162,10 +213,6 @@ def materialize_assets(
 
     if soft_story_context:
         print(f"[context] soft story setting: {soft_story_context}", flush=True)
-
-    for index, scene in enumerate(plan.scenes):
-        if index not in replace_scenes and scene.asset and Path(scene.asset).exists():
-            used_titles.append(Path(scene.asset).stem)
 
     for index, scene in enumerate(plan.scenes):
         prefix = f"[{index + 1}/{total_scenes}]"
@@ -233,8 +280,9 @@ def materialize_assets(
             target.replace(final_target)
         _cleanup_scene_attempts(out_dir, index, keep=final_target)
 
-        used_urls.add(chosen.download_url)
-        used_titles.append(chosen.title)
+        registry.register_scene(index, chosen.download_url, chosen.title)
+        used_urls = registry.used_urls()
+        used_titles = registry.used_titles()
         scene.asset = str(final_target.resolve())
         scene.asset_kind = chosen.kind  # type: ignore[assignment]
         scene.asset_score = round(chosen.score, 4)
