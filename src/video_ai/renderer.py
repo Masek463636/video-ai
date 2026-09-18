@@ -151,6 +151,26 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
     _render_safe_background(duration, plan, output, crf=crf)
 
 
+def _render_reference_video(asset: Path, duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
+    """Render moving B-roll like the reference: source motion + blurred 9:16 fill."""
+    w, h, fps = plan.width, plan.height, plan.fps
+    graph = (
+        f"[0:v]split=2[bg][fg];"
+        f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},gblur=sigma=28,eq=brightness=-0.10:saturation=0.82[bg2];"
+        f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[fg2];"
+        f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2:shortest=1,fps={fps}[v]"
+    )
+    _run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-stream_loop", "-1", "-i", str(asset),
+        "-filter_complex", graph,
+        "-map", "[v]",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+        "-pix_fmt", "yuv420p", "-r", str(fps), "-t", f"{duration:.3f}", str(output),
+    ])
+
+
 def _render_safe_background(duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
     _run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
