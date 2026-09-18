@@ -134,8 +134,8 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
             print(f"[render] skipped corrupt video: {asset.name}", flush=True)
             _render_safe_background(duration, plan, output, crf=crf)
             return
-        vf = _video_filter(scene, plan, duration)
         if scene.source_mode == "meme_library":
+            vf = _video_filter(scene, plan, duration)
             asset_duration = _safe_probe_duration(asset)
             if 0 < asset_duration < duration:
                 stretch = duration / asset_duration
@@ -145,7 +145,7 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
                     vf = f"{vf},tpad=stop_mode=clone:stop_duration={duration:.3f}"
             _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(asset), "-vf", vf, *common])
             return
-        _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-stream_loop", "-1", "-i", str(asset), "-vf", vf, *common])
+        _render_reference_video(asset, duration, plan, output, crf=crf)
         return
 
     _render_safe_background(duration, plan, output, crf=crf)
@@ -282,6 +282,7 @@ def _focus_expr(inner: str, outer: str, focus: float) -> str:
 
 
 def _write_ass(plan: ShotPlan, path: Path) -> None:
+    font_size = max(76, int(plan.width * 0.086))
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {plan.width}
@@ -290,24 +291,54 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Arial,{max(48,int(plan.width*0.066))},&H00FFFFFF,&H00FFFFFF,&H00101010,&H50000000,-1,0,0,0,100,100,0,0,1,5,0,2,80,80,{int(plan.height*0.26)},1
+Style: Default,Arial Black,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H30000000,-1,0,0,0,100,100,-1,0,1,8,2,2,70,70,{int(plan.height*0.22)},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
     events: list[str] = []
     for scene in plan.scenes:
-        if scene.caption:
-            events.append(f"Dialogue: 0,{_ass_time(scene.start)},{_ass_time(scene.end)},Default,,0,0,0,,{_ass_text(scene.caption)}")
+        if not scene.caption:
+            continue
+        pages = _caption_pages(scene.caption, scene.start, scene.end)
+        for page_start, page_end, text in pages:
+            events.append(
+                f"Dialogue: 0,{_ass_time(page_start)},{_ass_time(page_end)},Default,,0,0,0,,{_ass_text(text)}"
+            )
     path.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")
 
 
-def _ass_text(text: str) -> str:
+def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, float, str]]:
     words = text.replace("{", "(").replace("}", ")").split()
-    if len(words) <= 5:
-        return " ".join(words)
-    mid = min(5, max(2, math.ceil(len(words) / 2)))
-    return " ".join(words[:mid]) + r"\N" + " ".join(words[mid:])
+    if not words:
+        return []
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        current.append(word)
+        strong_break = word.endswith((",", ";", ":", ".", "!", "?"))
+        if len(current) >= 3 or (len(current) >= 2 and strong_break):
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+
+    total_weight = sum(max(1, len(" ".join(group))) for group in groups)
+    duration = max(0.06, end - start)
+    cursor = start
+    out: list[tuple[float, float, str]] = []
+    for i, group in enumerate(groups):
+        weight = max(1, len(" ".join(group)))
+        share = duration * (weight / max(1, total_weight))
+        page_end = end if i == len(groups) - 1 else min(end, cursor + share)
+        out.append((cursor, max(cursor + 0.05, page_end), " ".join(group)))
+        cursor = page_end
+    return out
+
+
+def _ass_text(text: str) -> str:
+    safe = text.replace("{", "(").replace("}", ")")
+    return r"{\\fad(55,70)}" + safe
 
 
 def _ass_time(seconds: float) -> str:
