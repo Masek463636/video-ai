@@ -8,6 +8,7 @@ from .assets import materialize_assets
 from .audio_mix import mix_audio
 from .audio_plan import build_audio_plan, save_audio_plan
 from .director import build_shot_plan
+from .broll_planner import build_donor_shot_plan
 from .editing_grammar import apply_pre_asset_grammar, diversity_repair_indexes
 from .io import load_shot_plan, save_shot_plan
 from .material_brain import diversity_summary, find_duplicate_scenes, prepare_diversity_repair
@@ -335,13 +336,37 @@ def main() -> None:
         if args.command == "create":
             transcript = transcribe_local(args.audio, model_size=args.model, language=args.language)
             transcript_path = save_transcript(transcript, work / "transcript.json")
-            plan = build_shot_plan(transcript, Path(args.audio), target_scene_seconds=args.pace, min_scene_seconds=args.min_scene, max_scene_seconds=args.max_scene, meme_dir=args.meme_dir)
-            grammar_rewritten = apply_pre_asset_grammar(plan)
-            reference_rewritten = apply_reference_style(plan)
-            if grammar_rewritten:
-                print(f"[grammar] visual-sequence beats: {grammar_rewritten}", flush=True)
-            if reference_rewritten:
-                print(f"[style] reference video-first beats: {reference_rewritten}", flush=True)
+            try:
+                plan = build_donor_shot_plan(
+                    transcript,
+                    Path(args.audio),
+                    meme_dir=args.meme_dir,
+                )
+                grammar_rewritten = []
+                reference_rewritten = []
+                print(
+                    f"[planner] donor whole-transcript storyboard: {len(plan.scenes)} beats",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[planner] donor planner unavailable -> legacy fallback: {exc}",
+                    flush=True,
+                )
+                plan = build_shot_plan(
+                    transcript,
+                    Path(args.audio),
+                    target_scene_seconds=args.pace,
+                    min_scene_seconds=args.min_scene,
+                    max_scene_seconds=args.max_scene,
+                    meme_dir=args.meme_dir,
+                )
+                grammar_rewritten = apply_pre_asset_grammar(plan)
+                reference_rewritten = apply_reference_style(plan)
+                if grammar_rewritten:
+                    print(f"[grammar] visual-sequence beats: {grammar_rewritten}", flush=True)
+                if reference_rewritten:
+                    print(f"[style] reference video-first beats: {reference_rewritten}", flush=True)
             save_shot_plan(plan, work / "shot_plan.json")
         else:
             transcript_path = None
@@ -380,6 +405,7 @@ def main() -> None:
             "director_model": plan.director_model,
             "editing_grammar_scenes": grammar_rewritten,
             "reference_style_scenes": reference_rewritten if args.command == "create" else [],
+            "planner_mode": plan.director_source,
             "diversity_repair_scenes": diversity_repairs,
             "material_diversity": diversity_summary(plan),
         }
