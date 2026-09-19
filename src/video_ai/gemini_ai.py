@@ -112,6 +112,96 @@ BALANCED EDITING RULES:
         raw = data.get("scenes", []) if isinstance(data, dict) else []
         return [item for item in raw if isinstance(item, dict)]
 
+    def rewrite_search_queries(
+        self,
+        scene: Scene,
+        *,
+        rejected: list[dict[str, Any]] | None = None,
+        previous_queries: list[str] | None = None,
+    ) -> list[str]:
+        """Rewrite a failed stock search into concrete, searchable visual actions."""
+        if not self.available:
+            return []
+        rejected = rejected or []
+        previous_queries = previous_queries or []
+        feedback = [
+            {
+                "title": str(item.get("title", ""))[:120],
+                "reason": str(item.get("reason") or item.get("mismatch") or "")[:220],
+            }
+            for item in rejected[-8:]
+        ]
+        prompt = f"""
+You repair failed stock-footage searches for a vertical YouTube Short.
+
+NARRATION BEAT:
+{scene.caption or ""}
+
+DIRECTOR INTENT:
+{scene.visual_description or scene.query or ""}
+
+MEDIA TYPE:
+{scene.visual_mode} / {scene.source_mode}
+
+PREVIOUS SEARCHES THAT FAILED:
+{json.dumps(previous_queries[-8:], ensure_ascii=False)}
+
+REJECTED RESULTS AND WHY:
+{json.dumps(feedback, ensure_ascii=False)}
+
+Return ONLY JSON:
+{{
+  "queries": [
+    "concrete English stock search",
+    "different concrete English stock search",
+    "different concrete English stock search",
+    "different concrete English stock search"
+  ]
+}}
+
+STRICT RULES:
+- Every query must describe something a camera can literally see.
+- Use 3-7 simple English words.
+- Preferred structure: SUBJECT + VISIBLE ACTION + OBJECT/PLACE.
+- Prefer common stock-footage vocabulary that Pexels/Pixabay can actually match.
+- Search for the underlying action, not an abstract metaphor.
+- If narration is abstract (inflation, betrayal, value loss), translate it into
+  a simple visible human action (checking wallet, shocked shopper, disappointed person).
+- Queries must be meaningfully different from one another.
+- Preserve critical concrete nouns from narration when useful (milk, supermarket,
+  shopping cart, package, conveyor, wallet, price).
+- DO NOT use: abstract, concept, metaphor, animation, background, VJ, earth,
+  planet, revolution, energy, aesthetic, symbolic, cinematic concept.
+- DO NOT include camera jargon unless essential.
+- DO NOT request text overlays, logos, screenshots, UI, posters or infographics.
+- For video scenes, prefer real human/action footage.
+""".strip()
+        try:
+            data = self._generate_json([{"text": prompt}], temperature=0.06)
+        except Exception:
+            return []
+        raw = data.get("queries", []) if isinstance(data, dict) else []
+        out: list[str] = []
+        seen: set[str] = set()
+        banned = {
+            "abstract", "concept", "metaphor", "animation", "background", "vj",
+            "earth", "planet", "revolution", "aesthetic", "symbolic",
+        }
+        for value in raw:
+            q = re.sub(r"\s+", " ", str(value)).strip(" ,.;:-")
+            words = re.findall(r"[A-Za-z0-9'-]+", q)
+            if not (2 <= len(words) <= 9):
+                continue
+            lowered = q.casefold()
+            if any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in banned):
+                continue
+            if lowered not in seen:
+                seen.add(lowered)
+                out.append(q[:140])
+            if len(out) >= 4:
+                break
+        return out
+
     def judge_visual(self, scene: Scene, media_path: str | Path, *, candidate_title: str = "", source: str = "") -> VisualJudgement | None:
         if not self.available:
             return None
@@ -223,7 +313,7 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.3.1",
+                "User-Agent": "video-ai/1.5.1",
             })
             try:
                 with urllib.request.urlopen(req, timeout=60) as response:
