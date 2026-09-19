@@ -19,7 +19,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.5.0 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.5.1 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -183,6 +183,7 @@ def materialize_assets(
     rank_offset: int = 0,
     meme_dir: str | Path | None = None,
     registry: MaterialRegistry | None = None,
+    allow_coverage_reuse: bool = True,
 ) -> list[dict]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -217,7 +218,11 @@ def materialize_assets(
     for index, scene in enumerate(plan.scenes):
         prefix = f"[{index + 1}/{total_scenes}]"
         force_replace = index in replace_scenes
-        print(f"{prefix} search | tone={scene.tone} | {scene.visual_mode}/{scene.source_mode}", flush=True)
+        print(
+            f"{prefix} search | tone={scene.tone} | {scene.visual_mode}/{scene.source_mode}"
+            f" | query={scene.query}",
+            flush=True,
+        )
 
         if scene.asset and not overwrite and not force_replace and Path(scene.asset).exists():
             _apply_focus(scene, Path(scene.asset))
@@ -238,14 +243,56 @@ def materialize_assets(
 
         recovery_used = False
         if chosen is None and not scene.semantic_lock:
-            print(f"{prefix} recovery search: broader current-beat query", flush=True)
-            recovery_ranked = _build_recovery_pool(
-                scene, limit=max(8, min(limit, 14)), used_urls=used_urls,
-                used_titles=used_titles, semantic=semantic,
-            )
+            previous_queries = list(variants)
+            rewritten: list[str] = []
+            if gemini is not None:
+                try:
+                    rewritten = gemini.rewrite_search_queries(
+                        scene,
+                        rejected=rejected,
+                        previous_queries=previous_queries,
+                    )
+                except Exception:
+                    rewritten = []
+
+            if rewritten:
+                print(
+                    f"{prefix} recovery rewrite: " + " || ".join(rewritten),
+                    flush=True,
+                )
+                original_queries = list(scene.search_queries)
+                original_query = scene.query
+                scene.search_queries = rewritten + [
+                    q for q in original_queries if q.casefold() not in {x.casefold() for x in rewritten}
+                ]
+                scene.query = scene.search_queries[0]
+                recovery_ranked, recovery_variants = _build_ranked_pool(
+                    scene,
+                    limit=max(limit, 24),
+                    meme_dir=meme_dir,
+                    used_urls=used_urls,
+                    used_titles=used_titles,
+                    semantic=semantic,
+                    semantic_top_k=max(semantic_top_k, 8),
+                )
+                print(
+                    f"{prefix} recovery candidates={len(recovery_ranked)}"
+                    + (" | CLIP ranked" if semantic else ""),
+                    flush=True,
+                )
+            else:
+                print(f"{prefix} recovery search: concrete current-beat fallback", flush=True)
+                recovery_ranked = _build_recovery_pool(
+                    scene,
+                    limit=max(12, min(limit, 20)),
+                    used_urls=used_urls,
+                    used_titles=used_titles,
+                    semantic=semantic,
+                )
+
             chosen, target, search_used, recovery_judge, recovery_rejected, recovery_local, recovery_checked = _select_best_candidate(
                 scene, recovery_ranked, out_dir, index=index, gemini=gemini,
-                max_checks=1, prefix=prefix, attempt_offset=checked,
+                max_checks=3, prefix=prefix, attempt_offset=checked,
             )
             rejected.extend(recovery_rejected)
             local_rejected.extend(recovery_local)
@@ -315,9 +362,18 @@ def materialize_assets(
         else:
             print(f"{prefix} selected locally", flush=True)
 
-    filled = ensure_visual_coverage(plan, manifest)
-    if filled:
-        print(f"[coverage] recovered {len(filled)} empty scene(s) without black frames", flush=True)
+    filled: set[int] = set()
+    if allow_coverage_reuse:
+        filled = ensure_visual_coverage(plan, manifest)
+        if filled:
+            print(f"[coverage] recovered {len(filled)} empty scene(s) without black frames", flush=True)
+    else:
+        unresolved = [
+            i for i, scene in enumerate(plan.scenes)
+            if not scene.asset or not Path(scene.asset).exists() or scene.asset_kind == "blank"
+        ]
+        if unresolved:
+            print(f"[coverage] donor mode: reuse disabled; unresolved scenes={unresolved}", flush=True)
     (out_dir / "assets_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
 
@@ -791,12 +847,11 @@ def _query_variants(scene: Scene) -> Iterable[str]:
 def _recovery_queries(scene: Scene) -> list[str]:
     description = scene.visual_description or scene.caption or scene.query
     keywords = " ".join(list(_tokens(scene.caption or scene.query))[:5])
-    tone = _tone_query_hint(scene.tone)
-    kind = "documentary footage" if scene.visual_mode == "video" else "documentary photo"
+    kind = "real footage" if scene.visual_mode == "video" else "documentary photo"
     queries = [
         f"{description} {kind}",
-        f"{keywords} {tone} {kind}",
-        f"{keywords} visual metaphor {kind}",
+        f"{keywords} {kind}",
+        f"person {keywords} action {kind}",
     ]
     out: list[str] = []
     seen: set[str] = set()
