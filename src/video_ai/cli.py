@@ -45,6 +45,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         semantic_top_k=args.semantic_top_k,
         meme_dir=args.meme_dir,
         registry=registry,
+        allow_coverage_reuse=not donor_mode,
     )
 
     all_diversity_repairs: set[int] = set()
@@ -132,11 +133,17 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             + (f" | {compact}" if compact else ""),
             flush=True,
         )
-        prepare_diversity_repair(
-            plan,
-            final_duplicates,
-            pass_index=max(1, args.diversity_passes) + final_pass,
-        )
+        if not donor_mode:
+            prepare_diversity_repair(
+                plan,
+                final_duplicates,
+                pass_index=max(1, args.diversity_passes) + final_pass,
+            )
+        else:
+            print(
+                f"[material] donor anti-repeat: preserving media type for {final_duplicates}",
+                flush=True,
+            )
         manifest = materialize_assets(
             plan,
             work / "assets",
