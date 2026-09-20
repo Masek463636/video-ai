@@ -20,7 +20,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.5.2 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.5.3 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -46,6 +46,7 @@ class AssetCandidate:
     semantic_score: float | None = None
     source: str = "commons"
     local_path: str | None = None
+    preview_url: str = ""
 
 
 @dataclass(slots=True)
@@ -160,11 +161,11 @@ def search_all(query: str, *, limit: int = 20, include_stock_video: bool = False
         pass
     if include_stock_video and not archive_only:
         try:
-            for item in search_stock_videos(query, limit=min(limit, 16)):
+            for item in search_stock_videos(query, limit=min(max(limit, 24), 40)):
                 c = AssetCandidate(
                     item.title, item.page_url, item.download_url, "video/mp4",
                     item.width, item.height, 0, "video", item.license,
-                    description=query, source=item.source,
+                    description=query, source=item.source, preview_url=item.preview_url,
                 )
                 pool.setdefault(c.download_url, c)
         except Exception:
@@ -267,14 +268,19 @@ def materialize_assets(
                     q for q in original_queries if q.casefold() not in {x.casefold() for x in rewritten}
                 ]
                 scene.query = scene.search_queries[0]
+                rejected_urls = {
+                    str(item.get("download_url") or "")
+                    for item in rejected
+                    if item.get("download_url")
+                }
                 recovery_ranked, recovery_variants = _build_ranked_pool(
                     scene,
-                    limit=max(limit, 24),
+                    limit=max(limit, 36),
                     meme_dir=meme_dir,
-                    used_urls=used_urls,
+                    used_urls=used_urls | rejected_urls,
                     used_titles=used_titles,
                     semantic=semantic,
-                    semantic_top_k=max(semantic_top_k, 8),
+                    semantic_top_k=max(semantic_top_k, 60),
                 )
                 print(
                     f"{prefix} recovery candidates={len(recovery_ranked)}"
@@ -286,7 +292,11 @@ def materialize_assets(
                 recovery_ranked = _build_recovery_pool(
                     scene,
                     limit=max(12, min(limit, 20)),
-                    used_urls=used_urls,
+                    used_urls=used_urls | {
+                        str(item.get("download_url") or "")
+                        for item in rejected
+                        if item.get("download_url")
+                    },
                     used_titles=used_titles,
                     semantic=semantic,
                 )
@@ -476,7 +486,7 @@ def _build_ranked_pool(
 
     ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
     if semantic and ranked:
-        _video_preview_rerank(scene, ranked, top_k=max(semantic_top_k, 12))
+        _video_preview_rerank(scene, ranked, top_k=max(semantic_top_k, 60))
         _semantic_rerank(scene, ranked, top_k=semantic_top_k)
         ranked.sort(key=lambda item: item[0].score, reverse=True)
     return ranked, variants
@@ -507,7 +517,7 @@ def _build_recovery_pool(
             pool.setdefault(candidate.download_url, (candidate, query))
     ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
     if semantic and ranked:
-        _video_preview_rerank(scene, ranked, top_k=min(12, len(ranked)))
+        _video_preview_rerank(scene, ranked, top_k=min(60, len(ranked)))
         _semantic_rerank(scene, ranked, top_k=min(4, len(ranked)))
         ranked.sort(key=lambda item: item[0].score, reverse=True)
     return ranked
@@ -564,6 +574,7 @@ def _select_best_candidate(
             rejected.append({
                 "title": candidate.title,
                 "source": candidate.source,
+                "download_url": candidate.download_url,
                 "reason": conflict,
                 "mismatch": conflict,
                 "hard_reject": True,
@@ -595,12 +606,12 @@ def _select_best_candidate(
                 else:
                     combined -= 4.0
                 if severe:
-                    rejected.append({"title": candidate.title, "source": candidate.source, **judge_info, "hard_reject": True})
+                    rejected.append({"title": candidate.title, "source": candidate.source, "download_url": candidate.download_url, **judge_info, "hard_reject": True})
                     candidate_target.unlink(missing_ok=True)
                     print(f"{prefix} rejected hard: {judgement.mismatch or judgement.reason[:70]}", flush=True)
                     continue
                 if not judgement.accept:
-                    rejected.append({"title": candidate.title, "source": candidate.source, **judge_info, "hard_reject": False})
+                    rejected.append({"title": candidate.title, "source": candidate.source, "download_url": candidate.download_url, **judge_info, "hard_reject": False})
 
         evaluated.append((combined, candidate, candidate_target, search, judge_info))
 
@@ -922,9 +933,36 @@ def _visual_mode_bonus(scene: Scene, candidate: AssetCandidate) -> float:
 
 
 def _video_preview_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, top_k: int) -> None:
-    pairs = [(c, q) for c, q in ranked if c.kind == "video"][:max(1, top_k)]
-    if not pairs:
+    # Deep retrieval: sample a broad, query-balanced set of videos instead of
+    # visually checking only the metadata-ranked top few.
+    video_pairs = [(candidate, query) for candidate, query in ranked if candidate.kind == "video"]
+    if not video_pairs:
         return
+
+    groups: dict[str, list[tuple[AssetCandidate, str]]] = {}
+    order: list[str] = []
+    for pair in video_pairs:
+        key = pair[1].casefold().strip()
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(pair)
+
+    pairs: list[tuple[AssetCandidate, str]] = []
+    cursor = 0
+    while len(pairs) < max(1, top_k) and order:
+        progressed = False
+        for key in order:
+            bucket = groups[key]
+            if cursor < len(bucket):
+                pairs.append(bucket[cursor])
+                progressed = True
+                if len(pairs) >= max(1, top_k):
+                    break
+        if not progressed:
+            break
+        cursor += 1
+
     try:
         from .multimodal import ClipRanker
         ranker = ClipRanker()
@@ -936,47 +974,77 @@ def _video_preview_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]]
         scene.caption or "",
     ]).strip()
 
-    with tempfile.TemporaryDirectory(prefix="video-ai-clipvid-") as d:
+    with tempfile.TemporaryDirectory(prefix="video-ai-deepclip-") as d:
         root = Path(d)
-        frames: list[Path] = []
-        valid: list[AssetCandidate] = []
+        candidate_frames: list[tuple[AssetCandidate, list[Path]]] = []
         for idx, (candidate, _) in enumerate(pairs):
-            video_path = root / f"candidate_{idx:02d}{_suffix(candidate)}"
-            frame_path = root / f"candidate_{idx:02d}.jpg"
+            video_path = root / f"candidate_{idx:03d}{_suffix(candidate)}"
+            source_url = candidate.preview_url or candidate.download_url
             try:
                 if candidate.local_path:
                     shutil.copy2(candidate.local_path, video_path)
                 else:
-                    _download(candidate.download_url, video_path)
-                completed = subprocess.run(
-                    [
-                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                        "-ss", "0.8", "-i", str(video_path),
-                        "-frames:v", "1",
-                        "-vf", "scale=512:-2",
-                        str(frame_path),
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=20,
-                    check=False,
-                )
-                if completed.returncode != 0 or not frame_path.exists() or frame_path.stat().st_size < 1024:
-                    continue
+                    _download(source_url, video_path)
             except Exception:
                 continue
-            frames.append(frame_path)
-            valid.append(candidate)
 
-        if not frames:
+            frame_paths: list[Path] = []
+            # Three temporal samples catch actions that are absent from the
+            # opening frame. Fixed offsets degrade gracefully for short clips.
+            for frame_idx, sec in enumerate((0.35, 1.35, 2.75)):
+                frame_path = root / f"candidate_{idx:03d}_{frame_idx}.jpg"
+                try:
+                    completed = subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                            "-ss", str(sec), "-i", str(video_path),
+                            "-frames:v", "1",
+                            "-vf", "scale=384:-2",
+                            str(frame_path),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=15,
+                        check=False,
+                    )
+                    if completed.returncode == 0 and frame_path.exists() and frame_path.stat().st_size >= 1024:
+                        frame_paths.append(frame_path)
+                except Exception:
+                    continue
+            if frame_paths:
+                candidate_frames.append((candidate, frame_paths))
+
+        if not candidate_frames:
             return
-        try:
-            scores = ranker.score_images(prompt, frames)
-        except Exception:
-            return
-        for candidate, sim in zip(valid, scores):
-            candidate.semantic_score = float(sim)
-            candidate.score += float(sim) * 42.0
+
+        # Score in small batches to avoid blowing RAM/VRAM on 150+ frames.
+        flat: list[tuple[AssetCandidate, Path]] = [
+            (candidate, path)
+            for candidate, paths in candidate_frames
+            for path in paths
+        ]
+        by_candidate: dict[int, list[float]] = {}
+        batch_size = 24
+        for offset in range(0, len(flat), batch_size):
+            batch = flat[offset:offset + batch_size]
+            try:
+                scores = ranker.score_images(prompt, [path for _, path in batch])
+            except Exception:
+                continue
+            for (candidate, _), score in zip(batch, scores):
+                by_candidate.setdefault(id(candidate), []).append(float(score))
+
+        for candidate, _ in candidate_frames:
+            scores = by_candidate.get(id(candidate), [])
+            if not scores:
+                continue
+            best = max(scores)
+            mean = sum(scores) / len(scores)
+            visual = best * 0.72 + mean * 0.28
+            candidate.semantic_score = visual
+            # Visual similarity should dominate weak provider metadata.
+            candidate.score = candidate.score * 0.20 + visual * 100.0
+
 
 
 def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, top_k: int) -> None:
