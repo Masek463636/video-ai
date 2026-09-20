@@ -19,7 +19,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.5.1 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.5.2 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -234,7 +234,7 @@ def materialize_assets(
             scene, limit=limit, meme_dir=meme_dir, used_urls=used_urls,
             used_titles=used_titles, semantic=semantic, semantic_top_k=semantic_top_k,
         )
-        print(f"{prefix} candidates={len(ranked)}" + (" | CLIP ranked" if semantic else ""), flush=True)
+        print(f"{prefix} candidates={len(ranked)}" + (" | visual CLIP ranked" if semantic else ""), flush=True)
 
         chosen, target, search_used, judge_info, rejected, local_rejected, checked = _select_best_candidate(
             scene, ranked[max(0, rank_offset):], out_dir, index=index, gemini=gemini,
@@ -277,7 +277,7 @@ def materialize_assets(
                 )
                 print(
                     f"{prefix} recovery candidates={len(recovery_ranked)}"
-                    + (" | CLIP ranked" if semantic else ""),
+                    + (" | visual CLIP ranked" if semantic else ""),
                     flush=True,
                 )
             else:
@@ -475,6 +475,7 @@ def _build_ranked_pool(
 
     ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
     if semantic and ranked:
+        _video_preview_rerank(scene, ranked, top_k=max(semantic_top_k, 12))
         _semantic_rerank(scene, ranked, top_k=semantic_top_k)
         ranked.sort(key=lambda item: item[0].score, reverse=True)
     return ranked, variants
@@ -505,6 +506,7 @@ def _build_recovery_pool(
             pool.setdefault(candidate.download_url, (candidate, query))
     ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
     if semantic and ranked:
+        _video_preview_rerank(scene, ranked, top_k=min(12, len(ranked)))
         _semantic_rerank(scene, ranked, top_k=min(4, len(ranked)))
         ranked.sort(key=lambda item: item[0].score, reverse=True)
     return ranked
@@ -916,6 +918,64 @@ def _visual_mode_bonus(scene: Scene, candidate: AssetCandidate) -> float:
     if scene.visual_mode == "meme":
         return 30.0 if candidate.source == "local_meme" else -10.0
     return 0.0
+
+
+def _video_preview_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, top_k: int) -> None:
+    pairs = [(c, q) for c, q in ranked if c.kind == "video"][:max(1, top_k)]
+    if not pairs:
+        return
+    try:
+        from .multimodal import ClipRanker
+        ranker = ClipRanker()
+    except Exception:
+        return
+
+    prompt = " ".join([
+        scene.visual_description or scene.query or "documentary scene",
+        scene.caption or "",
+    ]).strip()
+
+    with tempfile.TemporaryDirectory(prefix="video-ai-clipvid-") as d:
+        root = Path(d)
+        frames: list[Path] = []
+        valid: list[AssetCandidate] = []
+        for idx, (candidate, _) in enumerate(pairs):
+            video_path = root / f"candidate_{idx:02d}{_suffix(candidate)}"
+            frame_path = root / f"candidate_{idx:02d}.jpg"
+            try:
+                if candidate.local_path:
+                    shutil.copy2(candidate.local_path, video_path)
+                else:
+                    _download(candidate.download_url, video_path)
+                completed = subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", "0.8", "-i", str(video_path),
+                        "-frames:v", "1",
+                        "-vf", "scale=512:-2",
+                        str(frame_path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=20,
+                    check=False,
+                )
+                if completed.returncode != 0 or not frame_path.exists() or frame_path.stat().st_size < 1024:
+                    continue
+            except Exception:
+                continue
+            frames.append(frame_path)
+            valid.append(candidate)
+
+        if not frames:
+            return
+        try:
+            scores = ranker.score_images(prompt, frames)
+        except Exception:
+            return
+        for candidate, sim in zip(valid, scores):
+            candidate.semantic_score = float(sim)
+            candidate.score += float(sim) * 42.0
 
 
 def _semantic_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]], *, top_k: int) -> None:
