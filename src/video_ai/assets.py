@@ -21,7 +21,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.5.3 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/1.5.4 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -241,7 +241,7 @@ def materialize_assets(
 
         chosen, target, search_used, judge_info, rejected, local_rejected, checked = _select_best_candidate(
             scene, ranked[max(0, rank_offset):], out_dir, index=index, gemini=gemini,
-            max_checks=5, prefix=prefix,
+            max_checks=5, prefix=prefix, match_level="exact",
         )
 
         recovery_used = False
@@ -254,13 +254,14 @@ def materialize_assets(
                         scene,
                         rejected=rejected,
                         previous_queries=previous_queries,
+                        mode="close",
                     )
                 except Exception:
                     rewritten = []
 
             if rewritten:
                 print(
-                    f"{prefix} recovery rewrite: " + " || ".join(rewritten),
+                    f"{prefix} close fallback: " + " || ".join(rewritten),
                     flush=True,
                 )
                 original_queries = list(scene.search_queries)
@@ -276,15 +277,15 @@ def materialize_assets(
                 }
                 recovery_ranked, recovery_variants = _build_ranked_pool(
                     scene,
-                    limit=max(limit, 36),
+                    limit=max(limit, 24),
                     meme_dir=meme_dir,
                     used_urls=used_urls | rejected_urls,
                     used_titles=used_titles,
                     semantic=semantic,
-                    semantic_top_k=max(semantic_top_k, 60),
+                    semantic_top_k=max(semantic_top_k, 36),
                 )
                 print(
-                    f"{prefix} recovery candidates={len(recovery_ranked)}"
+                    f"{prefix} close candidates={len(recovery_ranked)}"
                     + (" | deep visual CLIP ranked" if semantic else ""),
                     flush=True,
                 )
@@ -304,13 +305,85 @@ def materialize_assets(
 
             chosen, target, search_used, recovery_judge, recovery_rejected, recovery_local, recovery_checked = _select_best_candidate(
                 scene, recovery_ranked, out_dir, index=index, gemini=gemini,
-                max_checks=5, prefix=prefix, attempt_offset=checked,
+                max_checks=4, prefix=prefix, attempt_offset=checked, match_level="close",
             )
             rejected.extend(recovery_rejected)
             local_rejected.extend(recovery_local)
             checked += recovery_checked
             if recovery_judge is not None:
                 judge_info = recovery_judge
+            recovery_used = chosen is not None
+
+        # Final ladder level: broad contextual B-roll. The exact gesture/object
+        # no longer needs to be present, but the footage must honestly support
+        # the narration topic and remain usable.
+        if chosen is None and not scene.semantic_lock:
+            previous_queries = list(_query_variants(scene))
+            context_queries: list[str] = []
+            if gemini is not None:
+                try:
+                    context_queries = gemini.rewrite_search_queries(
+                        scene,
+                        rejected=rejected,
+                        previous_queries=previous_queries,
+                        mode="context",
+                    )
+                except Exception:
+                    context_queries = []
+            if context_queries:
+                print(
+                    f"{prefix} context fallback: " + " || ".join(context_queries),
+                    flush=True,
+                )
+                scene.search_queries = context_queries
+                scene.query = context_queries[0]
+                rejected_urls = {
+                    str(item.get("download_url") or "")
+                    for item in rejected
+                    if item.get("download_url")
+                }
+                context_ranked, _ = _build_ranked_pool(
+                    scene,
+                    limit=max(limit, 20),
+                    meme_dir=meme_dir,
+                    used_urls=used_urls | rejected_urls,
+                    used_titles=used_titles,
+                    semantic=semantic,
+                    semantic_top_k=max(semantic_top_k, 24),
+                )
+            else:
+                context_ranked = _build_recovery_pool(
+                    scene,
+                    limit=max(12, min(limit, 18)),
+                    used_urls=used_urls | {
+                        str(item.get("download_url") or "")
+                        for item in rejected
+                        if item.get("download_url")
+                    },
+                    used_titles=used_titles,
+                    semantic=semantic,
+                )
+            print(
+                f"{prefix} context candidates={len(context_ranked)}"
+                + (" | deep visual CLIP ranked" if semantic else ""),
+                flush=True,
+            )
+            chosen, target, search_used, context_judge, context_rejected, context_local, context_checked = _select_best_candidate(
+                scene,
+                context_ranked,
+                out_dir,
+                index=index,
+                gemini=gemini,
+                max_checks=3,
+                prefix=prefix,
+                attempt_offset=checked,
+                match_level="context",
+            )
+            rejected.extend(context_rejected)
+            local_rejected.extend(context_local)
+            checked += context_checked
+            if context_judge is not None:
+                judge_info = context_judge
             recovery_used = chosen is not None
 
         if chosen is None or target is None:
@@ -541,6 +614,7 @@ def _select_best_candidate(
     max_checks: int,
     prefix: str,
     attempt_offset: int = 0,
+    match_level: str = "exact",
 ) -> tuple[AssetCandidate | None, Path | None, str, dict | None, list[dict], list[dict], int]:
     rejected: list[dict] = []
     local_rejected: list[dict] = []
@@ -597,7 +671,13 @@ def _select_best_candidate(
         combined = candidate.score + local_guard.score * 0.035
         if gemini is not None:
             print(f"{prefix} Gemini {checks}/{max_checks}: {candidate.title[:55]}", flush=True)
-            judgement = gemini.judge_visual(scene, candidate_target, candidate_title=candidate.title, source=candidate.source)
+            judgement = gemini.judge_visual(
+                scene,
+                candidate_target,
+                candidate_title=candidate.title,
+                source=candidate.source,
+                match_level=match_level,
+            )
             if judgement is None:
                 combined -= 3.0
             else:
@@ -606,6 +686,7 @@ def _select_best_candidate(
                     "reason": judgement.reason, "mismatch": judgement.mismatch,
                     "tone_match": judgement.tone_match, "quality_score": judgement.quality_score,
                     "quality_issues": judgement.quality_issues or [],
+                    "match_level": match_level,
                 }
                 severe = _hard_judge_reject(scene, judgement)
                 combined += judgement.score * 0.16 + judgement.tone_match * 0.075 + judgement.quality_score * 0.075
