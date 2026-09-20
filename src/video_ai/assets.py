@@ -236,11 +236,11 @@ def materialize_assets(
             scene, limit=limit, meme_dir=meme_dir, used_urls=used_urls,
             used_titles=used_titles, semantic=semantic, semantic_top_k=semantic_top_k,
         )
-        print(f"{prefix} candidates={len(ranked)}" + (" | visual CLIP ranked" if semantic else ""), flush=True)
+        print(f"{prefix} candidates={len(ranked)}" + (" | deep visual CLIP ranked" if semantic else ""), flush=True)
 
         chosen, target, search_used, judge_info, rejected, local_rejected, checked = _select_best_candidate(
             scene, ranked[max(0, rank_offset):], out_dir, index=index, gemini=gemini,
-            max_checks=4 if scene.semantic_lock else 3, prefix=prefix,
+            max_checks=5, prefix=prefix,
         )
 
         recovery_used = False
@@ -284,7 +284,7 @@ def materialize_assets(
                 )
                 print(
                     f"{prefix} recovery candidates={len(recovery_ranked)}"
-                    + (" | visual CLIP ranked" if semantic else ""),
+                    + (" | deep visual CLIP ranked" if semantic else ""),
                     flush=True,
                 )
             else:
@@ -303,7 +303,7 @@ def materialize_assets(
 
             chosen, target, search_used, recovery_judge, recovery_rejected, recovery_local, recovery_checked = _select_best_candidate(
                 scene, recovery_ranked, out_dir, index=index, gemini=gemini,
-                max_checks=3, prefix=prefix, attempt_offset=checked,
+                max_checks=5, prefix=prefix, attempt_offset=checked,
             )
             rejected.extend(recovery_rejected)
             local_rejected.extend(recovery_local)
