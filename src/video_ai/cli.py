@@ -67,6 +67,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             rank_offset=1,
             meme_dir=args.meme_dir,
             registry=registry,
+            allow_coverage_reuse=not donor_mode,
         )
 
     # v1.3.1 Material Brain works on the actual decoded visuals rather than URLs.
@@ -97,6 +98,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             rank_offset=pass_index + 2,
             meme_dir=args.meme_dir,
             registry=registry,
+            allow_coverage_reuse=not donor_mode,
         )
 
     qc_results = inspect_plan(plan)
@@ -114,6 +116,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             rank_offset=pass_index + 1,
             meme_dir=args.meme_dir,
             registry=registry,
+            allow_coverage_reuse=not donor_mode,
         )
         qc_results = inspect_plan(plan)
 
@@ -154,6 +157,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             rank_offset=max(3, args.diversity_passes + 1 + final_pass),
             meme_dir=args.meme_dir,
             registry=registry,
+            allow_coverage_reuse=not donor_mode,
         )
         qc_results = inspect_plan(plan)
 
