@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-ai"
-version = "1.5.2"
-description = "Local-first AI short video editor with whole-transcript B-roll planning, visual video retrieval, concrete query recovery and persistent source allocation"
+version = "1.5.3"
+description = "Local-first AI short video editor with deep multi-frame visual retrieval, concrete query recovery and persistent source allocation"
 requires-python = ">=3.11"
 dependencies = []
 
