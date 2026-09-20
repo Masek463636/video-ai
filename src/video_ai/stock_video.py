@@ -62,7 +62,7 @@ def _search_pexels(query: str, api_key: str, *, limit: int) -> list[StockVideo]:
     })
     request = urllib.request.Request(
         "https://api.pexels.com/videos/search?" + params,
-        headers={"Authorization": api_key, "User-Agent": "video-ai/0.8"},
+        headers={"Authorization": api_key, "User-Agent": "video-ai/1.5.3"},
     )
     with urllib.request.urlopen(request, timeout=25) as response:
         payload = json.load(response)
@@ -132,7 +132,7 @@ def _search_pixabay(query: str, api_key: str, *, limit: int) -> list[StockVideo]
     })
     request = urllib.request.Request(
         "https://pixabay.com/api/videos/?" + params,
-        headers={"User-Agent": "video-ai/0.8"},
+        headers={"User-Agent": "video-ai/1.5.3"},
     )
     with urllib.request.urlopen(request, timeout=25) as response:
         payload = json.load(response)
@@ -166,7 +166,7 @@ def _smallest_pixabay_variant(videos: dict) -> dict | None:
     variants.sort(
         key=lambda v: (
             int(v.get("width") or 0) * int(v.get("height") or 0),
-            max(int(v.get("width") or 0), int(v.get("height") or 0),
+            max(int(v.get("width") or 0), int(v.get("height") or 0)),
         )
     )
     return variants[0]
