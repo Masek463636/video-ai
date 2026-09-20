@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -981,43 +982,52 @@ def _video_preview_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]]
         scene.caption or "",
     ]).strip()
 
+    cache_root = Path(tempfile.gettempdir()) / "video-ai-deepclip-cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="video-ai-deepclip-") as d:
         root = Path(d)
         candidate_frames: list[tuple[AssetCandidate, list[Path]]] = []
         for idx, (candidate, _) in enumerate(pairs):
-            video_path = root / f"candidate_{idx:03d}{_suffix(candidate)}"
             source_url = candidate.preview_url or candidate.download_url
-            try:
-                if candidate.local_path:
-                    shutil.copy2(candidate.local_path, video_path)
-                else:
-                    _download(source_url, video_path)
-            except Exception:
-                continue
+            cache_key = hashlib.sha1(source_url.encode("utf-8", errors="ignore")).hexdigest()[:20]
+            cached = [cache_root / f"{cache_key}_{frame_idx}.jpg" for frame_idx in range(3)]
+            frame_paths = [p for p in cached if p.exists() and p.stat().st_size >= 1024]
 
-            frame_paths: list[Path] = []
-            # Three temporal samples catch actions that are absent from the
-            # opening frame. Fixed offsets degrade gracefully for short clips.
-            for frame_idx, sec in enumerate((0.35, 1.35, 2.75)):
-                frame_path = root / f"candidate_{idx:03d}_{frame_idx}.jpg"
+            if len(frame_paths) < 2:
+                video_path = root / f"candidate_{idx:03d}{_suffix(candidate)}"
                 try:
-                    completed = subprocess.run(
-                        [
-                            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                            "-ss", str(sec), "-i", str(video_path),
-                            "-frames:v", "1",
-                            "-vf", "scale=384:-2",
-                            str(frame_path),
-                        ],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=15,
-                        check=False,
-                    )
-                    if completed.returncode == 0 and frame_path.exists() and frame_path.stat().st_size >= 1024:
-                        frame_paths.append(frame_path)
+                    if candidate.local_path:
+                        shutil.copy2(candidate.local_path, video_path)
+                    else:
+                        _download(source_url, video_path)
                 except Exception:
                     continue
+
+                frame_paths = []
+                # Three temporal samples catch actions that are absent from the
+                # opening frame. Fixed offsets degrade gracefully for short clips.
+                for frame_idx, sec in enumerate((0.35, 1.35, 2.75)):
+                    frame_path = cached[frame_idx]
+                    try:
+                        completed = subprocess.run(
+                            [
+                                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                                "-ss", str(sec), "-i", str(video_path),
+                                "-frames:v", "1",
+                                "-vf", "scale=384:-2",
+                                str(frame_path),
+                            ],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=15,
+                            check=False,
+                        )
+                        if completed.returncode == 0 and frame_path.exists() and frame_path.stat().st_size >= 1024:
+                            frame_paths.append(frame_path)
+                    except Exception:
+                        continue
+                video_path.unlink(missing_ok=True)
+
             if frame_paths:
                 candidate_frames.append((candidate, frame_paths))
 
