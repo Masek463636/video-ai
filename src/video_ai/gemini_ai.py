@@ -118,12 +118,19 @@ BALANCED EDITING RULES:
         *,
         rejected: list[dict[str, Any]] | None = None,
         previous_queries: list[str] | None = None,
+        mode: str = "exact",
     ) -> list[str]:
         """Rewrite a failed stock search into concrete, searchable visual actions."""
         if not self.available:
             return []
         rejected = rejected or []
         previous_queries = previous_queries or []
+        mode = mode if mode in {"exact", "close", "context"} else "exact"
+        mode_rule = {
+            "exact": "Keep the same concrete object and visible action, but phrase it in simpler stock-footage language.",
+            "close": "Broaden the action while keeping the same subject/object/topic. A related usable B-roll action is preferred over an exact reenactment.",
+            "context": "Search for the broader real-world setting/topic. Exact action is NOT required; return honest contextual B-roll that supports the narration.",
+        }[mode]
         feedback = [
             {
                 "title": str(item.get("title", ""))[:120],
@@ -142,6 +149,10 @@ DIRECTOR INTENT:
 
 MEDIA TYPE:
 {scene.visual_mode} / {scene.source_mode}
+
+FALLBACK LEVEL:
+{mode.upper()}
+{mode_rule}
 
 PREVIOUS SEARCHES THAT FAILED:
 {json.dumps(previous_queries[-8:], ensure_ascii=False)}
@@ -165,6 +176,7 @@ STRICT RULES:
 - Preferred structure: SUBJECT + VISIBLE ACTION + OBJECT/PLACE.
 - Prefer common stock-footage vocabulary that Pexels/Pixabay can actually match.
 - Search for the underlying action, not an abstract metaphor.
+- Obey the FALLBACK LEVEL above. CLOSE and CONTEXT must be visibly broader than EXACT.
 - If narration is abstract (inflation, betrayal, value loss), translate it into
   a simple visible human action (checking wallet, shocked shopper, disappointed person).
 - Queries must be meaningfully different from one another.
@@ -202,9 +214,10 @@ STRICT RULES:
                 break
         return out
 
-    def judge_visual(self, scene: Scene, media_path: str | Path, *, candidate_title: str = "", source: str = "") -> VisualJudgement | None:
+    def judge_visual(self, scene: Scene, media_path: str | Path, *, candidate_title: str = "", source: str = "", match_level: str = "exact") -> VisualJudgement | None:
         if not self.available:
             return None
+        match_level = match_level if match_level in {"exact", "close", "context"} else "exact"
         previews = _make_previews(Path(media_path), count=3)
         if not previews:
             return None
@@ -228,6 +241,13 @@ Required entities: {json.dumps(scene.required_entities, ensure_ascii=False)}
 Required context: {json.dumps(scene.required_context, ensure_ascii=False)}
 Safe fallback: {scene.semantic_fallback or ''}
 Candidate title/source: {candidate_title} / {source}
+B-roll match level: {match_level.upper()}
+
+MATCH LEVEL RULES:
+- EXACT: prefer the requested object/person AND visible action. Reject meaningful action/object mismatches.
+- CLOSE: the exact gesture/action is NOT required. Accept the same subject/object/topic in a closely related usable situation. Example: narration says "grab milk from shelf"; pouring milk, holding a milk carton, or choosing dairy can be acceptable CLOSE B-roll.
+- CONTEXT: exact object/action is NOT required. Accept honest contextual footage of the broader setting/topic if it supports the narration and does not contradict it. Example: supermarket aisle/shoppers can support a price-shopping narration.
+- For CLOSE or CONTEXT, do NOT reject merely because the candidate is not a literal reenactment.
 
 Return ONLY JSON:
 {{
@@ -266,15 +286,20 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             reason = str(data.get("reason", ""))[:300]
 
             score = raw_score
-            if not scene.semantic_lock and raw_score < 45:
-                score = 29
+            semantic_floor = {"exact": 45, "close": 34, "context": 25}[match_level]
+            if not scene.semantic_lock and raw_score < semantic_floor:
+                score = min(raw_score, {"exact": 29, "close": 23, "context": 19}[match_level])
                 mismatch = mismatch if mismatch and mismatch.lower() != "none" else "semantic relevance below minimum"
                 reason = f"Low semantic relevance ({raw_score}/100). {reason}".strip()
 
             if scene.semantic_lock:
                 accept = bool(data.get("accept", False)) and score >= 72 and quality_score >= 45
-            else:
+            elif match_level == "exact":
                 accept = bool(data.get("accept", False)) and score >= 48 and tone_match >= 42 and quality_score >= 42
+            elif match_level == "close":
+                accept = score >= 40 and tone_match >= 35 and quality_score >= 40
+            else:
+                accept = score >= 32 and tone_match >= 30 and quality_score >= 38
             return VisualJudgement(
                 accept=accept,
                 score=score,
@@ -313,7 +338,7 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.5.1",
+                "User-Agent": "video-ai/1.5.4",
             })
             try:
                 with urllib.request.urlopen(req, timeout=60) as response:
