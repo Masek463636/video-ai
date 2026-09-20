@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .assets import MaterialRegistry, materialize_assets
+from .assets import MaterialRegistry, ensure_visual_coverage, materialize_assets
 from .audio_mix import mix_audio
 from .audio_plan import build_audio_plan, save_audio_plan
 from .director import build_shot_plan
@@ -102,7 +102,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         )
 
     qc_results = inspect_plan(plan)
-    for pass_index in range(max(0, args.repair_passes)):
+    for pass_index in range(0 if donor_mode else max(0, args.repair_passes)):
         failed = failed_scene_indexes(qc_results)
         if not failed:
             break
@@ -123,7 +123,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
     # QC replacement can itself re-introduce an already used visual. Keep
     # repairing the FINAL materialized plan, not only the first selection.
     # Stop when clean or after a small bounded number of passes.
-    for final_pass in range(2 if donor_mode else 3):
+    for final_pass in range(0 if donor_mode else 3):
         final_duplicates, final_matches = find_duplicate_scenes(plan)
         if not final_duplicates:
             break
@@ -159,6 +159,24 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             registry=registry,
             allow_coverage_reuse=not donor_mode,
         )
+        qc_results = inspect_plan(plan)
+
+    if donor_mode:
+        rescued = ensure_visual_coverage(plan, manifest)
+        if rescued:
+            print(
+                f"[coverage] NEVER BLACK rescue filled {len(rescued)} scene(s): {sorted(rescued)}",
+                flush=True,
+            )
+        unresolved_after_rescue = [
+            i for i, scene in enumerate(plan.scenes)
+            if not scene.asset or not Path(scene.asset).exists() or scene.asset_kind == "blank"
+        ]
+        if unresolved_after_rescue:
+            print(
+                f"[coverage] WARNING unresolved after NEVER BLACK rescue: {unresolved_after_rescue}",
+                flush=True,
+            )
         qc_results = inspect_plan(plan)
 
     summary = diversity_summary(plan)
