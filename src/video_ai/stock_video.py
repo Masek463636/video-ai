@@ -17,6 +17,7 @@ class StockVideo:
     duration: float
     source: str
     license: str = ""
+    preview_url: str = ""
 
 
 def search_stock_videos(query: str, *, limit: int = 12) -> list[StockVideo]:
@@ -74,6 +75,7 @@ def _search_pexels(query: str, api_key: str, *, limit: int) -> list[StockVideo]:
         selected = next((f for f in files if f.get("link")), None)
         if not selected:
             continue
+        preview = _smallest_pexels_preview(files) or selected
         results.append(StockVideo(
             title=f"Pexels video {video.get('id', '')}",
             page_url=str(video.get("url") or ""),
@@ -83,8 +85,29 @@ def _search_pexels(query: str, api_key: str, *, limit: int) -> list[StockVideo]:
             duration=float(video.get("duration") or 0.0),
             source="pexels",
             license="Pexels License",
+            preview_url=str(preview.get("link") or selected.get("link") or ""),
         ))
     return results
+
+
+def _smallest_pexels_preview(files: list[dict]) -> dict | None:
+    candidates = [
+        f for f in files
+        if f.get("link")
+        and int(f.get("width") or 0) > 0
+        and int(f.get("height") or 0) > 0
+    ]
+    if not candidates:
+        return None
+    # CLIP only needs a small decodable preview. Prefer the lowest-resolution
+    # variant to avoid downloading dozens of full HD files during retrieval.
+    candidates.sort(
+        key=lambda f: (
+            int(f.get("width") or 0) * int(f.get("height") or 0),
+            max(int(f.get("width") or 0), int(f.get("height") or 0)),
+        )
+    )
+    return candidates[0]
 
 
 def _pexels_file_score(file: dict) -> float:
@@ -120,6 +143,7 @@ def _search_pixabay(query: str, api_key: str, *, limit: int) -> list[StockVideo]
         selected = _best_pixabay_variant(videos)
         if not selected:
             continue
+        preview = _smallest_pixabay_variant(videos) or selected
         results.append(StockVideo(
             title=str(hit.get("tags") or f"Pixabay video {hit.get('id', '')}"),
             page_url=str(hit.get("pageURL") or ""),
@@ -129,8 +153,23 @@ def _search_pixabay(query: str, api_key: str, *, limit: int) -> list[StockVideo]
             duration=float(hit.get("duration") or 0.0),
             source="pixabay",
             license="Pixabay Content License",
+            preview_url=str(preview.get("url") or selected.get("url") or ""),
         ))
     return results
+
+
+def _smallest_pixabay_variant(videos: dict) -> dict | None:
+    variants = [videos.get(name) for name in ("tiny", "small", "medium", "large")]
+    variants = [v for v in variants if isinstance(v, dict) and v.get("url")]
+    if not variants:
+        return None
+    variants.sort(
+        key=lambda v: (
+            int(v.get("width") or 0) * int(v.get("height") or 0),
+            max(int(v.get("width") or 0), int(v.get("height") or 0),
+        )
+    )
+    return variants[0]
 
 
 def _best_pixabay_variant(videos: dict) -> dict | None:
