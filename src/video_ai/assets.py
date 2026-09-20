@@ -485,6 +485,13 @@ def _build_ranked_pool(
                     pool[candidate.download_url] = (candidate, variant)
 
     ranked = sorted(pool.values(), key=lambda item: item[0].score, reverse=True)
+    if scene.visual_mode == "video" and scene.source_mode == "stock_video":
+        video_ranked = [
+            item for item in ranked
+            if item[0].kind == "video" and item[0].source in {"pexels", "pixabay"}
+        ]
+        if video_ranked:
+            ranked = video_ranked
     if semantic and ranked:
         _video_preview_rerank(scene, ranked, top_k=max(semantic_top_k, 60))
         _semantic_rerank(scene, ranked, top_k=semantic_top_k)
@@ -1034,6 +1041,7 @@ def _video_preview_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]]
             for (candidate, _), score in zip(batch, scores):
                 by_candidate.setdefault(id(candidate), []).append(float(score))
 
+        scored_ids: set[int] = set()
         for candidate, _ in candidate_frames:
             scores = by_candidate.get(id(candidate), [])
             if not scores:
@@ -1044,6 +1052,13 @@ def _video_preview_rerank(scene: Scene, ranked: list[tuple[AssetCandidate, str]]
             candidate.semantic_score = visual
             # Visual similarity should dominate weak provider metadata.
             candidate.score = candidate.score * 0.20 + visual * 100.0
+            scored_ids.add(id(candidate))
+
+        # Never let an uninspected metadata-only video outrank a video that CLIP
+        # actually looked at. It can be considered on a later query/repair pass.
+        for candidate, _ in video_pairs:
+            if id(candidate) not in scored_ids:
+                candidate.score = min(candidate.score, -100.0)
 
 
 
