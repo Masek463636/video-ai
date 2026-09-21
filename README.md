@@ -177,3 +177,33 @@ V0.4 is still an MVP engine, not a finished consumer editor.
 ## License / upstream
 
 The product architecture is independent. We are studying compatible open-source approaches such as `browser-use/video-use`; any substantial third-party code reused later must retain the notices required by its license.
+
+## V2.1 optional sources
+
+The v2 Visual Director keeps the working Test40 stock path unchanged and only expands sources around it.
+
+Optional online meme reactions:
+
+```powershell
+$env:GIPHY_API_KEY="..."
+$env:GIPHY_MEDIA_CACHE_APPROVED="true"
+```
+
+When enabled, donor-mode meme scenes compare the local `--meme-dir` library and GIPHY candidates in one Gemini multi-candidate visual selection. If the variables are absent, GIPHY is skipped and local memes continue to work normally.
+
+Optional online SFX:
+
+```powershell
+$env:FREESOUND_API_KEY="..."
+```
+
+When configured, planned cues such as `whoosh`, `impact`, `notification`, `bass_hit` and `cash_pop` first try a short CC0 Freesound result, then fall back to the existing local/procedural sound path. Downloaded Freesound previews get a JSON sidecar in the work directory with source, sound id, author and license metadata.
+
+For commercial mode you can require an explicit local approval switch before Freesound is used:
+
+```powershell
+$env:VIDEO_AI_COMMERCIAL="true"
+$env:FREESOUND_COMMERCIAL_APPROVED="true"
+```
+
+Do not put API keys into source files or commit them to GitHub.
