@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .assets import MaterialRegistry, ensure_visual_coverage, materialize_assets
+from .assets import MaterialRegistry, materialize_assets
 from .audio_mix import mix_audio
 from .audio_plan import build_audio_plan, save_audio_plan
 from .director import build_shot_plan
@@ -162,9 +162,9 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         qc_results = inspect_plan(plan)
 
     if donor_mode:
-        # Never ship black frames. v2 still tries unique retrieval first, but
-        # if every unique candidate failed, reuse the closest compatible visual
-        # only as a final emergency fallback.
+        # Donor mode has a strict final invariant: no black scenes and no
+        # repeated visual files. First rescue failed stock-video beats by
+        # changing medium (usually video -> image) and searching again.
         unresolved_after_v2 = [
             i for i, scene in enumerate(plan.scenes)
             if not scene.asset or not Path(scene.asset).exists() or scene.asset_kind == "blank"
@@ -174,12 +174,98 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
                 f"[coverage] v2 unique-only unresolved scenes: {unresolved_after_v2}",
                 flush=True,
             )
-            emergency_filled = ensure_visual_coverage(plan, manifest)
-            if emergency_filled:
-                print(
-                    f"[coverage] emergency never-black fallback filled: {sorted(emergency_filled)}",
-                    flush=True,
-                )
+            prepare_diversity_repair(plan, unresolved_after_v2, pass_index=2)
+            print(
+                f"[coverage] cross-media unique rescue: {unresolved_after_v2}",
+                flush=True,
+            )
+            manifest = materialize_assets(
+                plan,
+                work / "assets",
+                limit=max(args.limit, 32),
+                semantic=args.semantic,
+                semantic_top_k=max(args.semantic_top_k, 10),
+                replace_scenes=set(unresolved_after_v2),
+                rank_offset=0,
+                meme_dir=args.meme_dir,
+                registry=registry,
+                allow_coverage_reuse=False,
+                judge_with_gemini=True,
+            )
+            qc_results = inspect_plan(plan)
+
+        # If Gemini is still too strict, do one final UNIQUE local-ranked pass.
+        # It may accept a slightly less perfect shot, but never copies an asset
+        # that was already used by another scene.
+        unresolved_after_cross_media = [
+            i for i, scene in enumerate(plan.scenes)
+            if not scene.asset or not Path(scene.asset).exists() or scene.asset_kind == "blank"
+        ]
+        if unresolved_after_cross_media:
+            print(
+                f"[coverage] local unique rescue: {unresolved_after_cross_media}",
+                flush=True,
+            )
+            manifest = materialize_assets(
+                plan,
+                work / "assets",
+                limit=max(args.limit, 40),
+                semantic=args.semantic,
+                semantic_top_k=max(args.semantic_top_k, 12),
+                replace_scenes=set(unresolved_after_cross_media),
+                rank_offset=0,
+                meme_dir=args.meme_dir,
+                registry=registry,
+                allow_coverage_reuse=False,
+                judge_with_gemini=False,
+            )
+            qc_results = inspect_plan(plan)
+
+        # Emergency selection itself can theoretically surface a mirrored or
+        # near-identical file. Detect the REAL decoded visuals and rematerialize
+        # those scenes with a different medium/query before rendering.
+        for rescue_pass in range(2):
+            duplicate_scenes, duplicate_matches = find_duplicate_scenes(plan)
+            if not duplicate_scenes:
+                break
+            compact = ", ".join(
+                f"{m.scene}->{m.original_scene}:{m.similarity:.2f}" for m in duplicate_matches[:8]
+            )
+            print(
+                f"[material] donor unique rescue pass {rescue_pass + 1}: {duplicate_scenes}"
+                + (f" | {compact}" if compact else ""),
+                flush=True,
+            )
+            prepare_diversity_repair(plan, duplicate_scenes, pass_index=2 + rescue_pass)
+            manifest = materialize_assets(
+                plan,
+                work / "assets",
+                limit=max(args.limit, 36 + rescue_pass * 8),
+                semantic=args.semantic,
+                semantic_top_k=max(args.semantic_top_k, 10),
+                replace_scenes=set(duplicate_scenes),
+                rank_offset=0,
+                meme_dir=args.meme_dir,
+                registry=registry,
+                allow_coverage_reuse=False,
+                judge_with_gemini=(rescue_pass == 0),
+            )
+            qc_results = inspect_plan(plan)
+
+        final_unresolved = [
+            i for i, scene in enumerate(plan.scenes)
+            if not scene.asset or not Path(scene.asset).exists() or scene.asset_kind == "blank"
+        ]
+        final_duplicates, _ = find_duplicate_scenes(plan)
+        if final_unresolved or final_duplicates:
+            problems = []
+            if final_unresolved:
+                problems.append(f"unresolved={final_unresolved}")
+            if final_duplicates:
+                problems.append(f"duplicates={final_duplicates}")
+            raise RuntimeError(
+                "Visual quality gate refused to render a broken video: " + ", ".join(problems)
+            )
         qc_results = inspect_plan(plan)
 
     summary = diversity_summary(plan)
