@@ -187,6 +187,7 @@ def materialize_assets(
     meme_dir: str | Path | None = None,
     registry: MaterialRegistry | None = None,
     allow_coverage_reuse: bool = True,
+    judge_with_gemini: bool = True,
 ) -> list[dict]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -199,11 +200,13 @@ def materialize_assets(
     manifest: list[dict] = []
     total_scenes = len(plan.scenes)
 
-    try:
-        from .gemini_ai import get_gemini_client
-        gemini = get_gemini_client()
-    except Exception:
-        gemini = None
+    gemini = None
+    if judge_with_gemini:
+        try:
+            from .gemini_ai import get_gemini_client
+            gemini = get_gemini_client()
+        except Exception:
+            gemini = None
 
     soft_story_context = _infer_soft_story_context(plan)
     for scene in plan.scenes:
