@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .meme_library import search_memes
 from .models import Scene, ShotPlan
@@ -21,7 +21,7 @@ from .stock_video import search_stock_videos
 from .vision import detect_focus
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "video-ai/1.5.4 (+https://github.com/Masek463636/video-ai)"
+USER_AGENT = "video-ai/2.0.0 (+https://github.com/Masek463636/video-ai)"
 _MAX_DOWNLOAD_BYTES = 120 * 1024 * 1024
 _TAG_RE = re.compile(r"<[^>]+>")
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
@@ -231,6 +231,77 @@ def materialize_assets(
             _apply_focus(scene, Path(scene.asset))
             manifest.append({"scene": index, "status": "existing", "path": scene.asset, "tone": scene.tone, "soft_story_context": soft_story_context})
             print(f"{prefix} existing asset", flush=True)
+            continue
+
+        use_v2_stock = (
+            plan.director_source == "donor_gemini"
+            and gemini is not None
+            and scene.visual_mode == "video"
+            and scene.source_mode == "stock_video"
+            and not scene.semantic_lock
+        )
+        if use_v2_stock:
+            chosen_v2, target_v2, search_v2, info_v2, queries_v2, previews_v2 = _v2_select_stock_video(
+                scene,
+                out_dir,
+                index=index,
+                gemini=gemini,
+                used_urls=used_urls,
+                prefix=prefix,
+            )
+            if chosen_v2 is None or target_v2 is None:
+                scene.asset = None
+                scene.asset_kind = "blank"
+                scene.focus_x = scene.focus_y = None
+                scene.focus_source = None
+                scene.asset_score = scene.semantic_score = None
+                manifest.append({
+                    "scene": index,
+                    "status": "v2_not_found",
+                    "query": scene.query,
+                    "tone": scene.tone,
+                    "visual_mode": scene.visual_mode,
+                    "source_mode": scene.source_mode,
+                    "queries_tried": queries_v2,
+                    "v2_previews": previews_v2,
+                })
+                print(f"{prefix} [v2] no usable unique candidate", flush=True)
+                continue
+
+            final_target = out_dir / f"scene_{index:03d}{target_v2.suffix.lower()}"
+            if final_target != target_v2:
+                final_target.unlink(missing_ok=True)
+                target_v2.replace(final_target)
+            _cleanup_scene_attempts(out_dir, index, keep=final_target)
+
+            registry.register_scene(index, chosen_v2.download_url, chosen_v2.title)
+            used_urls = registry.used_urls()
+            used_titles = registry.used_titles()
+            scene.asset = str(final_target.resolve())
+            scene.asset_kind = "video"
+            scene.asset_score = round(chosen_v2.score, 4)
+            scene.semantic_score = round(chosen_v2.semantic_score or 0.0, 4)
+            _apply_focus(scene, final_target)
+            manifest.append({
+                "scene": index,
+                "status": "v2_visual_director",
+                "query": scene.query,
+                "tone": scene.tone,
+                "visual_mode": scene.visual_mode,
+                "source_mode": scene.source_mode,
+                "queries_tried": queries_v2,
+                "search_used": search_v2,
+                "path": str(final_target),
+                "source": chosen_v2.source,
+                "kind": chosen_v2.kind,
+                "gemini_judge": info_v2,
+                "v2_previews": previews_v2,
+                **asdict(chosen_v2),
+            })
+            print(
+                f"{prefix} [v2] selected {chosen_v2.title[:55]} | fit={info_v2.get('score') if info_v2 else '?'}",
+                flush=True,
+            )
             continue
 
         ranked, variants = _build_ranked_pool(
@@ -499,6 +570,226 @@ def _context_explicit_in_caption(context: str, caption: str) -> bool:
     tokens = _tokens(context)
     caption_tokens = _tokens(caption)
     return bool(tokens) and tokens.issubset(caption_tokens)
+
+
+
+def _v2_stock_candidates(
+    queries: list[str],
+    *,
+    used_urls: set[str],
+    max_candidates: int = 24,
+    per_query: int = 8,
+) -> list[tuple[AssetCandidate, str]]:
+    """Query stock providers directly and keep a small query-balanced pool.
+
+    v2 intentionally skips Commons/Openverse and skips CLIP. Provider relevance
+    gives us the shortlist; Gemini compares the actual preview frames together.
+    """
+    out: list[tuple[AssetCandidate, str]] = []
+    seen = set(used_urls)
+    for query in queries[:3]:
+        added = 0
+        try:
+            items = search_stock_videos(query, limit=max(per_query, 8))
+        except Exception:
+            items = []
+        for item in items:
+            if not item.download_url or item.download_url in seen:
+                continue
+            seen.add(item.download_url)
+            out.append((
+                AssetCandidate(
+                    item.title,
+                    item.page_url,
+                    item.download_url,
+                    "video/mp4",
+                    item.width,
+                    item.height,
+                    0,
+                    "video",
+                    item.license,
+                    description=query,
+                    source=item.source,
+                    preview_url=item.preview_url,
+                ),
+                query,
+            ))
+            added += 1
+            if added >= per_query or len(out) >= max_candidates:
+                break
+        if len(out) >= max_candidates:
+            break
+    return out
+
+
+def _v2_extract_preview(candidate: AssetCandidate, root: Path, index: int) -> Path | None:
+    video_path = root / f"v2_{index:03d}{_suffix(candidate)}"
+    frame_path = root / f"v2_{index:03d}.jpg"
+    try:
+        _download(candidate.preview_url or candidate.download_url, video_path)
+        if not video_path.exists() or video_path.stat().st_size < 1024:
+            return None
+        for sec in (0.8, 1.8, 0.15):
+            completed = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", str(sec), "-i", str(video_path),
+                    "-frames:v", "1", "-vf", "scale=512:-2",
+                    str(frame_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+                check=False,
+            )
+            if completed.returncode == 0 and frame_path.exists() and frame_path.stat().st_size >= 1024:
+                return frame_path
+    except Exception:
+        return None
+    finally:
+        video_path.unlink(missing_ok=True)
+    return None
+
+
+def _v2_select_stock_video(
+    scene: Scene,
+    out_dir: Path,
+    *,
+    index: int,
+    gemini: Any,
+    used_urls: set[str],
+    prefix: str,
+) -> tuple[AssetCandidate | None, Path | None, str, dict | None, list[str], int]:
+    """v2 Visual Director: two bounded searches, then one multi-candidate choice."""
+    all_queries: list[str] = []
+    weak_choice: tuple[int, AssetCandidate, str, dict] | None = None
+
+    for mode in ("exact", "broad"):
+        queries = gemini.stock_search_queries(scene, mode=mode)
+        if not queries:
+            base = [q for q in (scene.search_queries or []) if q.strip()]
+            if scene.query:
+                base.append(scene.query)
+            queries = base[:3]
+        queries = [re.sub(r"\s+", " ", q).strip() for q in queries if q.strip()][:3]
+        if not queries:
+            continue
+        all_queries.extend(q for q in queries if q not in all_queries)
+        print(f"{prefix} [v2] {mode} queries: " + " || ".join(queries), flush=True)
+
+        pairs = _v2_stock_candidates(
+            queries,
+            used_urls=used_urls,
+            max_candidates=24,
+            per_query=8,
+        )
+        if not pairs:
+            print(f"{prefix} [v2] {mode}: no provider candidates", flush=True)
+            continue
+
+        with tempfile.TemporaryDirectory(prefix="video-ai-v2-director-") as d:
+            root = Path(d)
+            rows: list[dict[str, Any]] = []
+            by_index: dict[int, tuple[AssetCandidate, str]] = {}
+            label = 1
+            for candidate, search in pairs:
+                frame = _v2_extract_preview(candidate, root, label)
+                if frame is None:
+                    continue
+                rows.append({
+                    "index": label,
+                    "preview_path": str(frame),
+                    "title": candidate.title,
+                    "source": candidate.source,
+                    "search": search,
+                })
+                by_index[label] = (candidate, search)
+                label += 1
+
+            print(f"{prefix} [v2] {mode} previews={len(rows)}", flush=True)
+            if not rows:
+                continue
+            choices = gemini.choose_visual_candidates(scene, rows, mode=mode)
+            if not choices:
+                print(f"{prefix} [v2] Gemini returned no choices", flush=True)
+                continue
+            compact = ", ".join(
+                f"#{x.get('index')}:{x.get('fit')}" for x in choices[:5]
+            )
+            print(f"{prefix} [v2] Gemini choices {compact}", flush=True)
+
+            threshold = 60 if mode == "exact" else 40
+            for choice in choices:
+                pair = by_index.get(int(choice.get("index", -1)))
+                if pair is None:
+                    continue
+                candidate, search = pair
+                fit = int(choice.get("fit", 0))
+                info = {
+                    "score": fit,
+                    "accept": fit >= threshold,
+                    "reason": str(choice.get("reason") or ""),
+                    "mismatch": "",
+                    "tone_match": 100,
+                    "quality_score": 0,
+                    "match_level": f"v2_{mode}",
+                }
+                if weak_choice is None or fit > weak_choice[0]:
+                    weak_choice = (fit, candidate, search, info)
+                if fit < threshold:
+                    continue
+
+                target = out_dir / f"_scene_{index:03d}_v2{_suffix(candidate)}"
+                try:
+                    _download(candidate.download_url, target)
+                except Exception:
+                    target.unlink(missing_ok=True)
+                    continue
+                guard = local_quality_guard(
+                    target,
+                    title=candidate.title,
+                    description=candidate.description,
+                    width=candidate.width,
+                    height=candidate.height,
+                    kind=candidate.kind,
+                )
+                if guard.score < 38 or _has_severe_local_issue(guard.issues):
+                    target.unlink(missing_ok=True)
+                    continue
+                candidate.score = float(fit)
+                candidate.semantic_score = fit / 100.0
+                info["quality_score"] = guard.score
+                info["accept"] = True
+                return candidate, target, search, info, all_queries, len(rows)
+
+    # Emergency-only: use the best UNUSED candidate Gemini actually saw, but
+    # never copy an already used scene asset. This is deliberately bounded.
+    if weak_choice is not None and weak_choice[0] >= 25:
+        fit, candidate, search, info = weak_choice
+        target = out_dir / f"_scene_{index:03d}_v2_emergency{_suffix(candidate)}"
+        try:
+            _download(candidate.download_url, target)
+            guard = local_quality_guard(
+                target,
+                title=candidate.title,
+                description=candidate.description,
+                width=candidate.width,
+                height=candidate.height,
+                kind=candidate.kind,
+            )
+            if guard.score >= 38 and not _has_severe_local_issue(guard.issues):
+                candidate.score = float(fit)
+                candidate.semantic_score = fit / 100.0
+                info["quality_score"] = guard.score
+                info["accept"] = True
+                info["match_level"] = "v2_emergency"
+                print(f"{prefix} [v2] emergency unique fallback fit={fit}", flush=True)
+                return candidate, target, search, info, all_queries, 0
+        except Exception:
+            pass
+        target.unlink(missing_ok=True)
+
+    return None, None, "", None, all_queries, 0
 
 
 def _build_ranked_pool(
