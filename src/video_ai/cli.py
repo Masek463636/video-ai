@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .assets import MaterialRegistry, ensure_visual_coverage, materialize_assets
+from .assets import MaterialRegistry, materialize_assets
 from .audio_mix import mix_audio
 from .audio_plan import build_audio_plan, save_audio_plan
 from .director import build_shot_plan
@@ -162,19 +162,16 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         qc_results = inspect_plan(plan)
 
     if donor_mode:
-        rescued = ensure_visual_coverage(plan, manifest)
-        if rescued:
-            print(
-                f"[coverage] NEVER BLACK rescue filled {len(rescued)} scene(s): {sorted(rescued)}",
-                flush=True,
-            )
-        unresolved_after_rescue = [
+        # v2 deliberately never copies an already-used asset into an empty
+        # scene. Repetition is worse than exposing a failed retrieval because
+        # the Visual Director already has its own unique emergency fallback.
+        unresolved_after_v2 = [
             i for i, scene in enumerate(plan.scenes)
             if not scene.asset or not Path(scene.asset).exists() or scene.asset_kind == "blank"
         ]
-        if unresolved_after_rescue:
+        if unresolved_after_v2:
             print(
-                f"[coverage] WARNING unresolved after NEVER BLACK rescue: {unresolved_after_rescue}",
+                f"[coverage] v2 unique-only unresolved scenes: {unresolved_after_v2}",
                 flush=True,
             )
         qc_results = inspect_plan(plan)
