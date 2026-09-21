@@ -593,30 +593,51 @@ def _v2_stock_candidates(
             items = search_stock_videos(query, limit=max(per_query, 8))
         except Exception:
             items = []
+        buckets: dict[str, list[Any]] = {}
+        source_order: list[str] = []
         for item in items:
             if not item.download_url or item.download_url in seen:
                 continue
-            seen.add(item.download_url)
-            out.append((
-                AssetCandidate(
-                    item.title,
-                    item.page_url,
-                    item.download_url,
-                    "video/mp4",
-                    item.width,
-                    item.height,
-                    0,
-                    "video",
-                    item.license,
-                    description=query,
-                    source=item.source,
-                    preview_url=item.preview_url,
-                ),
-                query,
-            ))
-            added += 1
-            if added >= per_query or len(out) >= max_candidates:
+            if item.source not in buckets:
+                buckets[item.source] = []
+                source_order.append(item.source)
+            buckets[item.source].append(item)
+
+        cursor = 0
+        while added < per_query and len(out) < max_candidates and source_order:
+            progressed = False
+            for source in source_order:
+                bucket = buckets[source]
+                if cursor >= len(bucket):
+                    continue
+                item = bucket[cursor]
+                if item.download_url in seen:
+                    continue
+                seen.add(item.download_url)
+                out.append((
+                    AssetCandidate(
+                        item.title,
+                        item.page_url,
+                        item.download_url,
+                        "video/mp4",
+                        item.width,
+                        item.height,
+                        0,
+                        "video",
+                        item.license,
+                        description=query,
+                        source=item.source,
+                        preview_url=item.preview_url,
+                    ),
+                    query,
+                ))
+                added += 1
+                progressed = True
+                if added >= per_query or len(out) >= max_candidates:
+                    break
+            if not progressed:
                 break
+            cursor += 1
         if len(out) >= max_candidates:
             break
     return out
