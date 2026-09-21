@@ -302,7 +302,10 @@ def _focus_expr(inner: str, outer: str, focus: float) -> str:
 
 
 def _write_ass(plan: ShotPlan, path: Path) -> None:
-    font_size = max(76, int(plan.width * 0.086))
+    # Viral short subtitle profile: large, centered, high-contrast, 1-2 words.
+    font_size = max(84, int(plan.width * 0.095))
+    outline = max(7, int(plan.width * 0.008))
+    margin_v = int(plan.height * 0.34)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {plan.width}
@@ -311,7 +314,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Arial Black,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H30000000,-1,0,0,0,100,100,-1,0,1,8,2,2,70,70,{int(plan.height*0.22)},1
+Style: Default,Arial Black,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H30000000,-1,0,0,0,100,100,-1,0,1,{outline},1,2,60,60,{margin_v},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -329,26 +332,49 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 
 
 def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, float, str]]:
+    """Split captions into punchy 1-2 word chunks.
+
+    Short connector words ("и", "в", "на", "to", "of", etc.) are attached to
+    a neighbour when possible, while long content words usually get their own
+    card. This keeps every subtitle to at most two words.
+    """
     words = text.replace("{", "(").replace("}", ")").split()
     if not words:
         return []
-    groups: list[list[str]] = []
-    current: list[str] = []
-    for word in words:
-        current.append(word)
-        strong_break = word.endswith((",", ";", ":", ".", "!", "?"))
-        if len(current) >= 3 or (len(current) >= 2 and strong_break):
-            groups.append(current)
-            current = []
-    if current:
-        groups.append(current)
 
-    total_weight = sum(max(1, len(" ".join(group))) for group in groups)
+    groups: list[list[str]] = []
+    i = 0
+    while i < len(words):
+        current = [words[i]]
+        clean_current = _caption_token(words[i])
+        if i + 1 < len(words):
+            next_word = words[i + 1]
+            clean_next = _caption_token(next_word)
+            combined_len = len(clean_current) + len(clean_next)
+            current_is_connector = len(clean_current) <= 3
+            next_is_connector = len(clean_next) <= 3
+            current_has_break = words[i].endswith((",", ";", ":", ".", "!", "?"))
+
+            # Prefer two-word cards only when they read naturally and stay compact.
+            if (
+                not current_has_break
+                and (
+                    current_is_connector
+                    or next_is_connector
+                    or combined_len <= 11
+                )
+            ):
+                current.append(next_word)
+                i += 1
+        groups.append(current)
+        i += 1
+
+    total_weight = sum(max(1, _caption_group_weight(group)) for group in groups)
     duration = max(0.06, end - start)
     cursor = start
     out: list[tuple[float, float, str]] = []
     for i, group in enumerate(groups):
-        weight = max(1, len(" ".join(group)))
+        weight = max(1, _caption_group_weight(group))
         share = duration * (weight / max(1, total_weight))
         page_end = end if i == len(groups) - 1 else min(end, cursor + share)
         out.append((cursor, max(cursor + 0.05, page_end), " ".join(group)))
@@ -356,9 +382,21 @@ def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, flo
     return out
 
 
+def _caption_token(word: str) -> str:
+    return word.strip(" \\t\\r\\n,.;:!?—–-()[]«»\"'").casefold()
+
+
+def _caption_group_weight(group: list[str]) -> int:
+    # Spoken duration tracks characters reasonably well when exact word timings
+    # are not stored in the ShotPlan. Give each word a tiny base weight so short
+    # connectors do not flash too quickly.
+    return sum(max(2, len(_caption_token(word))) for word in group)
+
+
 def _ass_text(text: str) -> str:
     safe = text.replace("{", "(").replace("}", ")")
-    return r"{\\fad(55,70)}" + safe
+    # Near-hard pop like modern Shorts subtitles; no floaty long fade.
+    return r"{\\fad(18,24)}" + safe
 
 
 def _ass_time(seconds: float) -> str:
