@@ -79,6 +79,8 @@ EDITING RULES:
 - If the narration returns to the same concept later, choose a DIFFERENT visual
   metaphor/action/context rather than repeating the earlier shot.
 - Think globally: each beat must contrast with the preceding and following beat.
+- Never use abstract sky/clouds/light/glow in two adjacent beats. After one atmospheric abstract shot, the next beat must use a grounded human action, object, place, document, or event.
+- Spiritual/religious narration does NOT automatically mean clouds or light rays; prefer concrete visible actions such as praying hands, a church/temple interior, candles, a historical religious image, or a person reacting when context allows.
 - For a price/money beat, do not repeatedly use a rich-man reaction meme.
 - For phone/computer/store examples, vary subject, angle and action.
 - Historical named people/events must stay historically accurate.
