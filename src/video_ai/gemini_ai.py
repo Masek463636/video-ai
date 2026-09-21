@@ -112,6 +112,167 @@ BALANCED EDITING RULES:
         raw = data.get("scenes", []) if isinstance(data, dict) else []
         return [item for item in raw if isinstance(item, dict)]
 
+    def stock_search_queries(self, scene: Scene, *, mode: str = "exact") -> list[str]:
+        """Create short provider-friendly searches for the v2 Visual Director."""
+        if not self.available:
+            return []
+        mode = mode if mode in {"exact", "broad"} else "exact"
+        mode_rule = (
+            "Keep the core visible subject/object and the real-world place. Use a common action only when it is easy to find in stock footage."
+            if mode == "exact"
+            else
+            "Broaden to the same topic/place while preserving the core subject. Do not require the exact gesture or micro-action."
+        )
+        prompt = f"""
+You write search queries for Pexels and Pixabay stock VIDEO.
+
+NARRATION BEAT:
+{scene.caption or ""}
+
+DIRECTOR INTENT:
+{_judge_description(scene)}
+
+MODE: {mode.upper()}
+{mode_rule}
+
+Return ONLY JSON:
+{{"queries": ["query one", "query two", "query three"]}}
+
+RULES:
+- Exactly 3 English queries.
+- Each query is 2-5 simple words.
+- Put the main visible noun first when possible.
+- Use words that stock sites commonly tag: supermarket, shopper, milk, carton, receipt, shelf, price, package, factory, face, cart.
+- No cinematic jargon, no abstract concepts, no metaphor, no adjectives like beautiful/aesthetic.
+- Do not request text overlays, split screens, exact numeric labels, logos, or impossible micro-actions.
+- Queries must be meaningfully different while staying on the SAME topic.
+""".strip()
+        try:
+            data = self._generate_json([{"text": prompt}], temperature=0.03)
+        except Exception:
+            return []
+        raw = data.get("queries", []) if isinstance(data, dict) else []
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in raw:
+            q = re.sub(r"\s+", " ", str(value)).strip(" ,.;:-")
+            words = re.findall(r"[A-Za-z0-9'-]+", q)
+            if not (2 <= len(words) <= 6):
+                continue
+            key = q.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(q[:100])
+            if len(out) >= 3:
+                break
+        return out
+
+    def choose_visual_candidates(
+        self,
+        scene: Scene,
+        candidates: list[dict[str, Any]],
+        *,
+        mode: str = "exact",
+    ) -> list[dict[str, Any]]:
+        """See all candidate preview frames together and rank the best B-roll."""
+        if not self.available or not candidates:
+            return []
+        mode = mode if mode in {"exact", "broad"} else "exact"
+        mode_rule = (
+            "Prefer the requested subject/object and action, but a close natural stock-footage action is acceptable."
+            if mode == "exact"
+            else
+            "Exact action is not required. Preserve the main topic/object/place and choose honest contextual B-roll."
+        )
+        parts: list[dict[str, Any]] = [{
+            "text": f"""
+You are the Visual Director for a fast-paced vertical YouTube Short.
+You will see MANY candidate frames at once. Compare them against each other and choose the best footage for THIS narration beat.
+
+NARRATION:
+{scene.caption or ""}
+
+DIRECTOR INTENT:
+{_judge_description(scene)}
+
+TONE:
+{scene.tone}
+
+SELECTION MODE: {mode.upper()}
+{mode_rule}
+
+IMPORTANT:
+- Pick visuals that actually contain the core subject/topic. Do not reward a pretty unrelated frame.
+- A different exact gesture is okay if the same object/topic/place is clearly visible.
+- Reject obvious topic substitutions: milk is not beer/coffee; supermarket is not library; receipt is not landscape; measuring cup is not ocean.
+- Prefer a clear human/object subject and footage usable in a 9:16 Short.
+- Candidate URLs are already unique and unused; do not worry about repetition.
+- Return up to 5 choices, best first.
+""".strip()
+        }]
+
+        for row in candidates:
+            path = Path(str(row.get("preview_path") or ""))
+            if not path.exists():
+                continue
+            label = int(row.get("index", 0))
+            parts.append({
+                "text": (
+                    f"CANDIDATE {label} | source={row.get('source','')} | "
+                    f"search={row.get('search','')} | title={str(row.get('title',''))[:100]}"
+                )
+            })
+            try:
+                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError:
+                continue
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": encoded}})
+
+        parts.append({"text": """
+Return ONLY JSON:
+{
+  "choices": [
+    {"index": 7, "fit": 95, "reason": "short reason"},
+    {"index": 12, "fit": 84, "reason": "short reason"}
+  ]
+}
+
+Rules for fit:
+90-100 = clearly right subject/topic and useful shot
+70-89 = close/contextual but honestly supports narration
+50-69 = weak fallback
+below 50 = do not return it
+Do not return any candidate below 50.
+""".strip()})
+        try:
+            data = self._generate_json(parts, temperature=0.01)
+        except Exception:
+            return []
+        raw = data.get("choices", []) if isinstance(data, dict) else []
+        valid_indexes = {int(row.get("index", -1)) for row in candidates}
+        out: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                idx = int(item.get("index"))
+                fit = max(0, min(100, int(float(item.get("fit", 0)))))
+            except (TypeError, ValueError):
+                continue
+            if idx not in valid_indexes or idx in seen or fit < 50:
+                continue
+            seen.add(idx)
+            out.append({
+                "index": idx,
+                "fit": fit,
+                "reason": str(item.get("reason") or "")[:220],
+            })
+            if len(out) >= 5:
+                break
+        return out
+
     def rewrite_search_queries(
         self,
         scene: Scene,
@@ -338,7 +499,7 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
             req = urllib.request.Request(url, data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/1.5.4",
+                "User-Agent": "video-ai/2.0.0",
             })
             try:
                 with urllib.request.urlopen(req, timeout=60) as response:
