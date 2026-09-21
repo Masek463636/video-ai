@@ -234,6 +234,56 @@ def materialize_assets(
             print(f"{prefix} existing asset", flush=True)
             continue
 
+        use_v21_meme = (
+            plan.director_source == "donor_gemini"
+            and gemini is not None
+            and (scene.visual_mode == "meme" or scene.source_mode == "meme_library")
+            and not scene.semantic_lock
+        )
+        if use_v21_meme:
+            chosen_meme, target_meme, search_meme, info_meme, previews_meme = _v21_select_meme(
+                scene,
+                out_dir,
+                index=index,
+                gemini=gemini,
+                meme_dir=meme_dir,
+                used_urls=used_urls,
+                prefix=prefix,
+            )
+            if chosen_meme is not None and target_meme is not None:
+                final_target = out_dir / f"scene_{index:03d}{target_meme.suffix.lower()}"
+                if final_target != target_meme:
+                    final_target.unlink(missing_ok=True)
+                    target_meme.replace(final_target)
+                registry.register_scene(index, chosen_meme.download_url, chosen_meme.title)
+                used_urls = registry.used_urls()
+                used_titles = registry.used_titles()
+                scene.asset = str(final_target.resolve())
+                scene.asset_kind = chosen_meme.kind  # type: ignore[assignment]
+                scene.asset_score = round(chosen_meme.score, 4)
+                scene.semantic_score = round(chosen_meme.semantic_score or 0.0, 4)
+                _apply_focus(scene, final_target)
+                manifest.append({
+                    "scene": index,
+                    "status": "v21_meme_director",
+                    "query": scene.query,
+                    "tone": scene.tone,
+                    "visual_mode": scene.visual_mode,
+                    "source_mode": scene.source_mode,
+                    "search_used": search_meme,
+                    "path": str(final_target),
+                    "source": chosen_meme.source,
+                    "kind": chosen_meme.kind,
+                    "gemini_judge": info_meme,
+                    "v21_meme_previews": previews_meme,
+                    **asdict(chosen_meme),
+                })
+                print(
+                    f"{prefix} [v2.1 meme] selected {chosen_meme.title[:55]} | fit={info_meme.get('score') if info_meme else '?'}",
+                    flush=True,
+                )
+                continue
+
         use_v2_stock = (
             plan.director_source == "donor_gemini"
             and gemini is not None
@@ -671,6 +721,200 @@ def _v2_extract_preview(candidate: AssetCandidate, root: Path, index: int) -> Pa
     finally:
         video_path.unlink(missing_ok=True)
     return None
+
+
+
+def _v21_meme_candidates(
+    scene: Scene,
+    *,
+    meme_dir: str | Path | None,
+    used_urls: set[str],
+) -> list[tuple[AssetCandidate, str]]:
+    query = scene.visual_description or scene.caption or scene.query
+    out: list[tuple[AssetCandidate, str]] = []
+    seen = set(used_urls)
+
+    memes = search_memes(meme_dir, query, limit=12)
+    if scene.meme_filename:
+        memes.sort(key=lambda m: 0 if m.path.name == scene.meme_filename else 1)
+    for meme in memes:
+        key = f"local:{meme.path.resolve()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((
+            AssetCandidate(
+                meme.title,
+                "",
+                key,
+                "video/mp4" if meme.kind == "video" else "image/jpeg",
+                0,
+                0,
+                meme.path.stat().st_size,
+                meme.kind,
+                "local user library",
+                source="local_meme",
+                local_path=str(meme.path.resolve()),
+                score=50.0 + meme.score,
+            ),
+            "local meme library",
+        ))
+
+    try:
+        for item in search_giphy(query, limit=12):
+            if item.download_url in seen:
+                continue
+            seen.add(item.download_url)
+            out.append((
+                AssetCandidate(
+                    item.title,
+                    item.page_url,
+                    item.download_url,
+                    "video/mp4",
+                    item.width,
+                    item.height,
+                    0,
+                    "video",
+                    "GIPHY",
+                    source="giphy",
+                    preview_url=item.preview_url,
+                    description=query,
+                    score=40.0,
+                ),
+                "GIPHY reaction search",
+            ))
+    except Exception:
+        pass
+    return out[:24]
+
+
+def _v21_preview_any(candidate: AssetCandidate, root: Path, index: int) -> Path | None:
+    suffix = _suffix(candidate)
+    if candidate.kind == "image":
+        target = root / f"meme_{index:03d}{suffix}"
+        try:
+            if candidate.local_path:
+                shutil.copy2(candidate.local_path, target)
+            else:
+                _download(candidate.download_url, target)
+            return target if target.exists() and target.stat().st_size >= 1024 else None
+        except Exception:
+            target.unlink(missing_ok=True)
+            return None
+
+    video = root / f"meme_{index:03d}{suffix}"
+    frame = root / f"meme_{index:03d}.jpg"
+    try:
+        if candidate.local_path:
+            shutil.copy2(candidate.local_path, video)
+        else:
+            _download(candidate.preview_url or candidate.download_url, video)
+        for sec in (0.5, 1.0, 0.1):
+            completed = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", str(sec), "-i", str(video),
+                    "-frames:v", "1", "-vf", "scale=512:-2",
+                    str(frame),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=12,
+                check=False,
+            )
+            if completed.returncode == 0 and frame.exists() and frame.stat().st_size >= 1024:
+                return frame
+    except Exception:
+        return None
+    finally:
+        video.unlink(missing_ok=True)
+    return None
+
+
+def _v21_select_meme(
+    scene: Scene,
+    out_dir: Path,
+    *,
+    index: int,
+    gemini: Any,
+    meme_dir: str | Path | None,
+    used_urls: set[str],
+    prefix: str,
+) -> tuple[AssetCandidate | None, Path | None, str, dict | None, int]:
+    pairs = _v21_meme_candidates(scene, meme_dir=meme_dir, used_urls=used_urls)
+    if not pairs:
+        return None, None, "", None, 0
+
+    with tempfile.TemporaryDirectory(prefix="video-ai-v21-memes-") as d:
+        root = Path(d)
+        rows: list[dict[str, Any]] = []
+        by_index: dict[int, tuple[AssetCandidate, str]] = {}
+        label = 1
+        for candidate, search in pairs:
+            preview = _v21_preview_any(candidate, root, label)
+            if preview is None:
+                continue
+            rows.append({
+                "index": label,
+                "preview_path": str(preview),
+                "title": candidate.title,
+                "source": candidate.source,
+                "search": search,
+            })
+            by_index[label] = (candidate, search)
+            label += 1
+
+        print(f"{prefix} [v2.1 meme] previews={len(rows)}", flush=True)
+        if not rows:
+            return None, None, "", None, 0
+        choices = gemini.choose_visual_candidates(scene, rows, mode="broad")
+        if not choices:
+            return None, None, "", None, len(rows)
+
+        compact = ", ".join(f"#{x.get('index')}:{x.get('fit')}" for x in choices[:5])
+        print(f"{prefix} [v2.1 meme] Gemini choices {compact}", flush=True)
+        for choice in choices:
+            pair = by_index.get(int(choice.get("index", -1)))
+            if pair is None:
+                continue
+            candidate, search = pair
+            fit = int(choice.get("fit", 0))
+            if fit < 35:
+                continue
+            target = out_dir / f"_scene_{index:03d}_meme{_suffix(candidate)}"
+            try:
+                if candidate.local_path:
+                    shutil.copy2(candidate.local_path, target)
+                else:
+                    _download(candidate.download_url, target)
+            except Exception:
+                target.unlink(missing_ok=True)
+                continue
+            guard = local_quality_guard(
+                target,
+                title=candidate.title,
+                description=candidate.description,
+                width=candidate.width,
+                height=candidate.height,
+                kind=candidate.kind,
+            )
+            if guard.score < 35 or _has_severe_local_issue(guard.issues):
+                target.unlink(missing_ok=True)
+                continue
+            candidate.score = float(fit)
+            candidate.semantic_score = fit / 100.0
+            info = {
+                "score": fit,
+                "accept": True,
+                "reason": str(choice.get("reason") or ""),
+                "mismatch": "",
+                "tone_match": 100,
+                "quality_score": guard.score,
+                "match_level": "v21_meme_director",
+            }
+            return candidate, target, search, info, len(rows)
+
+    return None, None, "", None, 0
 
 
 def _v2_select_stock_video(
