@@ -242,8 +242,8 @@ Rules for fit:
 90-100 = clearly right subject/topic and useful shot
 70-89 = close/contextual but honestly supports narration
 50-69 = weak fallback
-below 50 = do not return it
-Do not return any candidate below 50.
+below 50 = weak/emergency-only
+Always return the 5 best candidates available, even if some are weak. Score them honestly.
 """.strip()})
         try:
             data = self._generate_json(parts, temperature=0.01)
@@ -261,7 +261,7 @@ Do not return any candidate below 50.
                 fit = max(0, min(100, int(float(item.get("fit", 0)))))
             except (TypeError, ValueError):
                 continue
-            if idx not in valid_indexes or idx in seen or fit < 50:
+            if idx not in valid_indexes or idx in seen:
                 continue
             seen.add(idx)
             out.append({
