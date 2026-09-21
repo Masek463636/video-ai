@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from .audio_plan import AudioPlan, AudioCue
+from .freesound_source import materialize_best_sfx
 
 
 def mix_audio(
@@ -91,8 +92,46 @@ def _resolve_sfx(cue: AudioCue, sfx_dir: Path | None, fallback: Path) -> Path:
             candidate = sfx_dir / f"{cue.name}{suffix}"
             if candidate.exists():
                 return candidate
+
+    # Optional online SFX source. Freesound is queried only when configured;
+    # otherwise we keep the existing procedural fallback.
+    query = _sfx_search_query(cue.name)
+    try:
+        remote, meta = materialize_best_sfx(query, fallback.with_suffix(".mp3"))
+    except Exception:
+        remote = meta = None
+    if remote is not None and meta is not None:
+        sidecar = remote.with_suffix(remote.suffix + ".json")
+        sidecar.write_text(
+            __import__("json").dumps(
+                {
+                    "source": "freesound",
+                    "id": meta.sound_id,
+                    "name": meta.name,
+                    "page_url": meta.page_url,
+                    "username": meta.username,
+                    "license": meta.license,
+                    "query": query,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return remote
+
     _synthesize_sfx(cue.name, fallback)
     return fallback
+
+
+def _sfx_search_query(name: str) -> str:
+    return {
+        "whoosh": "short whoosh transition",
+        "impact": "short cinematic impact hit",
+        "notification": "phone notification ping",
+        "bass_hit": "short bass impact hit",
+        "cash_pop": "cash register money pop",
+    }.get(name, name.replace("_", " "))
 
 
 def _synthesize_sfx(name: str, output: Path) -> None:
