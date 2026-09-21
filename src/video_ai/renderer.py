@@ -302,10 +302,11 @@ def _focus_expr(inner: str, outer: str, focus: float) -> str:
 
 
 def _write_ass(plan: ShotPlan, path: Path) -> None:
-    # Viral short subtitle profile: large, centered, high-contrast, 1-2 words.
-    font_size = max(84, int(plan.width * 0.095))
-    outline = max(7, int(plan.width * 0.008))
-    margin_v = int(plan.height * 0.34)
+    # Reference-style Shorts subtitles: very large Impact text around the
+    # lower-middle of the frame, with a heavy black stroke.
+    font_size = max(96, int(plan.width * 0.118))
+    outline = max(9, int(plan.width * 0.010))
+    margin_v = int(plan.height * 0.40)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {plan.width}
@@ -314,7 +315,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,Arial Black,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H30000000,-1,0,0,0,100,100,-1,0,1,{outline},1,2,60,60,{margin_v},1
+Style: Default,Impact,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H20000000,-1,0,0,0,96,100,-2,0,1,{outline},0,2,50,50,{margin_v},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -361,7 +362,6 @@ def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, flo
                 and (
                     current_is_connector
                     or next_is_connector
-                    or combined_len <= 11
                 )
             ):
                 current.append(next_word)
@@ -395,8 +395,8 @@ def _caption_group_weight(group: list[str]) -> int:
 
 def _ass_text(text: str) -> str:
     safe = text.replace("{", "(").replace("}", ")")
-    # Near-hard pop like modern Shorts subtitles; no floaty long fade.
-    return r"{\\fad(18,24)}" + safe
+    # Reference uses near-hard caption swaps rather than floaty fades.
+    return r"{\\fad(8,12)}" + safe
 
 
 def _ass_time(seconds: float) -> str:
