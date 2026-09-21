@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .meme_library import search_memes
+from .giphy_source import search_giphy
 from .models import Scene, ShotPlan
 from .openverse import search_openverse
 from .quality_guard import infer_tone, local_quality_guard
@@ -827,7 +828,8 @@ def _build_ranked_pool(
     variants = list(_query_variants(scene))
 
     if (scene.visual_mode == "meme" or scene.source_mode == "meme_library") and not scene.semantic_lock:
-        memes = search_memes(meme_dir, scene.visual_description or scene.query, limit=20)
+        meme_query = scene.visual_description or scene.query
+        memes = search_memes(meme_dir, meme_query, limit=20)
         if scene.meme_filename:
             memes.sort(key=lambda m: 0 if m.path.name == scene.meme_filename else 1)
         for meme in memes:
@@ -842,6 +844,36 @@ def _build_ranked_pool(
                 ),
                 "local meme library",
             )
+
+        # Optional online meme diversity. This is opt-in through the GIPHY
+        # source module; local memes always stay in the same candidate pool.
+        try:
+            for item in search_giphy(meme_query, limit=10):
+                if item.download_url in used_urls:
+                    continue
+                pool.setdefault(
+                    item.download_url,
+                    (
+                        AssetCandidate(
+                            item.title,
+                            item.page_url,
+                            item.download_url,
+                            "video/mp4",
+                            item.width,
+                            item.height,
+                            0,
+                            "video",
+                            "GIPHY",
+                            source="giphy",
+                            preview_url=item.preview_url,
+                            description=meme_query,
+                            score=26.0,
+                        ),
+                        "GIPHY meme search",
+                    ),
+                )
+        except Exception:
+            pass
 
     archive_only = scene.semantic_lock or scene.source_mode == "historical_archive"
     include_stock = (
@@ -1218,7 +1250,7 @@ def _source_allowed(scene: Scene, candidate: AssetCandidate) -> bool:
             or (candidate.kind == "image" and candidate.source in {"commons", "openverse", "pexels", "pixabay"})
         )
     if scene.source_mode == "meme_library":
-        return candidate.source == "local_meme"
+        return candidate.source in {"local_meme", "giphy"}
     if scene.source_mode == "generic_image":
         return candidate.kind == "image"
     return True
