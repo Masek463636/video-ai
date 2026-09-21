@@ -94,6 +94,8 @@ class Scene:
     focus_source: str | None = None
     asset_score: float | None = None
     semantic_score: float | None = None
+    # Original absolute speech timings; optional for older saved ShotPlans.
+    caption_words: list[Word] = field(default_factory=list)
 
     @property
     def duration(self) -> float:

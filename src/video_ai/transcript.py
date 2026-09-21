@@ -3,7 +3,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .models import Transcript, Word
+from .models import ShotPlan, Transcript, Word
+
+
+def attach_caption_timings(plan: ShotPlan, transcript: Transcript) -> None:
+    """Attach cached speech timing without changing visuals or scene boundaries.
+
+    Explicit A/B input must match every caption; fail before mutating the plan
+    if the transcript belongs to a different narration or edit.
+    """
+    matched: list[list[Word]] = []
+    for index, scene in enumerate(plan.scenes):
+        if not scene.caption:
+            matched.append([])
+            continue
+        words = [w for w in transcript.words
+                 if w.start >= scene.start - 0.001 and w.end <= scene.end + 0.001]
+        if " ".join(w.text for w in words).split() != scene.caption.split():
+            raise ValueError(f"scene {index}: transcript does not match caption; use the original transcript.json")
+        matched.append(words)
+    for scene, words in zip(plan.scenes, matched):
+        scene.caption_words = list(words)
 
 
 def load_transcript(path: str | Path) -> Transcript:

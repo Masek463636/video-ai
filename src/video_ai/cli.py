@@ -16,7 +16,7 @@ from .probe import probe
 from .qc import failed_scene_indexes, inspect_plan, save_qc
 from .renderer import render_plan
 from .reference_style import apply_reference_style
-from .transcript import load_transcript, save_transcript, transcribe_local
+from .transcript import attach_caption_timings, load_transcript, save_transcript, transcribe_local
 
 
 def _add_quality_args(parser: argparse.ArgumentParser) -> None:
@@ -382,6 +382,7 @@ def main() -> None:
     p_render.add_argument("--work-dir", default=None)
     p_render.add_argument("--no-captions", action="store_true")
     p_render.add_argument("--crf", type=int, default=20)
+    p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
     p_make.add_argument("-o", "--output", required=True)
@@ -452,6 +453,8 @@ def main() -> None:
         return
     if args.command == "render":
         plan = load_shot_plan(args.plan)
+        if args.transcript:
+            attach_caption_timings(plan, load_transcript(args.transcript))
         output = render_plan(plan, args.output, work_dir=args.work_dir, captions=not args.no_captions, crf=args.crf)
         print(json.dumps({"ok": True, "output": str(output)}, ensure_ascii=False, indent=2))
         return

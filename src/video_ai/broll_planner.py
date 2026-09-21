@@ -161,6 +161,7 @@ EDITING RULES:
                 asset_kind="blank",
                 motion="none",
                 caption=caption,
+                caption_words=list(slice_words),
                 visual_mode=visual_mode,  # type: ignore[arg-type]
                 source_mode=source_mode,  # type: ignore[arg-type]
                 motion_preset=motion_preset,  # type: ignore[arg-type]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .models import Scene, ShotPlan
+from .models import Scene, ShotPlan, Word
 
 
 def load_shot_plan(path: str | Path) -> ShotPlan:
@@ -30,6 +30,7 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
             asset_kind=raw.get("asset_kind", "blank"),
             motion=raw.get("motion", "none"),
             caption=raw.get("caption"),
+            caption_words=[Word(float(w["start"]), float(w["end"]), str(w["text"])) for w in (raw.get("caption_words") or [])],
             visual_description=raw.get("visual_description"),
             search_queries=list(raw.get("search_queries") or []),
             visual_mode=raw.get("visual_mode", "auto"),
@@ -92,6 +93,10 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "asset_kind": scene.asset_kind,
                 "motion": scene.motion,
                 "caption": scene.caption,
+                "caption_words": [
+                    {"start": w.start, "end": w.end, "text": w.text}
+                    for w in scene.caption_words
+                ],
                 "visual_description": scene.visual_description,
                 "search_queries": scene.search_queries,
                 "visual_mode": scene.visual_mode,

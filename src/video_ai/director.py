@@ -100,6 +100,7 @@ def build_shot_plan(
             asset_kind="blank",
             motion="none",
             caption=caption,
+            caption_words=list(words),
             visual_mode=mode,
             source_mode=source_mode,
             motion_preset=motion_preset,

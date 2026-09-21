@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .models import Scene, ShotPlan
+from .models import Scene, ShotPlan, Word
 
 
 _MAX_CONTINUOUS_VISUAL_SECONDS = 2.85
@@ -320,7 +320,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     for scene in plan.scenes:
         if not scene.caption:
             continue
-        pages = _caption_pages(scene.caption, scene.start, scene.end)
+        pages = _caption_pages(scene.caption, scene.start, scene.end, timed_words=scene.caption_words)
         for page_start, page_end, text in pages:
             events.append(
                 f"Dialogue: 0,{_ass_time(page_start)},{_ass_time(page_end)},Default,,0,0,0,,{_ass_text(text)}"
@@ -328,7 +328,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     path.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")
 
 
-def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, float, str]]:
+def _caption_pages(text: str, start: float, end: float, *, timed_words: list[Word] | None = None) -> list[tuple[float, float, str]]:
     """Split captions into punchy 1-2 word chunks.
 
     Short connector words ("и", "в", "на", "to", "of", etc.) are attached to
@@ -338,6 +338,10 @@ def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, flo
     words = text.replace("{", "(").replace("}", ")").split()
     if not words:
         return []
+
+    # Use speech timestamps only when they describe this exact caption. Older
+    # plans (or edited captions) retain the stable-test45 character weighting.
+    aligned = _aligned_caption_words(words, timed_words, start, end)
 
     groups: list[list[str]] = []
     i = 0
@@ -355,6 +359,7 @@ def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, flo
             # Prefer two-word cards only when they read naturally and stay compact.
             if (
                 not current_has_break
+                and (not aligned or aligned[i + 1].start - aligned[i].end <= 0.18)
                 and (
                     current_is_connector
                     or next_is_connector
@@ -364,6 +369,19 @@ def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, flo
                 i += 1
         groups.append(current)
         i += 1
+
+    if aligned:
+        out: list[tuple[float, float, str]] = []
+        offset = 0
+        for group in groups:
+            first = offset
+            offset += len(group)
+            page_start = max(start, aligned[first].start)
+            page_end = min(end, aligned[offset - 1].end)
+            if offset < len(aligned):
+                page_end = min(page_end, aligned[offset].start)
+            out.append((page_start, page_end, " ".join(group)))
+        return out
 
     total_weight = sum(max(1, _caption_group_weight(group)) for group in groups)
     duration = max(0.06, end - start)
@@ -376,6 +394,24 @@ def _caption_pages(text: str, start: float, end: float) -> list[tuple[float, flo
         out.append((cursor, max(cursor + 0.05, page_end), " ".join(group)))
         cursor = page_end
     return out
+
+
+def _aligned_caption_words(tokens: list[str], words: list[Word] | None, start: float, end: float) -> list[Word] | None:
+    if not words or len(words) != len(tokens):
+        return None
+    previous_start = -1.0
+    for token, word in zip(tokens, words):
+        safe_text = word.text.replace("{", "(").replace("}", ")").strip()
+        if safe_text != token:
+            return None
+        if not math.isfinite(word.start) or not math.isfinite(word.end):
+            return None
+        if (word.start < start - 0.001 or word.end > end + 0.001
+                or word.end <= word.start or word.start <= previous_start
+                or word.start >= end):
+            return None
+        previous_start = word.start
+    return words
 
 
 def _caption_token(word: str) -> str:
