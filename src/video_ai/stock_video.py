@@ -55,14 +55,12 @@ def search_stock_videos(query: str, *, limit: int = 12) -> list[StockVideo]:
 def _search_pexels(query: str, api_key: str, *, limit: int) -> list[StockVideo]:
     params = urllib.parse.urlencode({
         "query": query,
-        "orientation": "portrait",
-        "size": "medium",
-        "per_page": max(1, min(limit, 40)),
+                "per_page": max(1, min(limit, 40)),
         "page": 1,
     })
     request = urllib.request.Request(
         "https://api.pexels.com/videos/search?" + params,
-        headers={"Authorization": api_key, "User-Agent": "video-ai/1.5.3"},
+        headers={"Authorization": api_key, "User-Agent": "video-ai/2.0.0"},
     )
     with urllib.request.urlopen(request, timeout=25) as response:
         payload = json.load(response)
