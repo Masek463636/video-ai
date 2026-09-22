@@ -386,7 +386,7 @@ def main() -> None:
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
-    p_render.add_argument("--max-overlays", type=int, default=4, help="Maximum PNG pop-ins when --shorts-fx is enabled")
+    p_render.add_argument("--max-overlays", type=int, default=8, help="Maximum Shorts foreground accents when --shorts-fx is enabled")
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
     p_make.add_argument("-o", "--output", required=True)
