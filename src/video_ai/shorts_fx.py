@@ -46,7 +46,7 @@ def build_shorts_overlays(
         })
 
     duration = max((float(scene.end) for scene in plan.scenes), default=0.0)
-    auto_budget = 2 if duration <= 12 else 3 if duration <= 20 else 5 if duration <= 35 else 7
+    auto_budget = 3 if duration <= 12 else 5 if duration <= 20 else 8 if duration <= 35 else 10
     budget = min(max_overlays, auto_budget) if max_overlays > 0 else auto_budget
 
     prompt = f"""You are the effects editor for a fast TikTok/YouTube Short.
@@ -73,7 +73,10 @@ SELECTION RULES:
 - Do not add generic reaction PNGs unless the narration explicitly mentions that person/object.
 - Avoid repeating the same object or same effect style.
 - Spread effects across the timeline. Do not stack them every scene.
-- A good 20–30 second Short usually needs only 3–5 foreground accents.
+- A good 20–30 second Short should usually have 6–8 foreground accents if the narration gives enough concrete hooks.
+- It is fine to use effects in neighboring scenes when they are triggered by different spoken ideas and use different visual styles.
+- Prefer rhythm: roughly one meaningful accent every 2.5–4 seconds, with occasional quick clusters around strong factual phrases.
+- Do NOT force an effect into a weak/abstract scene just to hit the target count.
 
 TIMING:
 - anchor = the exact spoken word/short phrase that should trigger the effect.
@@ -146,6 +149,7 @@ Return ONLY JSON:
 
     used_scenes: set[int] = set()
     used_concepts: set[str] = set()
+    used_times: list[float] = []
     overlays: list[dict[str, Any]] = []
 
     for item in raw:
@@ -170,10 +174,6 @@ Return ONLY JSON:
         caption_cf = caption.casefold()
         anchor_tokens = [t for t in _tokens(anchor) if len(t) > 2]
         if anchor_tokens and not any(t in caption_cf for t in anchor_tokens):
-            continue
-
-        # Do not machine-gun accents on adjacent beats in longer videos.
-        if any(abs(scene_index - old) <= 1 for old in used_scenes) and len(plan.scenes) > 6:
             continue
 
         query = _clean_query(str(item.get("query") or ""))
@@ -207,6 +207,12 @@ Return ONLY JSON:
         start = max(float(scene.start), (anchor_start - 0.025) if anchor_start is not None else float(scene.start) + 0.10)
         end = min(display_end, start + duration)
         if end - start < 0.45:
+            continue
+
+        # Keep density high enough for Shorts, but avoid unreadable effect spam.
+        # Neighboring storyboard scenes are allowed; only near-simultaneous
+        # accents are rejected.
+        if any(abs(start - old_start) < 0.85 for old_start in used_times):
             continue
 
         raw_position = str(item.get("position") or "").lower()
@@ -261,6 +267,7 @@ Return ONLY JSON:
         }
         overlays.append(overlay)
         used_scenes.add(scene_index)
+        used_times.append(start)
         if concept:
             used_concepts.add(concept)
         print(
