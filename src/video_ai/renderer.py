@@ -84,7 +84,8 @@ def render_plan(
         final_cmd += [
             "-c:v", "libx264" if captions else "copy",
             *([] if not captions else ["-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p"]),
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(output),
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+            "-t", f"{audio_duration:.3f}", "-shortest", str(output),
         ]
         _run(final_cmd)
         return output
@@ -204,7 +205,13 @@ def _render_reference_video(asset: Path, scene: Scene, duration: float, plan: Sh
 
 
 def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Path, *, crf: int) -> None:
-    """Composite larger, varied Shorts inserts plus generated whoosh/pop SFX."""
+    """Composite larger, varied Shorts inserts plus generated whoosh/pop SFX.
+
+    Every generated stream is hard-trimmed to the duration of the existing base
+    edit. This prevents looped PNG inputs or delayed SFX from extending a
+    20-second Short into a multi-hour file.
+    """
+    base_duration = max(0.05, _probe_duration(base))
     valid = [
         item for item in overlays
         if item.get("asset") and Path(str(item["asset"])).exists()
@@ -218,8 +225,10 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
     for item in valid:
         cmd += ["-loop", "1", "-framerate", str(plan.fps), "-i", str(item["asset"])]
 
-    filters: list[str] = []
-    current = "[0:v]"
+    filters: list[str] = [
+        f"[0:v]setpts=PTS-STARTPTS,trim=duration={base_duration:.3f}[basev]"
+    ]
+    current = "[basev]"
     for index, item in enumerate(valid):
         start = float(item["start"])
         end = float(item["end"])
@@ -236,6 +245,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         nxt = f"[v{index}]"
         filters.append(
             f"[{index + 1}:v]"
+            f"setpts=PTS-STARTPTS,"
             f"scale=w='min({width},iw)':h='min({max_h},ih)':force_original_aspect_ratio=decrease,"
             f"format=rgba{ov}"
         )
@@ -298,7 +308,11 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         sound_labels.append(label)
 
     if sound_labels:
-        filters.append("".join(sound_labels) + f"amix=inputs={len(sound_labels)}:normalize=0[sfx]")
+        filters.append(
+            "".join(sound_labels)
+            + f"amix=inputs={len(sound_labels)}:normalize=0,"
+            + f"apad=whole_dur={base_duration:.3f},atrim=duration={base_duration:.3f},asetpts=PTS-STARTPTS[sfx]"
+        )
         audio_map = ["-map", "[sfx]"]
     else:
         audio_map = []
@@ -309,6 +323,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
         "-pix_fmt", "yuv420p", "-r", str(plan.fps),
         *([] if not sound_labels else ["-c:a", "aac", "-b:a", "128k"]),
+        "-t", f"{base_duration:.3f}", "-shortest",
         str(output),
     ]
     _run(cmd)
