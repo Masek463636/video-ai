@@ -69,25 +69,37 @@ def render_plan(
             ass = root / "captions.ass"
             _write_ass(plan, ass, editing_polish=editing_polish, overlays=overlays)
             final_filter = ["-vf", f"ass='{_filter_path(ass)}'"]
+        sfx_track: Path | None = None
+        if overlays:
+            sfx_track = root / "shorts_fx.wav"
+            _build_overlay_sfx(overlays, audio_duration, sfx_track)
+
         final_cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(picture), "-i", str(plan.audio), *final_filter,
+            "-i", str(picture), "-i", str(plan.audio),
         ]
-        if overlays:
-            # overlayed.mp4 carries only generated SFX; mix them under the real voiceover.
+        if sfx_track is not None and sfx_track.exists():
+            final_cmd += ["-i", str(sfx_track)]
+
+        if captions:
+            final_cmd += final_filter
+
+        if sfx_track is not None and sfx_track.exists():
             final_cmd += [
-                "-filter_complex", "[0:a:0][1:a:0]amix=inputs=2:normalize=0:dropout_transition=0[aout]",
+                "-filter_complex", "[1:a:0][2:a:0]amix=inputs=2:duration=first:normalize=0[aout]",
                 "-map", "0:v:0", "-map", "[aout]",
             ]
         else:
             final_cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+
         final_cmd += [
             "-c:v", "libx264" if captions else "copy",
             *([] if not captions else ["-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p"]),
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-            "-t", f"{audio_duration:.3f}", "-shortest", str(output),
+            "-t", f"{audio_duration:.3f}", str(output),
         ]
         _run(final_cmd)
+        _assert_duration(output, audio_duration, label="final render")
         return output
     finally:
         if temp is not None:
@@ -205,11 +217,11 @@ def _render_reference_video(asset: Path, scene: Scene, duration: float, plan: Sh
 
 
 def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Path, *, crf: int) -> None:
-    """Composite larger, varied Shorts inserts plus generated whoosh/pop SFX.
+    """Composite PNG inserts over the existing edit without touching audio.
 
-    Every generated stream is hard-trimmed to the duration of the existing base
-    edit. This prevents looped PNG inputs or delayed SFX from extending a
-    20-second Short into a multi-hour file.
+    PNG inputs are explicitly limited to the base duration and overlay never
+    uses shortest=1. The base video therefore owns the timeline and cannot be
+    truncated to a few seconds or extended by a looped PNG stream.
     """
     base_duration = max(0.05, _probe_duration(base))
     valid = [
@@ -223,15 +235,21 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
 
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(base)]
     for item in valid:
-        cmd += ["-loop", "1", "-framerate", str(plan.fps), "-i", str(item["asset"])]
+        cmd += [
+            "-loop", "1",
+            "-framerate", str(plan.fps),
+            "-t", f"{base_duration:.3f}",
+            "-i", str(item["asset"]),
+        ]
 
     filters: list[str] = [
-        f"[0:v]setpts=PTS-STARTPTS,trim=duration={base_duration:.3f}[basev]"
+        f"[0:v]trim=duration={base_duration:.3f},setpts=PTS-STARTPTS[basev]"
     ]
     current = "[basev]"
+
     for index, item in enumerate(valid):
-        start = float(item["start"])
-        end = float(item["end"])
+        start = max(0.0, float(item["start"]))
+        end = min(base_duration, float(item["end"]))
         side = str(item.get("position") or "right")
         animation = str(item.get("animation") or "fly")
         size = str(item.get("size") or "large")
@@ -245,7 +263,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         nxt = f"[v{index}]"
         filters.append(
             f"[{index + 1}:v]"
-            f"setpts=PTS-STARTPTS,"
+            f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,"
             f"scale=w='min({width},iw)':h='min({max_h},ih)':force_original_aspect_ratio=decrease,"
             f"format=rgba{ov}"
         )
@@ -276,58 +294,104 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
             x = settled_x
 
         filters.append(
-            f"{current}{ov}overlay=x='{x}':y={target_y}:"
-            f"enable='between(t,{start:.3f},{end:.3f})':shortest=1{nxt}"
+            f"{current}{ov}overlay="
+            f"x='{x}':y={target_y}:"
+            f"enable='between(t,{start:.3f},{end:.3f})':"
+            f"eof_action=pass:repeatlast=1:shortest=0{nxt}"
         )
-
         current = nxt
 
-    # Add simple generated sound accents so fly-ins and instant pops are audible
-    # without requiring an external SFX library.
-    sound_labels: list[str] = []
-    for index, item in enumerate(valid):
-        start = float(item["start"])
+    filters.append(f"{current}trim=duration={base_duration:.3f},setpts=PTS-STARTPTS[vout]")
+    cmd += [
+        "-filter_complex", ";".join(filters),
+        "-map", "[vout]", "-an",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+        "-pix_fmt", "yuv420p", "-r", str(plan.fps),
+        "-t", f"{base_duration:.3f}",
+        str(output),
+    ]
+    _run(cmd)
+    _assert_duration(output, base_duration, label="overlay video")
+
+
+def _build_overlay_sfx(overlays: list[dict], duration: float, output: Path) -> None:
+    """Create one fixed-duration SFX bed for all pop-ins.
+
+    A silent full-length bed is always input #0, so amix duration=first makes
+    the result exactly match the narration duration regardless of delayed SFX.
+    """
+    duration = max(0.05, float(duration))
+    valid = [
+        item for item in overlays
+        if 0.0 <= float(item.get("start", 0.0)) < duration
+    ]
+    if not valid:
+        _run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-t", f"{duration:.3f}",
+            "-c:a", "pcm_s16le", str(output),
+        ])
+        return
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+    ]
+    filters: list[str] = []
+    labels: list[str] = ["[0:a]"]
+
+    for index, item in enumerate(valid, start=1):
+        start = max(0.0, min(duration - 0.01, float(item.get("start", 0.0))))
         animation = str(item.get("animation") or "fly")
         delay = int(round(start * 1000))
         label = f"[s{index}]"
+
         if animation == "fly":
-            # Short filtered-noise whoosh with a fast decay.
+            cmd += [
+                "-f", "lavfi", "-i",
+                "anoisesrc=color=white:duration=0.18:sample_rate=48000",
+            ]
             filters.append(
-                f"anoisesrc=color=white:duration=0.18:sample_rate=48000,"
-                f"highpass=f=650,lowpass=f=5200,"
+                f"[{index}:a]highpass=f=650,lowpass=f=5200,"
                 f"afade=t=out:st=0.06:d=0.12,volume=0.11,"
                 f"adelay={delay}|{delay}{label}"
             )
         else:
-            # Tight pop/click for instant appearance.
+            cmd += [
+                "-f", "lavfi", "-i",
+                "sine=frequency=1550:duration=0.075:sample_rate=48000",
+            ]
             filters.append(
-                f"sine=frequency=1550:duration=0.075:sample_rate=48000,"
-                f"afade=t=out:st=0.02:d=0.055,volume=0.085,"
+                f"[{index}:a]afade=t=out:st=0.02:d=0.055,volume=0.085,"
                 f"adelay={delay}|{delay}{label}"
             )
-        sound_labels.append(label)
+        labels.append(label)
 
-    if sound_labels:
-        filters.append(
-            "".join(sound_labels)
-            + f"amix=inputs={len(sound_labels)}:normalize=0,"
-            + f"apad=whole_dur={base_duration:.3f},atrim=duration={base_duration:.3f},asetpts=PTS-STARTPTS[sfx]"
-        )
-        audio_map = ["-map", "[sfx]"]
-    else:
-        audio_map = []
+    filters.append(
+        "".join(labels)
+        + f"amix=inputs={len(labels)}:duration=first:normalize=0,"
+        + f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[aout]"
+    )
 
     cmd += [
         "-filter_complex", ";".join(filters),
-        "-map", current, *audio_map,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-        "-pix_fmt", "yuv420p", "-r", str(plan.fps),
-        *([] if not sound_labels else ["-c:a", "aac", "-b:a", "128k"]),
-        "-t", f"{base_duration:.3f}", "-shortest",
+        "-map", "[aout]",
+        "-t", f"{duration:.3f}",
+        "-c:a", "pcm_s16le",
         str(output),
     ]
     _run(cmd)
+    _assert_duration(output, duration, label="SFX bed")
 
+
+def _assert_duration(path: str | Path, expected: float, *, label: str) -> None:
+    actual = _safe_probe_duration(path)
+    tolerance = max(0.20, 2.0 / 30.0)
+    if actual <= 0 or abs(actual - expected) > tolerance:
+        raise RuntimeError(
+            f"{label} duration mismatch: expected {expected:.3f}s, got {actual:.3f}s"
+        )
 
 def _render_safe_background(duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
     _run([
