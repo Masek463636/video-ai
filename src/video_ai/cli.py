@@ -475,6 +475,7 @@ def main() -> None:
                     Path(args.audio),
                     meme_dir=args.meme_dir,
                     semantic_rhythm=args.editing_rhythm == "semantic",
+                    diagnostics_path=work / "storyboard.diagnostics.json",
                 )
                 grammar_rewritten = []
                 reference_rewritten = []

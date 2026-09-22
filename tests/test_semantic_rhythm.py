@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -96,3 +97,69 @@ def test_cli_experiment_reuses_transcript_and_stops_before_search(tmp_path):
     assert planner.call_args.kwargs["semantic_rhythm"] is True
     assert planner.call_args.args[0].words == transcript.words
     assert not (tmp_path / "out.mp4").exists()
+
+
+def overlong_sample():
+    transcript = Transcript([Word(i * .65, (i + 1) * .65, f"word{i}") for i in range(14)])
+    def beat(start, end, description):
+        return {"start_idx": start, "end_idx": end, "kind": "video", "query": description,
+                "visual_description": description, "reason": "Follow this action"}
+    invalid = {"beats": [beat(0, 1, "A dog walking"), beat(2, 13, "A dog playing then sleeping")]}
+    corrected = {"beats": [beat(0, 1, "A dog walking"), beat(2, 7, "A dog playing"),
+                            beat(8, 13, "A dog falling asleep")]}
+    return transcript, invalid, corrected
+
+
+def test_780_second_failure_gets_one_semantic_correction(tmp_path):
+    transcript, invalid, corrected = overlong_sample()
+    path = tmp_path / "storyboard.diagnostics.json"
+    with patch("video_ai.gemini_ai.get_gemini_client") as get_client:
+        client = get_client.return_value
+        client.last_model = "mock"
+        client._generate_json.side_effect = [invalid, corrected]
+        plan = build_donor_shot_plan(transcript, "voice.wav", semantic_rhythm=True, diagnostics_path=path)
+        assert client._generate_json.call_count == 2
+        correction_prompt = client._generate_json.call_args.args[0][0]["text"]
+    assert "semantic beat 1: 7.80s outside" in correction_prompt
+    assert "Return the COMPLETE corrected JSON" in correction_prompt
+    assert [s.visual_description for s in plan.scenes] == [b["visual_description"] for b in corrected["beats"]]
+    assert [w for s in plan.scenes for w in s.caption_words] == transcript.words
+    report = json.loads(path.read_text())
+    assert report["attempts"][0]["response"] == invalid
+    assert report["attempts"][1]["validation_error"] is None
+
+
+def test_repeated_invalid_response_stops_after_two_calls(tmp_path):
+    transcript, invalid, _ = overlong_sample()
+    path = tmp_path / "diagnostics.json"
+    with patch("video_ai.gemini_ai.get_gemini_client") as get_client:
+        client = get_client.return_value
+        client.last_model = "mock"
+        client._generate_json.return_value = invalid
+        with pytest.raises(ValueError, match="invalid after one correction"):
+            build_donor_shot_plan(transcript, "voice.wav", semantic_rhythm=True, diagnostics_path=path)
+        assert client._generate_json.call_count == 2
+    assert len(json.loads(path.read_text())["attempts"]) == 2
+
+
+def test_valid_first_response_does_not_request_correction(tmp_path):
+    transcript, beats = sample()
+    with patch("video_ai.gemini_ai.get_gemini_client") as get_client:
+        client = get_client.return_value
+        client.last_model = "mock"
+        client._generate_json.return_value = {"beats": beats}
+        build_donor_shot_plan(transcript, "voice.wav", semantic_rhythm=True, diagnostics_path=tmp_path / "log.json")
+        assert client._generate_json.call_count == 1
+
+
+def test_api_failure_not_retried_and_old_diagnostics_cleared(tmp_path):
+    transcript, _ = sample()
+    path = tmp_path / "log.json"
+    path.write_text('{"attempts": [{"old": true}]}')
+    with patch("video_ai.gemini_ai.get_gemini_client") as get_client:
+        client = get_client.return_value
+        client._generate_json.side_effect = RuntimeError("API unavailable")
+        with pytest.raises(RuntimeError, match="API unavailable"):
+            build_donor_shot_plan(transcript, "voice.wav", semantic_rhythm=True, diagnostics_path=path)
+        assert client._generate_json.call_count == 1
+    assert json.loads(path.read_text()) == {"attempts": []}

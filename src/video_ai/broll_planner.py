@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -14,6 +15,7 @@ def build_donor_shot_plan(
     *,
     meme_dir: str | Path | None = None,
     semantic_rhythm: bool = False,
+    diagnostics_path: str | Path | None = None,
 ) -> ShotPlan:
     """Whole-transcript storyboard planner inspired by AutoBroll/MoneyPrinterTurbo.
 
@@ -94,15 +96,14 @@ EDITING RULES:
     if semantic_rhythm:
         prompt = _semantic_rhythm_prompt(prompt, target_beats, duration)
 
-    data = client._generate_json([{"text": prompt}], temperature=0.08)
-    raw_beats = data.get("beats", []) if isinstance(data, dict) else []
-    if not isinstance(raw_beats, list) or len(raw_beats) < 2:
-        raise RuntimeError("Gemini donor planner returned too few beats")
-
     if semantic_rhythm:
-        planned = _validate_semantic_beats(raw_beats, transcript)
+        planned = _request_semantic_beats(client, prompt, transcript, diagnostics_path)
         starts = [item["start_idx"] for item in planned]
     else:
+        data = client._generate_json([{"text": prompt}], temperature=0.08)
+        raw_beats = data.get("beats", []) if isinstance(data, dict) else []
+        if not isinstance(raw_beats, list) or len(raw_beats) < 2:
+            raise RuntimeError("Gemini donor planner returned too few beats")
         planned = _sanitize_beats(raw_beats, len(words))
         starts = _normalize_start_indices(planned, transcript, target_seconds=2.15)
     if len(starts) < 2:
@@ -213,6 +214,10 @@ def _semantic_rhythm_prompt(prompt: str, target_beats: int, duration: float) -> 
     return prompt + """
 
 SEMANTIC CUT CONTRACT:
+- HARD LIMIT: every displayed beat must last 0.65-5.2 seconds, including
+  silence up to the next beat. Measure from this beat's first word start
+  (0 for the first beat) to the NEXT beat's first word start; for the last
+  beat use the last word end. A reason never permits exceeding 5.2s.
 - Start at word 0. Each end_idx is exactly the next start_idx minus one.
   The final end_idx is the last word index. Return beats already in order.
 - Every beat has its OWN visible action and description for its EXACT words.
@@ -230,6 +235,55 @@ SEMANTIC CUT CONTRACT:
 - Keep the planned visual boundaries: the renderer will NOT invent midpoint
   cuts or inherit a previous description to fill an overlong beat.
 """
+
+
+def _request_semantic_beats(client, prompt: str, transcript: Transcript,
+                            diagnostics_path: str | Path | None) -> list[dict]:
+    """One initial storyboard and at most one validation-feedback correction.
+
+    API failures propagate immediately. Invalid corrected plans still stop;
+    no local timer cuts, relaxed limits, or unbounded model repair loop.
+    """
+    attempts: list[dict] = []
+
+    def save_attempts() -> None:
+        if diagnostics_path is not None:
+            path = Path(diagnostics_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"attempts": attempts}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    save_attempts()  # A failed new request must not leave an older run's report.
+    request = prompt
+    for attempt in range(2):
+        data = client._generate_json([{"text": request}], temperature=0.08)
+        error = None
+        planned: list[dict] = []
+        try:
+            beats = data.get("beats") if isinstance(data, dict) else None
+            if not isinstance(beats, list) or len(beats) < 2:
+                raise ValueError("storyboard must contain at least two beats")
+            planned = _validate_semantic_beats(beats, transcript)
+        except ValueError as exc:
+            error = str(exc)
+        attempts.append({"attempt": attempt + 1, "model": client.last_model,
+                         "response": data, "validation_error": error})
+        save_attempts()
+        if error is None:
+            return planned
+        if attempt == 1:
+            raise ValueError(f"Storyboard invalid after one correction: {error}")
+        print(f"[planner] semantic validation: {error}; requesting one correction", flush=True)
+        request = prompt + "\n\nCORRECT YOUR PREVIOUS STORYBOARD ONCE:\n" + json.dumps(data, ensure_ascii=False) + f"""
+
+VALIDATION ERROR (beat indexes are zero-based): {error}
+Return the COMPLETE corrected JSON storyboard, not a patch or explanation.
+Recheck ALL beat durations and word coverage. Preserve valid beats where possible.
+For an overlong beat, choose meaning/action changes within its spoken words and
+give each resulting beat its own query and visual description for that phrase.
+Do not split at a neutral midpoint, copy the old description, change word
+timestamps, omit words, or exceed the hard 5.2-second limit.
+"""
+    raise AssertionError("unreachable")
 
 
 def _validate_semantic_beats(raw_beats: list[object], transcript: Transcript) -> list[dict]:
