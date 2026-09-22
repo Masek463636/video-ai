@@ -13,7 +13,16 @@ from .models import Scene, ShotPlan, Word
 _MAX_CONTINUOUS_VISUAL_SECONDS = 2.85
 
 
-def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | None = None, captions: bool = True, crf: int = 20, editing_polish: bool = False) -> Path:
+def render_plan(
+    plan: ShotPlan,
+    output: str | Path,
+    *,
+    work_dir: str | Path | None = None,
+    captions: bool = True,
+    crf: int = 20,
+    editing_polish: bool = False,
+    overlays: list[dict] | None = None,
+) -> Path:
     _require("ffmpeg")
     _require("ffprobe")
     output = Path(output)
@@ -48,6 +57,13 @@ def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | No
         )
         base = root / "base.mp4"
         _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(base)])
+
+        picture = base
+        if overlays:
+            overlayed = root / "overlayed.mp4"
+            _apply_overlays(base, overlays, plan, overlayed, crf=crf)
+            picture = overlayed
+
         final_filter: list[str] = []
         if captions:
             ass = root / "captions.ass"
@@ -55,7 +71,7 @@ def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | No
             final_filter = ["-vf", f"ass='{_filter_path(ass)}'"]
         _run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(base), "-i", str(plan.audio), *final_filter,
+            "-i", str(picture), "-i", str(plan.audio), *final_filter,
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "libx264" if captions else "copy",
             *([] if not captions else ["-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p"]),
@@ -175,6 +191,66 @@ def _render_reference_video(asset: Path, scene: Scene, duration: float, plan: Sh
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
         "-pix_fmt", "yuv420p", "-r", str(fps), "-t", f"{duration:.3f}", str(output),
     ])
+
+
+def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Path, *, crf: int) -> None:
+    """Composite sparse PNG pop-ins without changing the underlying edit."""
+    valid = [
+        item for item in overlays
+        if item.get("asset") and Path(str(item["asset"])).exists()
+        and float(item.get("end", 0)) > float(item.get("start", 0))
+    ]
+    if not valid:
+        shutil.copyfile(base, output)
+        return
+
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(base)]
+    for item in valid:
+        cmd += ["-loop", "1", "-framerate", str(plan.fps), "-i", str(item["asset"])]
+
+    filters: list[str] = []
+    current = "[0:v]"
+    for index, item in enumerate(valid):
+        start = float(item["start"])
+        end = float(item["end"])
+        side = "left" if str(item.get("position")) == "left" else "right"
+        target_y = int(plan.height * (0.22 if index % 2 == 0 else 0.34))
+        width = int(plan.width * 0.34)
+        max_h = int(plan.height * 0.28)
+
+        ov = f"[ov{index}]"
+        nxt = f"[v{index}]"
+        filters.append(
+            f"[{index + 1}:v]"
+            f"scale=w='min({width},iw)':h='min({max_h},ih)':force_original_aspect_ratio=decrease,"
+            f"format=rgba{ov}"
+        )
+
+        if side == "left":
+            x = (
+                f"if(lt(t,{start + 0.12:.3f}),"
+                f"-overlay_w+(t-{start:.3f})/0.12*(80+overlay_w),80)"
+            )
+        else:
+            x = (
+                f"if(lt(t,{start + 0.12:.3f}),"
+                f"main_w-(t-{start:.3f})/0.12*(overlay_w+80),"
+                f"main_w-overlay_w-80)"
+            )
+
+        filters.append(
+            f"{current}{ov}overlay=x='{x}':y={target_y}:"
+            f"enable='between(t,{start:.3f},{end:.3f})':shortest=1{nxt}"
+        )
+        current = nxt
+
+    cmd += [
+        "-filter_complex", ";".join(filters),
+        "-map", current, "-an",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+        "-pix_fmt", "yuv420p", "-r", str(plan.fps), str(output),
+    ]
+    _run(cmd)
 
 
 def _render_safe_background(duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
