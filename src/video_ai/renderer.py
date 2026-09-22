@@ -194,7 +194,7 @@ def _render_reference_video(asset: Path, scene: Scene, duration: float, plan: Sh
 
 
 def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Path, *, crf: int) -> None:
-    """Composite sparse PNG pop-ins without changing the underlying edit."""
+    """Composite larger, varied Shorts inserts plus generated whoosh/pop SFX."""
     valid = [
         item for item in overlays
         if item.get("asset") and Path(str(item["asset"])).exists()
@@ -213,10 +213,14 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
     for index, item in enumerate(valid):
         start = float(item["start"])
         end = float(item["end"])
-        side = "left" if str(item.get("position")) == "left" else "right"
-        target_y = int(plan.height * (0.22 if index % 2 == 0 else 0.34))
-        width = int(plan.width * 0.34)
-        max_h = int(plan.height * 0.28)
+        side = str(item.get("position") or "right")
+        animation = str(item.get("animation") or "fly")
+        size = str(item.get("size") or "large")
+        scale_ratio = 0.56 if size == "hero" else 0.44
+        max_h_ratio = 0.46 if size == "hero" else 0.36
+        width = int(plan.width * scale_ratio)
+        max_h = int(plan.height * max_h_ratio)
+        target_y = int(plan.height * (0.20 if size == "hero" else (0.24 if index % 2 == 0 else 0.37)))
 
         ov = f"[ov{index}]"
         nxt = f"[v{index}]"
@@ -227,28 +231,87 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         )
 
         if side == "left":
-            x = (
-                f"if(lt(t,{start + 0.12:.3f}),"
-                f"-overlay_w+(t-{start:.3f})/0.12*(80+overlay_w),80)"
-            )
+            settled_x = "70"
+        elif side == "center":
+            settled_x = "(main_w-overlay_w)/2"
         else:
-            x = (
-                f"if(lt(t,{start + 0.12:.3f}),"
-                f"main_w-(t-{start:.3f})/0.12*(overlay_w+80),"
-                f"main_w-overlay_w-80)"
-            )
+            settled_x = "main_w-overlay_w-70"
+
+        if animation == "fly":
+            settle = start + 0.16
+            if side == "left":
+                x = (
+                    f"if(lt(t,{settle:.3f}),"
+                    f"-overlay_w+(t-{start:.3f})/0.16*(overlay_w+70),70)"
+                )
+            elif side == "right":
+                x = (
+                    f"if(lt(t,{settle:.3f}),"
+                    f"main_w-(t-{start:.3f})/0.16*(overlay_w+70),"
+                    f"main_w-overlay_w-70)"
+                )
+            else:
+                x = settled_x
+        else:
+            x = settled_x
 
         filters.append(
             f"{current}{ov}overlay=x='{x}':y={target_y}:"
             f"enable='between(t,{start:.3f},{end:.3f})':shortest=1{nxt}"
         )
-        current = nxt
+
+        label = str(item.get("label") or "").strip()
+        if label:
+            labelled = f"[vl{index}]"
+            font_size = max(54, int(plan.width * (0.073 if size == "hero" else 0.062)))
+            if side == "left":
+                text_x = 80
+            elif side == "right":
+                text_x = f"w-tw-80"
+            else:
+                text_x = "(w-tw)/2"
+            text_y = int(plan.height * (0.56 if size == "hero" else 0.52))
+            safe_label = label.replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'")
+            filters.append(
+                f"{nxt}drawtext=text='{safe_label}':"
+                f"font='Arial Black':fontsize={font_size}:fontcolor=white:"
+                f"borderw=7:bordercolor=black:"
+                f"x='{text_x}':y={text_y}:"
+                f"enable='between(t,{start:.3f},{end:.3f})'{labelled}"
+            )
+            current = labelled
+        else:
+            current = nxt
+
+    # Add simple generated sound accents so fly-ins and instant pops are audible
+    # without requiring an external SFX library.
+    sound_labels: list[str] = []
+    for index, item in enumerate(valid):
+        start = float(item["start"])
+        animation = str(item.get("animation") or "fly")
+        dur = 0.16 if animation == "fly" else 0.075
+        freq = 900 if animation == "fly" else 1450
+        volume = 0.10 if animation == "fly" else 0.075
+        label = f"[s{index}]"
+        filters.append(
+            f"sine=frequency={freq}:duration={dur}:sample_rate=48000,"
+            f"volume={volume},adelay={int(round(start * 1000))}|{int(round(start * 1000))}{label}"
+        )
+        sound_labels.append(label)
+
+    if sound_labels:
+        filters.append("".join(sound_labels) + f"amix=inputs={len(sound_labels)}:normalize=0[sfx]")
+        audio_map = ["-map", "[sfx]"]
+    else:
+        audio_map = []
 
     cmd += [
         "-filter_complex", ";".join(filters),
-        "-map", current, "-an",
+        "-map", current, *audio_map,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-        "-pix_fmt", "yuv420p", "-r", str(plan.fps), str(output),
+        "-pix_fmt", "yuv420p", "-r", str(plan.fps),
+        *([] if not sound_labels else ["-c:a", "aac", "-b:a", "128k"]),
+        str(output),
     ]
     _run(cmd)
 
