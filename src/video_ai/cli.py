@@ -396,6 +396,8 @@ def main() -> None:
     p_create.add_argument("--work-dir", required=True)
     p_create.add_argument("--model", default="small")
     p_create.add_argument("--language", default=None)
+    p_create.add_argument("--transcript", default=None, help="Reuse an existing timed transcript instead of transcribing again")
+    p_create.add_argument("--editing-rhythm", choices=("stable", "semantic"), default="stable", help="Opt-in semantic storyboard experiment; stable preserves test45 planning")
     p_create.add_argument("--pace", type=float, default=1.7)
     p_create.add_argument("--min-scene", type=float, default=0.95)
     p_create.add_argument("--max-scene", type=float, default=2.7)
@@ -464,13 +466,15 @@ def main() -> None:
         work.mkdir(parents=True, exist_ok=True)
         grammar_rewritten: list[int] = []
         if args.command == "create":
-            transcript = transcribe_local(args.audio, model_size=args.model, language=args.language)
+            transcript = (load_transcript(args.transcript) if args.transcript else
+                          transcribe_local(args.audio, model_size=args.model, language=args.language))
             transcript_path = save_transcript(transcript, work / "transcript.json")
             try:
                 plan = build_donor_shot_plan(
                     transcript,
                     Path(args.audio),
                     meme_dir=args.meme_dir,
+                    semantic_rhythm=args.editing_rhythm == "semantic",
                 )
                 grammar_rewritten = []
                 reference_rewritten = []
@@ -479,6 +483,8 @@ def main() -> None:
                     flush=True,
                 )
             except Exception as exc:
+                if args.editing_rhythm == "semantic":
+                    raise RuntimeError(f"Semantic storyboard stopped before asset search: {exc}") from exc
                 print(
                     f"[planner] donor planner unavailable -> legacy fallback: {exc}",
                     flush=True,
@@ -517,6 +523,7 @@ def main() -> None:
 
         payload = {
             "ok": True,
+            "editing_rhythm": args.editing_rhythm if args.command == "create" else "saved_plan",
             "output": str(output),
             "plan": str(materialized),
             "audio_plan": str(audio_plan_path),

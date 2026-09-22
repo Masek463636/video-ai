@@ -13,6 +13,7 @@ def build_donor_shot_plan(
     audio: str | Path,
     *,
     meme_dir: str | Path | None = None,
+    semantic_rhythm: bool = False,
 ) -> ShotPlan:
     """Whole-transcript storyboard planner inspired by AutoBroll/MoneyPrinterTurbo.
 
@@ -31,6 +32,8 @@ def build_donor_shot_plan(
         raise ValueError("Transcript contains no words")
 
     indexed = " ".join(f"{i}:{word.text}" for i, word in enumerate(words))
+    if semantic_rhythm:
+        indexed = "\n".join(f"{i} [{word.start:.3f}-{word.end:.3f}s]: {word.text}" for i, word in enumerate(words))
     meme_names = _meme_names(meme_dir)
     duration = transcript.duration
     target_beats = max(5, min(18, round(duration / 2.15)))
@@ -88,13 +91,20 @@ EDITING RULES:
 - start_idx/end_idx are word indexes from the transcript above.
 """.strip()
 
+    if semantic_rhythm:
+        prompt = _semantic_rhythm_prompt(prompt, target_beats, duration)
+
     data = client._generate_json([{"text": prompt}], temperature=0.08)
     raw_beats = data.get("beats", []) if isinstance(data, dict) else []
     if not isinstance(raw_beats, list) or len(raw_beats) < 2:
         raise RuntimeError("Gemini donor planner returned too few beats")
 
-    planned = _sanitize_beats(raw_beats, len(words))
-    starts = _normalize_start_indices(planned, transcript, target_seconds=2.15)
+    if semantic_rhythm:
+        planned = _validate_semantic_beats(raw_beats, transcript)
+        starts = [item["start_idx"] for item in planned]
+    else:
+        planned = _sanitize_beats(raw_beats, len(words))
+        starts = _normalize_start_indices(planned, transcript, target_seconds=2.15)
     if len(starts) < 2:
         raise RuntimeError("Donor planner could not build a useful timeline")
 
@@ -182,6 +192,82 @@ EDITING RULES:
         director_source="donor_gemini",
         director_model=client.last_model,
     )
+
+
+def _semantic_rhythm_prompt(prompt: str, target_beats: int, duration: float) -> str:
+    """Opt-in experiment: preserve the stable prompt and selection pipeline."""
+    prompt = prompt.replace(
+        f"Target roughly {target_beats} visual beats across {duration:.1f}s.",
+        f"Plan {duration:.1f}s by meaning and visible action. There is no shot-count quota.",
+    ).replace(
+        "- Typical beat length: 1.4-3.0 seconds. Avoid >3.4s unless continuity truly helps.",
+        "- Usually hold 1.4-3.0 seconds. A clear list item may take 0.65-1.4s; "
+        "a developing action may take 3.4-5.2s. Explain a long hold in reason. "
+        "Use the actual word timestamps, not word counts, to measure duration.",
+    ).replace(
+        "- If the narration returns to the same concept later, choose a DIFFERENT visual\n"
+        "  metaphor/action/context rather than repeating the earlier shot.",
+        "- If a concept returns, prefer another concrete action/detail/angle. "
+        "Use a metaphor only when a literal illustration would be misleading or unavailable.",
+    )
+    return prompt + """
+
+SEMANTIC CUT CONTRACT:
+- Start at word 0. Each end_idx is exactly the next start_idx minus one.
+  The final end_idx is the last word index. Return beats already in order.
+- Every beat has its OWN visible action and description for its EXACT words.
+  Do not copy a previous beat's description merely to meet a duration target.
+- Cut on a change of action, subject, example, consequence, or a speech pause.
+  Keep complete personal names and number+unit phrases together; attach a
+  conjunction/preposition to the phrase it introduces when possible.
+- Do not reveal the next phrase's subject early: waking up should show waking
+  or a reaction, not a religious portrait mentioned only in a later phrase.
+- A country/location establishing shot is not a substitute for the narrated
+  action. A modern rally is not factual footage of a historical army.
+- Prefer direct, recognizable live action when it can honestly illustrate the
+  phrase. Use archives for factual people/events/documents/maps, with no fixed
+  video percentage and no forced replacement of accurate archival material.
+- Keep the planned visual boundaries: the renderer will NOT invent midpoint
+  cuts or inherit a previous description to fill an overlong beat.
+"""
+
+
+def _validate_semantic_beats(raw_beats: list[object], transcript: Transcript) -> list[dict]:
+    """Reject malformed experimental plans before retrieval; never timer-split.
+
+    Semantic relevance still needs Gemini and a real rendered A/B review.
+    These checks guarantee coverage and preserve each returned beat's intent.
+    """
+    words = transcript.words
+    planned: list[dict] = []
+    expected_start = 0
+    previous_description = ""
+    for pos, raw in enumerate(raw_beats):
+        if not isinstance(raw, dict):
+            raise ValueError(f"semantic beat {pos}: expected an object")
+        start, end = raw.get("start_idx"), raw.get("end_idx")
+        if (type(start) is not int or type(end) is not int or start != expected_start
+                or end < start or end >= len(words)):
+            raise ValueError(f"semantic beat {pos}: word ranges must cover every word exactly once")
+        # Include silence that the renderer displays before the next beat.
+        display_start = 0.0 if start == 0 else words[start].start
+        display_end = words[end + 1].start if end + 1 < len(words) else words[-1].end
+        length = display_end - display_start
+        if not 0.65 - 1e-6 <= length <= 5.2 + 1e-6:
+            raise ValueError(f"semantic beat {pos}: {length:.2f}s outside 0.65-5.2s; no automatic timer split")
+        description = " ".join(str(raw.get("visual_description") or "").split()).casefold().rstrip(" .")
+        if not description or description == previous_description:
+            raise ValueError(f"semantic beat {pos}: missing or repeated adjacent visual description")
+        if length > 3.4 and not str(raw.get("reason") or "").strip():
+            raise ValueError(f"semantic beat {pos}: long action needs a reason")
+        if raw.get("kind") not in {"video", "image", "meme"} or not str(raw.get("query") or "").strip():
+            raise ValueError(f"semantic beat {pos}: missing media kind or query")
+        planned.append(dict(raw))
+        previous_description = description
+        expected_start = end + 1
+    if expected_start != len(words):
+        raise ValueError("semantic storyboard does not cover the full transcript")
+    return planned
 
 
 def _sanitize_beats(raw_beats: list[object], word_count: int) -> list[dict]:
