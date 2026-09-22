@@ -69,14 +69,24 @@ def render_plan(
             ass = root / "captions.ass"
             _write_ass(plan, ass, editing_polish=editing_polish)
             final_filter = ["-vf", f"ass='{_filter_path(ass)}'"]
-        _run([
+        final_cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(picture), "-i", str(plan.audio), *final_filter,
-            "-map", "0:v:0", "-map", "1:a:0",
+        ]
+        if overlays:
+            # overlayed.mp4 carries only generated SFX; mix them under the real voiceover.
+            final_cmd += [
+                "-filter_complex", "[0:a:0][1:a:0]amix=inputs=2:normalize=0:dropout_transition=0[aout]",
+                "-map", "0:v:0", "-map", "[aout]",
+            ]
+        else:
+            final_cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+        final_cmd += [
             "-c:v", "libx264" if captions else "copy",
             *([] if not captions else ["-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p"]),
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(output),
-        ])
+        ]
+        _run(final_cmd)
         return output
     finally:
         if temp is not None:
@@ -289,14 +299,23 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
     for index, item in enumerate(valid):
         start = float(item["start"])
         animation = str(item.get("animation") or "fly")
-        dur = 0.16 if animation == "fly" else 0.075
-        freq = 900 if animation == "fly" else 1450
-        volume = 0.10 if animation == "fly" else 0.075
+        delay = int(round(start * 1000))
         label = f"[s{index}]"
-        filters.append(
-            f"sine=frequency={freq}:duration={dur}:sample_rate=48000,"
-            f"volume={volume},adelay={int(round(start * 1000))}|{int(round(start * 1000))}{label}"
-        )
+        if animation == "fly":
+            # Short filtered-noise whoosh with a fast decay.
+            filters.append(
+                f"anoisesrc=color=white:duration=0.18:sample_rate=48000,"
+                f"highpass=f=650,lowpass=f=5200,"
+                f"afade=t=out:st=0.06:d=0.12,volume=0.11,"
+                f"adelay={delay}|{delay}{label}"
+            )
+        else:
+            # Tight pop/click for instant appearance.
+            filters.append(
+                f"sine=frequency=1550:duration=0.075:sample_rate=48000,"
+                f"afade=t=out:st=0.02:d=0.055,volume=0.085,"
+                f"adelay={delay}|{delay}{label}"
+            )
         sound_labels.append(label)
 
     if sound_labels:
