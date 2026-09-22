@@ -45,32 +45,57 @@ def build_shorts_overlays(
             "caption": scene.caption or "",
         })
 
-    prompt = f"""You are a TikTok/YouTube Shorts editor adding a SMALL number of animated PNG cutouts on top of an already edited video.
+    duration = max((float(scene.end) for scene in plan.scenes), default=0.0)
+    auto_budget = 2 if duration <= 12 else 3 if duration <= 20 else 5 if duration <= 35 else 7
+    budget = min(max_overlays, auto_budget) if max_overlays > 0 else auto_budget
+
+    prompt = f"""You are the effects editor for a fast TikTok/YouTube Short.
+
+The primary B-roll is already selected. DO NOT replace it. Your job is to add only a few high-value foreground accents that make the edit feel handmade.
 
 Scenes:
 {json.dumps(scene_rows, ensure_ascii=False)}
 
-Return JSON with key overlays. Choose at most {max_overlays} overlays total.
+Return JSON with key effects. Choose at most {budget} effects total.
 
-Rules:
-- Only choose a concrete object, animal, food, person type, historical person, place symbol, or physical item EXPLICITLY mentioned in that exact scene.
-- Good examples: milk -> "glass of milk"; grandfather -> "old man portrait"; phone -> "smartphone"; money -> "cash"; crown -> "crown".
-- Never invent an object just because it is emotionally related.
-- Do not choose abstract ideas such as stress, love, danger, religion, history, sadness.
-- Prefer moments where a quick object/person pop-in would make the edit feel handmade, funny, explanatory, or emphatic.
-- Spread inserts through the video; avoid adjacent scenes unless both are unusually strong.
-- query MUST be a short ENGLISH Wikimedia image-search phrase, 1-5 words, describing the visible object/person only.
-- anchor is the exact narrated word/short phrase that motivated the insert.
-- position is left, right, or center.
-- animation is "fly" for a fast side fly-in with a smooth stop, or "pop" for an instant appearance.
-- size is "large" or "hero". Prefer large. Use hero for a very important single object/person.
-- duration is 0.85-1.45 seconds.
-- offset is only a fallback. The renderer will align the insert to the exact spoken anchor when word timestamps exist.
-- label is optional. Use it ONLY for a short value/quantity/name that is explicitly spoken in the SAME scene, preserving the narration language exactly. Example: narration says "930 мл молока" -> label "930 мл". Never invent a label.
-- Return no overlay when there is no useful concrete insert.
+ALLOWED EFFECT TYPES:
+1. "png" — a concrete object/person cutout only.
+2. "png_text" — concrete cutout + an explicit spoken value/name/quantity.
+3. "text" — big text-only emphasis when the spoken number/value itself is the important visual.
+4. "none" — do nothing. Prefer none over a weak effect.
 
-Schema:
-{{"overlays":[{{"scene":0,"query":"milk carton","anchor":"молоко","label":"930 мл","position":"right","animation":"fly","size":"hero","duration":1.1,"offset":0.12}}]}}
+SELECTION RULES:
+- Every effect must be justified by something EXPLICITLY said in that exact scene.
+- Strong PNG examples: milk -> milk carton/glass of milk; grandfather -> old man; phone -> smartphone; crown -> crown; money -> cash.
+- Strong text examples: "930 мл", "$100", "50%", "3 года", "1998".
+- If narration says a concrete object AND quantity together, prefer png_text. Example: "930 мл молока" -> milk carton + label "930 мл".
+- Never visualize abstract ideas just because they sound dramatic.
+- Do not add generic reaction PNGs unless the narration explicitly mentions that person/object.
+- Avoid repeating the same object or same effect style.
+- Spread effects across the timeline. Do not stack them every scene.
+- A good 20–30 second Short usually needs only 3–5 foreground accents.
+
+TIMING:
+- anchor = the exact spoken word/short phrase that should trigger the effect.
+- The renderer aligns to the word timestamp when possible.
+- duration 0.70–1.40 seconds.
+
+VISUAL STYLE:
+- animation: "fly", "pop", or "drop".
+  - fly = very fast side entry, then smooth ease-out stop.
+  - pop = appears instantly.
+  - drop = comes quickly from above and eases into place.
+- position: left, right, or center.
+- size: "large" or "hero".
+- For text effects use center unless there is a reason not to.
+- label MUST preserve the exact narration language and units.
+- query is required only for png/png_text and must be a short ENGLISH Wikimedia search phrase describing the visible object/person.
+
+Return ONLY JSON:
+{{"effects":[
+  {{"scene":2,"type":"png_text","query":"milk carton","anchor":"молока","label":"930 мл","position":"right","animation":"fly","size":"hero","duration":1.05}},
+  {{"scene":6,"type":"text","query":"","anchor":"50 процентов","label":"50%","position":"center","animation":"pop","size":"hero","duration":0.85}}
+]}}
 """
 
     try:
@@ -79,7 +104,7 @@ Schema:
         print(f"[fx] overlay planning unavailable: {exc}", flush=True)
         return []
 
-    raw = data.get("overlays", []) if isinstance(data, dict) else []
+    raw = (data.get("effects") or data.get("overlays") or []) if isinstance(data, dict) else []
     if not isinstance(raw, list):
         return []
 
@@ -120,9 +145,11 @@ Schema:
     )
 
     used_scenes: set[int] = set()
+    used_concepts: set[str] = set()
     overlays: list[dict[str, Any]] = []
+
     for item in raw:
-        if len(overlays) >= max_overlays or not isinstance(item, dict):
+        if len(overlays) >= budget or not isinstance(item, dict):
             break
         try:
             scene_index = int(item.get("scene"))
@@ -130,63 +157,95 @@ Schema:
             continue
         if scene_index < 0 or scene_index >= len(plan.scenes) or scene_index in used_scenes:
             continue
-        if any(abs(scene_index - old) <= 1 for old in used_scenes) and len(plan.scenes) > 5:
+
+        scene = plan.scenes[scene_index]
+        effect_type = str(item.get("type") or "png").lower().strip()
+        if effect_type not in {"png", "png_text", "text"}:
+            continue
+
+        anchor = " ".join(str(item.get("anchor") or "").split())[:80]
+        if not anchor:
+            continue
+        caption = scene.caption or ""
+        caption_cf = caption.casefold()
+        anchor_tokens = [t for t in _tokens(anchor) if len(t) > 2]
+        if anchor_tokens and not any(t in caption_cf for t in anchor_tokens):
+            continue
+
+        # Do not machine-gun accents on adjacent beats in longer videos.
+        if any(abs(scene_index - old) <= 1 for old in used_scenes) and len(plan.scenes) > 6:
             continue
 
         query = _clean_query(str(item.get("query") or ""))
-        anchor = " ".join(str(item.get("anchor") or "").split())[:80]
-        if not query or not anchor:
-            continue
-        scene = plan.scenes[scene_index]
-        caption = (scene.caption or "").casefold()
-        anchor_tokens = [t for t in _tokens(anchor) if len(t) > 2]
-        if anchor_tokens and not any(t in caption for t in anchor_tokens):
+        label = " ".join(str(item.get("label") or "").split())[:28]
+
+        if effect_type in {"png_text", "text"}:
+            if label and not _label_is_spoken(caption, label):
+                label = ""
+            if not label:
+                label = _explicit_quantity(caption) or ""
+            if not label:
+                # Text-driven effect without explicit spoken text is too risky.
+                if effect_type == "text":
+                    continue
+                effect_type = "png"
+
+        if effect_type in {"png", "png_text"} and not query:
             continue
 
-        target = out / f"overlay_{len(overlays):02d}.png"
-        candidate = _find_png(query, target, client)
-        if candidate is None:
-            target.unlink(missing_ok=True)
-            print(f"[fx] no verified PNG insert found for: {query}", flush=True)
+        concept = (query or label).casefold().strip()
+        if concept and concept in used_concepts:
             continue
 
-        duration = _clamp_float(item.get("duration"), 0.85, 1.45, 1.08)
-        offset = _clamp_float(item.get("offset"), 0.05, 0.55, 0.12)
+        duration = _clamp_float(item.get("duration"), 0.70, 1.40, 1.00)
         display_end = (
             float(plan.scenes[scene_index + 1].start)
             if scene_index + 1 < len(plan.scenes)
             else float(scene.end)
         )
         anchor_start = _anchor_start(scene, anchor)
-        start = max(float(scene.start), (anchor_start - 0.035) if anchor_start is not None else float(scene.start) + offset)
+        start = max(float(scene.start), (anchor_start - 0.025) if anchor_start is not None else float(scene.start) + 0.10)
         end = min(display_end, start + duration)
-        if end - start < 0.55:
-            target.unlink(missing_ok=True)
+        if end - start < 0.45:
             continue
 
         raw_position = str(item.get("position") or "").lower()
-        position = raw_position if raw_position in {"left", "right", "center"} else ("left" if len(overlays) % 2 else "right")
+        position = raw_position if raw_position in {"left", "right", "center"} else ("center" if effect_type == "text" else ("left" if len(overlays) % 2 else "right"))
+
         animation = str(item.get("animation") or "").lower()
-        if animation not in {"fly", "pop"}:
-            animation = "fly" if len(overlays) % 2 == 0 else "pop"
+        if animation not in {"fly", "pop", "drop"}:
+            animation = ("pop" if effect_type == "text" else ("fly" if len(overlays) % 2 == 0 else "drop"))
         if overlays and animation == overlays[-1].get("animation"):
-            animation = "pop" if animation == "fly" else "fly"
-        if animation == "fly" and position == "center":
-            position = "left" if len(overlays) % 2 else "right"
+            animation = {"fly":"pop","pop":"drop","drop":"fly"}[animation]
 
         size = str(item.get("size") or "").lower()
         if size not in {"large", "hero"}:
-            size = "hero" if len(overlays) % 3 == 2 else "large"
+            size = "hero" if effect_type in {"png_text", "text"} else "large"
 
-        label = " ".join(str(item.get("label") or "").split())[:24]
-        if label and not _label_is_spoken(scene.caption or "", label):
-            label = ""
-        if not label:
-            label = _explicit_quantity(scene.caption or "") or ""
+        target: Path | None = None
+        candidate = None
+        if effect_type in {"png", "png_text"}:
+            target = out / f"overlay_{len(overlays):02d}.png"
+            candidate = _find_png(query, target, client)
+            if candidate is None:
+                target.unlink(missing_ok=True)
+                # If we at least have a strong spoken value, preserve the idea
+                # as a text-only effect instead of throwing the beat away.
+                if label:
+                    effect_type = "text"
+                    query = ""
+                    target = None
+                    position = "center"
+                    animation = "pop" if animation == "fly" else animation
+                    size = "hero"
+                else:
+                    print(f"[fx] no verified PNG insert found for: {query}", flush=True)
+                    continue
 
         overlay = {
             "scene": scene_index,
-            "asset": str(target),
+            "type": effect_type,
+            "asset": str(target) if target is not None else "",
             "query": query,
             "anchor": anchor,
             "label": label,
@@ -195,21 +254,23 @@ Schema:
             "size": size,
             "start": round(start, 3),
             "end": round(end, 3),
-            "source": candidate.source,
-            "title": candidate.title,
-            "page_url": candidate.page_url,
-            "license": candidate.license,
+            "source": candidate.source if candidate is not None else "generated_text",
+            "title": candidate.title if candidate is not None else label,
+            "page_url": candidate.page_url if candidate is not None else "",
+            "license": candidate.license if candidate is not None else "",
         }
         overlays.append(overlay)
         used_scenes.add(scene_index)
+        if concept:
+            used_concepts.add(concept)
         print(
-            f"[fx] PNG insert {len(overlays)}/{max_overlays}: scene={scene_index + 1} "
-            f"anchor={anchor!r} query={query!r}",
+            f"[fx] {effect_type} {len(overlays)}/{budget}: scene={scene_index + 1} "
+            f"anchor={anchor!r} query={query!r} label={label!r} animation={animation}",
             flush=True,
         )
 
     (out / "overlays.json").write_text(
-        json.dumps({"overlays": overlays}, ensure_ascii=False, indent=2),
+        json.dumps({"effects": overlays, "overlays": overlays}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return overlays
