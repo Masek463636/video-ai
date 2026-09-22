@@ -215,12 +215,13 @@ Schema:
             continue
 
         anchor = " ".join(str(item.get("anchor") or "").split())[:80]
-        if not anchor:
+        local_item = bool(item.get("_local"))
+        if not anchor and not local_item:
             continue
         caption = scene.caption or ""
         caption_cf = caption.casefold()
         anchor_tokens = [t for t in _tokens(anchor) if len(t) > 2]
-        if anchor_tokens and not any(t in caption_cf for t in anchor_tokens):
+        if not local_item and anchor_tokens and not any(t in caption_cf for t in anchor_tokens):
             continue
 
         query = _clean_query(str(item.get("query") or ""))
@@ -250,7 +251,7 @@ Schema:
             if scene_index + 1 < len(plan.scenes)
             else float(scene.end)
         )
-        anchor_start = _anchor_start(scene, anchor)
+        anchor_start = _anchor_start(scene, anchor) if anchor else None
         start = max(float(scene.start), (anchor_start - 0.025) if anchor_start is not None else float(scene.start) + 0.10)
         end = min(display_end, start + duration)
         if end - start < 0.45:
@@ -282,8 +283,9 @@ Schema:
             candidate = _find_png(query, target, client)
             if candidate is None:
                 target.unlink(missing_ok=True)
-                # If we at least have a strong spoken value, preserve the idea
-                # as a text-only effect instead of throwing the beat away.
+                # Text fallback is allowed ONLY for explicit spoken values
+                # such as "930 мл", "$100" or "50%". Never flash arbitrary
+                # narration words just because PNG retrieval failed.
                 if label:
                     effect_type = "text"
                     query = ""
@@ -292,23 +294,8 @@ Schema:
                     animation = "pop" if animation == "fly" else animation
                     size = "hero"
                 else:
-                    # Better than silently losing the beat: show the exact
-                    # spoken anchor as a short callout. This is still grounded
-                    # in narration and gives Shorts rhythm even when Commons
-                    # has no usable transparent cutout.
-                    fallback_label = _short_anchor_label(anchor)
-                    if fallback_label:
-                        print(f"[fx] PNG unavailable -> text fallback: {fallback_label!r}", flush=True)
-                        effect_type = "text"
-                        query = ""
-                        label = fallback_label
-                        target = None
-                        position = "center"
-                        animation = "pop" if animation == "fly" else animation
-                        size = "large"
-                    else:
-                        print(f"[fx] no verified PNG insert found for: {query}", flush=True)
-                        continue
+                    print(f"[fx] no verified PNG insert found for: {query}", flush=True)
+                    continue
 
         overlay = {
             "scene": scene_index,
@@ -761,23 +748,34 @@ def _explicit_quantity(caption: str) -> str | None:
     return " ".join(match.group(0).split()) if match else None
 
 def _best_local_png_query(scene: Scene) -> str:
-    """Choose a compact existing storyboard query suitable for a foreground PNG."""
+    """Choose the most object-like existing storyboard query for a PNG cutout."""
     candidates: list[str] = []
 
-    scene_query = str(getattr(scene, "query", "") or "").strip()
-    if scene_query:
-        candidates.append(scene_query)
+    entities = getattr(scene, "required_entities", None)
+    if isinstance(entities, list):
+        candidates.extend(str(value).strip() for value in entities if str(value).strip())
 
     search_queries = getattr(scene, "search_queries", None)
     if isinstance(search_queries, list):
         candidates.extend(str(value).strip() for value in search_queries if str(value).strip())
 
-    # Required entities are often better foreground subjects than a full B-roll
-    # query, provided they are already in English/ASCII.
-    entities = getattr(scene, "required_entities", None)
-    if isinstance(entities, list):
-        candidates.extend(str(value).strip() for value in entities if str(value).strip())
+    scene_query = str(getattr(scene, "query", "") or "").strip()
+    if scene_query:
+        candidates.append(scene_query)
 
+    hard_bad_phrases = {
+        "supermarket aisle", "grocery store aisle", "shopping scene",
+        "historical archive", "street scene", "crowd scene",
+        "wide shot", "close up", "closeup",
+    }
+    soft_bad_tokens = {
+        "scene", "background", "interior", "exterior", "detail", "closeup",
+        "close", "wide", "shot", "aisle", "store", "supermarket", "grocery",
+        "shopping", "consumer", "products", "product", "price", "pricing",
+        "concept", "illustration", "archive", "historical",
+    }
+
+    ranked: list[tuple[int, str]] = []
     seen: set[str] = set()
     for value in candidates:
         cleaned = _clean_query(value)
@@ -787,31 +785,33 @@ def _best_local_png_query(scene: Scene) -> str:
         if key in seen:
             continue
         seen.add(key)
-
         words = cleaned.split()
         if not (1 <= len(words) <= 5):
             continue
-
-        # Reject obvious full-scene/context searches that make poor cutouts.
-        lowered = key
-        bad = {
-            "supermarket aisle", "grocery store aisle", "shopping scene",
-            "historical archive", "street scene", "crowd scene",
-            "interior", "exterior", "background", "wide shot",
-        }
-        if lowered in bad:
+        if key in hard_bad_phrases:
             continue
-        return cleaned
 
-    return ""
+        bad_count = sum(1 for word in words if word.casefold() in soft_bad_tokens)
+        good_count = len(words) - bad_count
+        if good_count <= 0:
+            continue
+
+        score = 18 - len(words) * 2 + good_count * 4 - bad_count * 7
+        if len(words) <= 3:
+            score += 5
+        ranked.append((score, cleaned))
+
+    if not ranked:
+        return ""
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
 
 
 def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]]:
-    """Grounded no-Gemini fallback so Shorts FX never collapses to zero.
+    """No-Gemini fallback using only storyboard visuals and spoken values.
 
-    It prefers explicit quantities and existing scene search queries already
-    produced by the storyboard. If a useful PNG query is unavailable, the later
-    rhythm fallback still creates text accents from narration.
+    Never creates arbitrary word cards. If a scene has no usable concrete PNG
+    query and no explicit quantity/value, it is skipped.
     """
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -824,55 +824,40 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
             continue
 
         quantity = _explicit_quantity(caption)
-        query = ""
-        candidates = []
-        search_queries = getattr(scene, "search_queries", None)
-        if isinstance(search_queries, list):
-            candidates.extend(str(q).strip() for q in search_queries if str(q).strip())
-        scene_query = str(getattr(scene, "query", "") or "").strip()
-        if scene_query:
-            candidates.insert(0, scene_query)
-
-        for candidate in candidates:
-            cleaned = _clean_query(candidate)
-            # Keep only reasonably compact concrete-looking queries. Long
-            # storyboard sentences are poor PNG searches.
-            if cleaned and 1 <= len(cleaned.split()) <= 5:
-                query = cleaned
-                break
+        query = _best_local_png_query(scene)
 
         if quantity:
-            key = ("qty:" + quantity.casefold())
+            key = "qty:" + quantity.casefold()
             if key not in seen:
-                anchor = quantity if quantity.casefold() in caption.casefold() else _fallback_scene_keyword(caption)
                 out.append({
                     "scene": index,
                     "type": "png_text" if query else "text",
                     "query": query,
-                    "anchor": anchor or quantity,
+                    "anchor": quantity,
                     "label": quantity,
                     "position": "right" if len(out) % 2 == 0 else "left",
                     "animation": ("fly", "drop", "pop")[len(out) % 3],
                     "size": "hero",
                     "duration": 1.0,
+                    "_local": True,
                 })
                 seen.add(key)
                 continue
 
-        keyword = _fallback_scene_keyword(caption)
-        if query and keyword:
+        if query:
             key = "q:" + query.casefold()
             if key not in seen:
                 out.append({
                     "scene": index,
                     "type": "png",
                     "query": query,
-                    "anchor": keyword,
+                    "anchor": "",
                     "label": "",
                     "position": "left" if len(out) % 2 else "right",
                     "animation": ("drop", "fly", "pop")[len(out) % 3],
                     "size": "large",
                     "duration": 0.95,
+                    "_local": True,
                 })
                 seen.add(key)
 
