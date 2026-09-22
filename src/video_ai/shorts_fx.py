@@ -332,6 +332,235 @@ Schema:
             flush=True,
         )
 
+    # Post-validation density repair.
+    #
+    # The first planning pass can suggest 6-8 ideas but several may disappear
+    # later because their anchor is invalid, the concept repeats, or Commons
+    # has no usable PNG. Count what ACTUALLY survived and fill the missing
+    # rhythm only after validation/material lookup.
+    if len(overlays) < min_target:
+        missing = min_target - len(overlays)
+        accepted_summary = [
+            {
+                "scene": int(effect["scene"]),
+                "type": effect.get("type"),
+                "query": effect.get("query"),
+                "anchor": effect.get("anchor"),
+                "start": effect.get("start"),
+            }
+            for effect in overlays
+        ]
+        accepted_scene_ids = {int(effect["scene"]) for effect in overlays}
+        remaining_rows = [
+            row for row in scene_rows
+            if int(row["scene"]) not in accepted_scene_ids
+        ]
+
+        if remaining_rows:
+            repair_prompt = f"""You are repairing an under-edited TikTok/YouTube Short.
+
+Only {len(overlays)} foreground accents survived validation, but this {duration:.1f}s video should have about {min_target} useful accents.
+
+Already accepted effects:
+{json.dumps(accepted_summary, ensure_ascii=False)}
+
+Unused scenes:
+{json.dumps(remaining_rows, ensure_ascii=False)}
+
+Return ONLY JSON with key effects.
+Give {missing + 2} candidates from UNUSED scenes, strongest first.
+
+IMPORTANT:
+- Prefer a concrete visible noun/person/object actually SPOKEN in the scene so it can become a PNG cutout.
+- query must be a short ENGLISH image-search phrase for that literal object.
+- anchor MUST be copied EXACTLY from the scene caption, 1-3 spoken words.
+- Do not repeat concepts already accepted.
+- If a scene has no concrete noun but has a strong explicit number/value/date, type may be text and label must be copied exactly.
+- Do not invent objects.
+- Vary animation between fly, drop and pop.
+- position: left/right/center.
+- size: large/hero.
+
+Schema:
+{{"effects":[
+  {{"scene":1,"type":"png","query":"shopping cart","anchor":"корзину","label":"","position":"left","animation":"drop","size":"large","duration":0.95}},
+  {{"scene":7,"type":"text","query":"","anchor":"50 процентов","label":"50 процентов","position":"center","animation":"pop","size":"hero","duration":0.8}}
+]}}
+"""
+            try:
+                repair_data = client._generate_json([{"text": repair_prompt}], temperature=0.10)
+                repair_items = (repair_data.get("effects") or []) if isinstance(repair_data, dict) else []
+            except Exception as exc:
+                print(f"[fx] post-validation fill unavailable: {exc}", flush=True)
+                repair_items = []
+
+            for item in repair_items:
+                if len(overlays) >= min_target or not isinstance(item, dict):
+                    break
+                try:
+                    scene_index = int(item.get("scene"))
+                except (TypeError, ValueError):
+                    continue
+                if scene_index < 0 or scene_index >= len(plan.scenes) or scene_index in used_scenes:
+                    continue
+
+                scene = plan.scenes[scene_index]
+                caption = scene.caption or ""
+                anchor = " ".join(str(item.get("anchor") or "").split())[:80]
+                if not anchor or anchor.casefold() not in caption.casefold():
+                    continue
+
+                anchor_start = _anchor_start(scene, anchor)
+                if anchor_start is None:
+                    # Exact substring is still grounded; use scene-relative timing.
+                    anchor_start = float(scene.start) + 0.12
+
+                if any(abs(anchor_start - old_start) < 0.65 for old_start in used_times):
+                    continue
+
+                effect_type = str(item.get("type") or "png").lower()
+                if effect_type not in {"png", "png_text", "text"}:
+                    effect_type = "png"
+
+                query = _clean_query(str(item.get("query") or ""))
+                label = " ".join(str(item.get("label") or "").split())[:28]
+                if effect_type in {"png_text", "text"}:
+                    if label and not _label_is_spoken(caption, label):
+                        label = ""
+                    if not label:
+                        label = _explicit_quantity(caption) or ""
+                    if effect_type == "text" and not label:
+                        # A grounded keyword card is acceptable as a last-resort
+                        # rhythm repair, but it must be exact spoken text.
+                        label = _short_anchor_label(anchor)
+                    if effect_type == "text" and not label:
+                        continue
+
+                concept = (query or label or anchor).casefold().strip()
+                if concept in used_concepts:
+                    continue
+
+                display_end = (
+                    float(plan.scenes[scene_index + 1].start)
+                    if scene_index + 1 < len(plan.scenes)
+                    else float(scene.end)
+                )
+                effect_duration = _clamp_float(item.get("duration"), 0.72, 1.20, 0.92)
+                start = max(float(scene.start), anchor_start - 0.02)
+                end = min(display_end, start + effect_duration)
+                if end - start < 0.42:
+                    continue
+
+                raw_position = str(item.get("position") or "").lower()
+                position = raw_position if raw_position in {"left", "right", "center"} else ("left" if len(overlays) % 2 else "right")
+                animation = str(item.get("animation") or "").lower()
+                if animation not in {"fly", "drop", "pop"}:
+                    animation = ("fly", "drop", "pop")[len(overlays) % 3]
+                if overlays and animation == overlays[-1].get("animation"):
+                    animation = {"fly": "drop", "drop": "pop", "pop": "fly"}[animation]
+                size = str(item.get("size") or "").lower()
+                if size not in {"large", "hero"}:
+                    size = "large"
+
+                target: Path | None = None
+                candidate = None
+                if effect_type in {"png", "png_text"} and query:
+                    target = out / f"overlay_{len(overlays):02d}.png"
+                    candidate = _find_png(query, target, client)
+
+                if effect_type in {"png", "png_text"} and candidate is None:
+                    if target is not None:
+                        target.unlink(missing_ok=True)
+                    # Do not lose the beat again. Fall back to a grounded,
+                    # short spoken keyword card only after PNG lookup failed.
+                    fallback_label = label or _short_anchor_label(anchor)
+                    if not fallback_label:
+                        continue
+                    effect_type = "text"
+                    label = fallback_label
+                    query = ""
+                    target = None
+                    position = "center"
+                    animation = "pop" if animation == "fly" else animation
+                    size = "large"
+
+                effect = {
+                    "scene": scene_index,
+                    "type": effect_type,
+                    "asset": str(target) if target is not None else "",
+                    "query": query,
+                    "anchor": anchor,
+                    "label": label,
+                    "position": position,
+                    "animation": animation,
+                    "size": size,
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                    "source": candidate.source if candidate is not None else "generated_text",
+                    "title": candidate.title if candidate is not None else label,
+                    "page_url": candidate.page_url if candidate is not None else "",
+                    "license": candidate.license if candidate is not None else "",
+                }
+                overlays.append(effect)
+                used_scenes.add(scene_index)
+                used_times.append(start)
+                used_concepts.add(concept)
+                print(
+                    f"[fx] density fill {len(overlays)}/{min_target}: scene={scene_index + 1} "
+                    f"type={effect_type} anchor={anchor!r} query={query!r}",
+                    flush=True,
+                )
+
+    # Absolute safety net: if Gemini still leaves the edit sparse, add a very
+    # small number of grounded keyword cards from UNUSED scenes. These are not
+    # invented words; every card is taken directly from narration.
+    if len(overlays) < min_target:
+        for scene_index, scene in enumerate(plan.scenes):
+            if len(overlays) >= min_target:
+                break
+            if scene_index in used_scenes:
+                continue
+            label = _fallback_scene_keyword(scene.caption or "")
+            if not label:
+                continue
+            start = max(float(scene.start) + 0.10, float(scene.start))
+            if any(abs(start - old_start) < 0.65 for old_start in used_times):
+                continue
+            display_end = (
+                float(plan.scenes[scene_index + 1].start)
+                if scene_index + 1 < len(plan.scenes)
+                else float(scene.end)
+            )
+            end = min(display_end, start + 0.78)
+            if end - start < 0.42:
+                continue
+            effect = {
+                "scene": scene_index,
+                "type": "text",
+                "asset": "",
+                "query": "",
+                "anchor": label,
+                "label": label.upper(),
+                "position": "center",
+                "animation": ("pop", "drop", "pop")[len(overlays) % 3],
+                "size": "large",
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "source": "narration_keyword",
+                "title": label,
+                "page_url": "",
+                "license": "",
+            }
+            overlays.append(effect)
+            used_scenes.add(scene_index)
+            used_times.append(start)
+            used_concepts.add(label.casefold())
+            print(
+                f"[fx] rhythm fallback {len(overlays)}/{min_target}: "
+                f"scene={scene_index + 1} label={label!r}",
+                flush=True,
+            )
+
     (out / "overlays.json").write_text(
         json.dumps({"effects": overlays, "overlays": overlays}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -469,6 +698,40 @@ def _explicit_quantity(caption: str) -> str | None:
         flags=re.IGNORECASE,
     )
     return " ".join(match.group(0).split()) if match else None
+
+def _fallback_scene_keyword(caption: str) -> str:
+    """Pick one grounded 1-2 word callout from narration as an emergency beat.
+
+    This is intentionally conservative and only exists so a 25 second Short
+    never collapses to one or two foreground accents because image retrieval
+    failed.
+    """
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9%$₴€]+", caption)
+    if not words:
+        return ""
+
+    stop = {
+        "это", "этот", "эта", "эти", "как", "что", "чтобы", "когда", "где",
+        "вот", "там", "тут", "уже", "ещё", "еще", "просто", "очень", "даже",
+        "если", "или", "для", "его", "она", "они", "оно", "тебя", "тебе",
+        "меня", "мне", "мы", "вы", "не", "ни", "на", "в", "во", "и", "а",
+        "но", "по", "из", "за", "до", "от", "с", "со", "к", "ко", "же",
+        "бы", "быть", "был", "была", "были", "есть", "the", "a", "an", "and",
+        "or", "to", "of", "in", "on", "for", "with", "this", "that", "it",
+    }
+
+    content = [
+        word for word in words
+        if word.casefold() not in stop and (len(word) >= 4 or any(ch.isdigit() for ch in word))
+    ]
+    if not content:
+        return ""
+
+    # Prefer explicit numbers/values, otherwise a longer content word.
+    numeric = [word for word in content if any(ch.isdigit() for ch in word)]
+    chosen = numeric[0] if numeric else max(content, key=len)
+    return chosen[:22]
+
 
 def _short_anchor_label(anchor: str) -> str:
     words = [w for w in anchor.strip().split() if w]
