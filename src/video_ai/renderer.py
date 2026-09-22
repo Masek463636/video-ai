@@ -13,7 +13,7 @@ from .models import Scene, ShotPlan, Word
 _MAX_CONTINUOUS_VISUAL_SECONDS = 2.85
 
 
-def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | None = None, captions: bool = True, crf: int = 20) -> Path:
+def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | None = None, captions: bool = True, crf: int = 20, editing_polish: bool = False) -> Path:
     _require("ffmpeg")
     _require("ffprobe")
     output = Path(output)
@@ -33,10 +33,12 @@ def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | No
         clips_dir.mkdir(parents=True, exist_ok=True)
         spans = _visual_spans(plan, audio_duration)
         print(f"[render] {len(plan.scenes)} subtitle scenes -> {len(spans)} continuous visual spans", flush=True)
+        if editing_polish:
+            print("[render] editing polish enabled: same assets and cut points, smoother motion + caption pop", flush=True)
         clips: list[Path] = []
         for index, (scene, start, end) in enumerate(spans):
             clip = clips_dir / f"span_{index:03d}.mp4"
-            _render_scene(scene, end - start, plan, clip, crf=crf)
+            _render_scene(scene, end - start, plan, clip, crf=crf, editing_polish=editing_polish)
             clips.append(clip)
 
         concat_file = root / "concat.txt"
@@ -49,7 +51,7 @@ def render_plan(plan: ShotPlan, output: str | Path, *, work_dir: str | Path | No
         final_filter: list[str] = []
         if captions:
             ass = root / "captions.ass"
-            _write_ass(plan, ass)
+            _write_ass(plan, ass, editing_polish=editing_polish)
             final_filter = ["-vf", f"ass='{_filter_path(ass)}'"]
         _run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -115,7 +117,7 @@ def _same_visual(a: Scene, b: Scene) -> bool:
     return True
 
 
-def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
+def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *, crf: int, editing_polish: bool = False) -> None:
     duration = max(0.05, duration)
     common = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p", "-r", str(plan.fps), "-t", f"{duration:.3f}", str(output)]
 
@@ -125,7 +127,7 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
             print(f"[render] skipped corrupt image: {asset.name}", flush=True)
             _render_safe_background(duration, plan, output, crf=crf)
             return
-        _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", str(plan.fps), "-i", str(asset), "-vf", _image_filter(scene, plan, duration), *common])
+        _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", str(plan.fps), "-i", str(asset), "-vf", _image_filter(scene, plan, duration, editing_polish=editing_polish), *common])
         return
 
     if scene.asset_kind == "video" and scene.asset and Path(scene.asset).exists():
@@ -145,19 +147,27 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
                     vf = f"{vf},tpad=stop_mode=clone:stop_duration={duration:.3f}"
             _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(asset), "-vf", vf, *common])
             return
-        _render_reference_video(asset, duration, plan, output, crf=crf)
+        _render_reference_video(asset, scene, duration, plan, output, crf=crf, editing_polish=editing_polish)
         return
 
     _render_safe_background(duration, plan, output, crf=crf)
 
 
-def _render_reference_video(asset: Path, duration: float, plan: ShotPlan, output: Path, *, crf: int) -> None:
-    """Render stock B-roll full-bleed like native Shorts/TikTok footage."""
+def _render_reference_video(asset: Path, scene: Scene, duration: float, plan: ShotPlan, output: Path, *, crf: int, editing_polish: bool = False) -> None:
+    """Render stock B-roll full-bleed.
+
+    Editing polish deliberately changes only framing/motion. The selected asset
+    and storyboard cut points stay untouched so the same materialized plan can
+    be compared A/B.
+    """
     w, h, fps = plan.width, plan.height, plan.fps
-    vf = (
-        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
-        f"crop={w}:{h},fps={fps}"
-    )
+    if editing_polish:
+        vf = _editorial_video_filter(scene, plan, duration)
+    else:
+        vf = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},fps={fps}"
+        )
     _run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-stream_loop", "-1", "-i", str(asset),
@@ -201,7 +211,7 @@ def _silent_decode_probe(path: Path) -> bool:
         return False
 
 
-def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
+def _image_filter(scene: Scene, plan: ShotPlan, duration: float, *, editing_polish: bool = False) -> str:
     w, h, fps = plan.width, plan.height, plan.fps
     render_scale = 1.5
     rw = int(math.ceil(w * render_scale / 2) * 2)
@@ -228,24 +238,72 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
 
     if preset in {"micro_push", "slow_push", "dramatic_push", "pull_back"}:
         if preset == "micro_push":
-            start, end = 1.000, 1.020
+            start, end = 1.000, 1.018 if editing_polish else 1.020
         elif preset == "slow_push":
-            start, end = 1.000, 1.050
+            if editing_polish:
+                end = 1.026 if duration < 1.45 else 1.040 if duration < 2.45 else 1.052
+                start = 1.000
+            else:
+                start, end = 1.000, 1.050
         elif preset == "dramatic_push":
-            start, end = 1.000, 1.080
+            start, end = 1.000, 1.065 if editing_polish else 1.080
         else:
-            start, end = 1.065, 1.000
+            start, end = (1.050, 1.000) if editing_polish else (1.065, 1.000)
         delta = end - start
         zoom = f"{start:.5f}+({delta:.5f})*{ease_on}"
         return base + "," + f"zoompan=z='{zoom}':x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':d=1:s={rw}x{rh}:fps={fps}" + finish
 
     if preset in {"reveal_left", "reveal_right"}:
         direction = "1" if preset == "reveal_left" else "-1"
-        offset = f"({direction})*(iw-ow)*0.28*(1-{ease_n})"
+        travel = 0.18 if editing_polish else 0.28
+        offset = f"({direction})*(iw-ow)*{travel:.2f}*(1-{ease_n})"
         x_pan = f"max(0,min(iw-ow,{fx:.5f}*iw-ow/2+{offset}))"
         return base + f",crop={rw}:{rh}:x='{x_pan}':y='{_focus_expr('ih','oh',fy)}'" + finish
 
     return base + f",crop={rw}:{rh}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}'" + finish
+
+
+def _editorial_video_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
+    """Subtle editor-style motion for already selected stock footage.
+
+    Motion stays intentionally small because the source video already moves.
+    High-energy tones get a short smooth settle; ordinary footage receives a
+    restrained push/pull so static full-bleed crops do not feel machine-made.
+    """
+    w, h, fps = plan.width, plan.height, plan.fps
+    fx = _clamp_focus(scene.focus_x)
+    fy = _clamp_focus(scene.focus_y)
+    base = (
+        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}'"
+    )
+    frames = max(2, int(math.ceil(duration * fps)))
+    denominator = max(1, frames - 1)
+    t = f"min(max(n/{denominator},0),1)"
+    ease = _ae_ease_expr(t, 2.2)
+    preset = _resolved_preset(scene)
+
+    if preset == "dramatic_push":
+        start, end = 1.000, 1.045
+    elif preset == "pull_back":
+        start, end = 1.028, 1.000
+    elif preset == "slow_push":
+        start, end = 1.000, 1.026
+    elif preset == "micro_push":
+        start, end = 1.000, 1.016
+    elif scene.tone in {"shocking", "violent", "tense", "absurd", "funny"}:
+        start, end = 1.030, 1.006
+    else:
+        seed = sum(ord(ch) for ch in (scene.caption or scene.query or ""))
+        start, end = ((1.000, 1.016) if seed % 2 == 0 else (1.016, 1.000))
+
+    delta = end - start
+    scale = f"{start:.5f}+({delta:.5f})*{ease}"
+    return (
+        base
+        + f",scale='trunc(iw*({scale})/2)*2':'trunc(ih*({scale})/2)*2':eval=frame"
+        + f",crop={w}:{h}:x='(iw-ow)/2':y='(ih-oh)/2',fps={fps}"
+    )
 
 
 def _video_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
@@ -297,7 +355,7 @@ def _focus_expr(inner: str, outer: str, focus: float) -> str:
     return f"max(0,min({inner}-{outer},{focus:.5f}*{inner}-{outer}/2))"
 
 
-def _write_ass(plan: ShotPlan, path: Path) -> None:
+def _write_ass(plan: ShotPlan, path: Path, *, editing_polish: bool = False) -> None:
     # Reference-style Shorts subtitles: very large Impact text around the
     # lower-middle of the frame, with a heavy black stroke.
     font_size = max(96, int(plan.width * 0.118))
@@ -323,7 +381,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
         pages = _caption_pages(scene.caption, scene.start, scene.end, timed_words=scene.caption_words)
         for page_start, page_end, text in pages:
             events.append(
-                f"Dialogue: 0,{_ass_time(page_start)},{_ass_time(page_end)},Default,,0,0,0,,{_ass_text(text)}"
+                f"Dialogue: 0,{_ass_time(page_start)},{_ass_time(page_end)},Default,,0,0,0,,{_ass_text(text, editing_polish=editing_polish)}"
             )
     path.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")
 
@@ -425,11 +483,15 @@ def _caption_group_weight(group: list[str]) -> int:
     return sum(max(2, len(_caption_token(word))) for word in group)
 
 
-def _ass_text(text: str) -> str:
+def _ass_text(text: str, *, editing_polish: bool = False) -> str:
     safe = text.replace("{", "(").replace("}", ")")
-    # Reference uses near-hard caption swaps rather than floaty fades.
+    if editing_polish:
+        # Small 70ms scale-up gives the caption a manual-edit punch without
+        # bouncing or lingering after the spoken word.
+        start_scale = 92 if len(text.split()) == 1 else 95
+        return rf"{\\fscx{start_scale}\\fscy{start_scale}\\t(0,70,\\fscx100\\fscy100)\\fad(4,8)}" + safe
+    # Stable/test45 behaviour remains the default.
     return r"{\\fad(8,12)}" + safe
-
 
 def _ass_time(seconds: float) -> str:
     cs = int(round(max(0.0, seconds) * 100))
