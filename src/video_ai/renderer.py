@@ -67,7 +67,7 @@ def render_plan(
         final_filter: list[str] = []
         if captions:
             ass = root / "captions.ass"
-            _write_ass(plan, ass, editing_polish=editing_polish)
+            _write_ass(plan, ass, editing_polish=editing_polish, overlays=overlays)
             final_filter = ["-vf", f"ass='{_filter_path(ass)}'"]
         final_cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -270,28 +270,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
             f"enable='between(t,{start:.3f},{end:.3f})':shortest=1{nxt}"
         )
 
-        label = str(item.get("label") or "").strip()
-        if label:
-            labelled = f"[vl{index}]"
-            font_size = max(54, int(plan.width * (0.073 if size == "hero" else 0.062)))
-            if side == "left":
-                text_x = 80
-            elif side == "right":
-                text_x = f"w-tw-80"
-            else:
-                text_x = "(w-tw)/2"
-            text_y = int(plan.height * (0.56 if size == "hero" else 0.52))
-            safe_label = label.replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'")
-            filters.append(
-                f"{nxt}drawtext=text='{safe_label}':"
-                f"font='Arial Black':fontsize={font_size}:fontcolor=white:"
-                f"borderw=7:bordercolor=black:"
-                f"x='{text_x}':y={text_y}:"
-                f"enable='between(t,{start:.3f},{end:.3f})'{labelled}"
-            )
-            current = labelled
-        else:
-            current = nxt
+        current = nxt
 
     # Add simple generated sound accents so fly-ins and instant pops are audible
     # without requiring an external SFX library.
@@ -513,7 +492,13 @@ def _focus_expr(inner: str, outer: str, focus: float) -> str:
     return f"max(0,min({inner}-{outer},{focus:.5f}*{inner}-{outer}/2))"
 
 
-def _write_ass(plan: ShotPlan, path: Path, *, editing_polish: bool = False) -> None:
+def _write_ass(
+    plan: ShotPlan,
+    path: Path,
+    *,
+    editing_polish: bool = False,
+    overlays: list[dict] | None = None,
+) -> None:
     # Reference-style Shorts subtitles: very large Impact text around the
     # lower-middle of the frame, with a heavy black stroke.
     font_size = max(96, int(plan.width * 0.118))
@@ -541,6 +526,29 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
             events.append(
                 f"Dialogue: 0,{_ass_time(page_start)},{_ass_time(page_end)},Default,,0,0,0,,{_ass_text(text, editing_polish=editing_polish)}"
             )
+    # Overlay value labels (e.g. "930 мл") are rendered with libass instead
+    # of FFmpeg drawtext. This avoids Windows fontconfig failures while keeping
+    # the same bold Shorts look used by the normal captions.
+    for index, item in enumerate(overlays or []):
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        start = float(item.get("start", 0.0))
+        end = float(item.get("end", start))
+        if end <= start:
+            continue
+        side = str(item.get("position") or "right")
+        size = str(item.get("size") or "large")
+        x = int(plan.width * (0.23 if side == "left" else 0.77 if side == "right" else 0.50))
+        y = int(plan.height * (0.17 if size == "hero" else 0.22))
+        fs = max(62, int(plan.width * (0.080 if size == "hero" else 0.068)))
+        safe = _ass_text_plain(label)
+        events.append(
+            f"Dialogue: 2,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,"
+            + r"{\an5\pos(" + str(x) + "," + str(y) + r")\fs" + str(fs)
+            + r"\bord8\shad0}" + safe
+        )
+
     path.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")
 
 
@@ -639,6 +647,10 @@ def _caption_group_weight(group: list[str]) -> int:
     # are not stored in the ShotPlan. Give each word a tiny base weight so short
     # connectors do not flash too quickly.
     return sum(max(2, len(_caption_token(word))) for word in group)
+
+
+def _ass_text_plain(text: str) -> str:
+    return text.replace("{", "(").replace("}", ")").replace("\\", r"\\")
 
 
 def _ass_text(text: str, *, editing_polish: bool = False) -> str:
