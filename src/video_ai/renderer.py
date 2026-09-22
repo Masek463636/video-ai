@@ -489,7 +489,12 @@ def _ass_text(text: str, *, editing_polish: bool = False) -> str:
         # Small 70ms scale-up gives the caption a manual-edit punch without
         # bouncing or lingering after the spoken word.
         start_scale = 92 if len(text.split()) == 1 else 95
-        return rf"{\\fscx{start_scale}\\fscy{start_scale}\\t(0,70,\\fscx100\\fscy100)\\fad(4,8)}" + safe
+        return (
+            "{\\\\fscx" + str(start_scale)
+            + "\\\\fscy" + str(start_scale)
+            + "\\\\t(0,70,\\\\fscx100\\\\fscy100)\\\\fad(4,8)}"
+            + safe
+        )
     # Stable/test45 behaviour remains the default.
     return r"{\\fad(8,12)}" + safe
 
