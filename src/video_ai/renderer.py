@@ -226,21 +226,30 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
     base_duration = max(0.05, _probe_duration(base))
     valid = [
         item for item in overlays
-        if item.get("asset") and Path(str(item["asset"])).exists()
-        and float(item.get("end", 0)) > float(item.get("start", 0))
+        if float(item.get("end", 0)) > float(item.get("start", 0))
+        and (
+            str(item.get("type") or "png") == "text"
+            or (item.get("asset") and Path(str(item["asset"])).exists())
+        )
     ]
     if not valid:
         shutil.copyfile(base, output)
         return
 
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(base)]
-    for item in valid:
+    input_index_by_effect: dict[int, int] = {}
+    next_input = 1
+    for effect_index, item in enumerate(valid):
+        if str(item.get("type") or "png") == "text":
+            continue
+        input_index_by_effect[effect_index] = next_input
         cmd += [
             "-loop", "1",
             "-framerate", str(plan.fps),
             "-t", f"{base_duration:.3f}",
             "-i", str(item["asset"]),
         ]
+        next_input += 1
 
     filters: list[str] = [
         f"[0:v]trim=duration={base_duration:.3f},setpts=PTS-STARTPTS[basev]"
@@ -248,6 +257,10 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
     current = "[basev]"
 
     for index, item in enumerate(valid):
+        effect_type = str(item.get("type") or "png")
+        if effect_type == "text":
+            continue
+
         start = max(0.0, float(item["start"]))
         end = min(base_duration, float(item["end"]))
         side = str(item.get("position") or "right")
@@ -261,8 +274,9 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
 
         ov = f"[ov{index}]"
         nxt = f"[v{index}]"
+        input_index = input_index_by_effect[index]
         filters.append(
-            f"[{index + 1}:v]"
+            f"[{input_index}:v]"
             f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,"
             f"scale=w='min({width},iw)':h='min({max_h},ih)':force_original_aspect_ratio=decrease,"
             f"format=rgba{ov}"
@@ -275,6 +289,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         else:
             settled_x = "main_w-overlay_w-70"
 
+        y_expr = str(target_y)
         if animation == "fly":
             settle = start + 0.16
             if side == "left":
@@ -290,12 +305,20 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
                 )
             else:
                 x = settled_x
+        elif animation == "drop":
+            x = settled_x
+            settle = start + 0.15
+            y_expr = (
+                f"if(lt(t,{settle:.3f}),"
+                f"-overlay_h+(t-{start:.3f})/0.15*({target_y}+overlay_h),"
+                f"{target_y})"
+            )
         else:
             x = settled_x
 
         filters.append(
             f"{current}{ov}overlay="
-            f"x='{x}':y={target_y}:"
+            f"x='{x}':y='{y_expr}':"
             f"enable='between(t,{start:.3f},{end:.3f})':"
             f"eof_action=pass:repeatlast=1:shortest=0{nxt}"
         )
@@ -609,6 +632,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     # of FFmpeg drawtext. This avoids Windows fontconfig failures while keeping
     # the same bold Shorts look used by the normal captions.
     for index, item in enumerate(overlays or []):
+        effect_type = str(item.get("type") or "png")
         label = str(item.get("label") or "").strip()
         if not label:
             continue
@@ -616,8 +640,26 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
         end = float(item.get("end", start))
         if end <= start:
             continue
+
         side = str(item.get("position") or "right")
         size = str(item.get("size") or "large")
+        animation = str(item.get("animation") or "pop")
+
+        # Text-only effects should read like deliberate Shorts callouts.
+        if effect_type == "text":
+            x = int(plan.width * 0.50)
+            y = int(plan.height * 0.30)
+            fs = max(86, int(plan.width * (0.115 if size == "hero" else 0.095)))
+            start_scale = 76 if animation == "pop" else 88
+            safe = _ass_text_plain(label)
+            events.append(
+                f"Dialogue: 3,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,"
+                + r"{\an5\pos(" + str(x) + "," + str(y) + r")\fs" + str(fs)
+                + r"\bord10\shad0\fscx" + str(start_scale) + r"\fscy" + str(start_scale)
+                + r"\t(0,90,\fscx100\fscy100)\fad(2,8)}" + safe
+            )
+            continue
+
         x = int(plan.width * (0.23 if side == "left" else 0.77 if side == "right" else 0.50))
         y = int(plan.height * (0.17 if size == "hero" else 0.22))
         fs = max(62, int(plan.width * (0.080 if size == "hero" else 0.068)))
