@@ -383,6 +383,7 @@ def main() -> None:
     p_render.add_argument("--no-captions", action="store_true")
     p_render.add_argument("--crf", type=int, default=20)
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
+    p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
     p_make.add_argument("-o", "--output", required=True)
@@ -455,7 +456,7 @@ def main() -> None:
         plan = load_shot_plan(args.plan)
         if args.transcript:
             attach_caption_timings(plan, load_transcript(args.transcript))
-        output = render_plan(plan, args.output, work_dir=args.work_dir, captions=not args.no_captions, crf=args.crf)
+        output = render_plan(plan, args.output, work_dir=args.work_dir, captions=not args.no_captions, crf=args.crf, editing_polish=args.editing_polish)
         print(json.dumps({"ok": True, "output": str(output)}, ensure_ascii=False, indent=2))
         return
 
