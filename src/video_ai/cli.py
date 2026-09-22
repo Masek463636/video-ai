@@ -16,6 +16,7 @@ from .probe import probe
 from .qc import failed_scene_indexes, inspect_plan, save_qc
 from .renderer import render_plan
 from .reference_style import apply_reference_style
+from .shorts_fx import build_shorts_overlays
 from .transcript import attach_caption_timings, load_transcript, save_transcript, transcribe_local
 
 
@@ -384,6 +385,8 @@ def main() -> None:
     p_render.add_argument("--crf", type=int, default=20)
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
+    p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
+    p_render.add_argument("--max-overlays", type=int, default=4, help="Maximum PNG pop-ins when --shorts-fx is enabled")
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
     p_make.add_argument("-o", "--output", required=True)
@@ -456,8 +459,27 @@ def main() -> None:
         plan = load_shot_plan(args.plan)
         if args.transcript:
             attach_caption_timings(plan, load_transcript(args.transcript))
-        output = render_plan(plan, args.output, work_dir=args.work_dir, captions=not args.no_captions, crf=args.crf, editing_polish=args.editing_polish)
-        print(json.dumps({"ok": True, "output": str(output)}, ensure_ascii=False, indent=2))
+        render_work = Path(args.work_dir) if args.work_dir else Path(args.output).with_suffix("").with_name(Path(args.output).stem + "-work")
+        overlays = (
+            build_shorts_overlays(plan, render_work / "shorts_fx", max_overlays=max(0, args.max_overlays))
+            if args.shorts_fx else []
+        )
+        output = render_plan(
+            plan,
+            args.output,
+            work_dir=args.work_dir,
+            captions=not args.no_captions,
+            crf=args.crf,
+            editing_polish=args.editing_polish,
+            overlays=overlays,
+        )
+        print(json.dumps({
+            "ok": True,
+            "output": str(output),
+            "editing_polish": bool(args.editing_polish),
+            "shorts_fx": bool(args.shorts_fx),
+            "overlays": len(overlays),
+        }, ensure_ascii=False, indent=2))
         return
 
     if args.command in {"make", "create"}:
