@@ -48,6 +48,7 @@ def build_shorts_overlays(
     duration = max((float(scene.end) for scene in plan.scenes), default=0.0)
     auto_budget = 3 if duration <= 12 else 5 if duration <= 20 else 8 if duration <= 35 else 10
     budget = min(max_overlays, auto_budget) if max_overlays > 0 else auto_budget
+    min_target = min(budget, 3 if duration <= 12 else 4 if duration <= 20 else 6 if duration <= 35 else 8)
 
     prompt = f"""You are the effects editor for a fast TikTok/YouTube Short.
 
@@ -56,7 +57,7 @@ The primary B-roll is already selected. DO NOT replace it. Your job is to add on
 Scenes:
 {json.dumps(scene_rows, ensure_ascii=False)}
 
-Return JSON with key effects. Choose at most {budget} effects total.
+Return JSON with key effects. Aim for {min_target}-{budget} useful effects total when the narration gives enough concrete hooks. Do not stop at one or two effects unless the script truly has no more concrete or numeric moments.
 
 ALLOWED EFFECT TYPES:
 1. "png" — a concrete object/person cutout only.
@@ -110,6 +111,46 @@ Return ONLY JSON:
     raw = (data.get("effects") or data.get("overlays") or []) if isinstance(data, dict) else []
     if not isinstance(raw, list):
         return []
+
+    # Gemini sometimes under-edits and returns only 1-2 accents. Give it one
+    # bounded second pass that can only fill unused scenes; this is much safer
+    # than blindly forcing random effects.
+    if len(raw) < min_target:
+        used_scene_ids = {
+            int(item.get("scene"))
+            for item in raw
+            if isinstance(item, dict) and str(item.get("scene", "")).lstrip("-").isdigit()
+        }
+        remaining = [row for row in scene_rows if int(row["scene"]) not in used_scene_ids]
+        needed = max(0, min_target - len(raw))
+        if remaining and needed:
+            fill_prompt = f"""You are filling missing foreground accents for a TikTok/YouTube Short.
+
+Already accepted proposals:
+{json.dumps(raw, ensure_ascii=False)}
+
+Unused scenes:
+{json.dumps(remaining, ensure_ascii=False)}
+
+Return ONLY JSON with key effects. Add up to {needed + 2} NEW effects from UNUSED scenes, aiming to fill at least {needed} when the words genuinely support it.
+
+Use the same effect types: png, png_text, text.
+- Prefer explicit concrete nouns, people, physical objects, food, money, devices, quantities, dates and percentages.
+- text must quote a short value/word that is actually spoken.
+- png/png_text query must be a short ENGLISH search phrase.
+- Do not repeat an already proposed concept.
+- Avoid abstract filler.
+
+Schema:
+{{"effects":[{{"scene":4,"type":"png","query":"shopping basket","anchor":"корзина","label":"","position":"left","animation":"drop","size":"large","duration":0.95}}]}}
+"""
+            try:
+                extra = client._generate_json([{"text": fill_prompt}], temperature=0.12)
+                extra_raw = (extra.get("effects") or []) if isinstance(extra, dict) else []
+                if isinstance(extra_raw, list):
+                    raw.extend(item for item in extra_raw if isinstance(item, dict))
+            except Exception as exc:
+                print(f"[fx] fill pass unavailable: {exc}", flush=True)
 
     # Gemini may nominate the same object several times (e.g. milk, 930 ml,
     # packaging). Keep one strong insert per concrete concept, preferring the
@@ -245,8 +286,23 @@ Return ONLY JSON:
                     animation = "pop" if animation == "fly" else animation
                     size = "hero"
                 else:
-                    print(f"[fx] no verified PNG insert found for: {query}", flush=True)
-                    continue
+                    # Better than silently losing the beat: show the exact
+                    # spoken anchor as a short callout. This is still grounded
+                    # in narration and gives Shorts rhythm even when Commons
+                    # has no usable transparent cutout.
+                    fallback_label = _short_anchor_label(anchor)
+                    if fallback_label:
+                        print(f"[fx] PNG unavailable -> text fallback: {fallback_label!r}", flush=True)
+                        effect_type = "text"
+                        query = ""
+                        label = fallback_label
+                        target = None
+                        position = "center"
+                        animation = "pop" if animation == "fly" else animation
+                        size = "large"
+                    else:
+                        print(f"[fx] no verified PNG insert found for: {query}", flush=True)
+                        continue
 
         overlay = {
             "scene": scene_index,
@@ -284,11 +340,7 @@ Return ONLY JSON:
 
 
 def _find_png(query: str, target: Path, client):
-    """Download the first Gemini-verified PNG candidate.
-
-    Commons search alone can return technically matching but visually useless
-    diagrams. A small visual judge pass keeps inserts literal enough for Shorts.
-    """
+    """Choose the best visually verified PNG candidate, not the first acceptable one."""
     searches = [
         f"{query} transparent png",
         f"{query} isolated png",
@@ -296,32 +348,35 @@ def _find_png(query: str, target: Path, client):
         query,
     ]
     tested = 0
+    scored: list[tuple[float, Any, Path]] = []
+
     for search in searches:
         try:
-            candidates = search_commons(search, limit=20)
+            candidates = search_commons(search, limit=24)
         except Exception:
             continue
         pngs = [
-            c for c in candidates
-            if c.kind == "image"
-            and c.mime == "image/png"
-            and c.download_url
-            and c.width >= 180
-            and c.height >= 180
+            cand for cand in candidates
+            if cand.kind == "image"
+            and cand.mime == "image/png"
+            and cand.download_url
+            and cand.width >= 220
+            and cand.height >= 220
         ]
         if not pngs:
             continue
+
         tokens = set(_tokens(query))
         pngs.sort(
             key=lambda cand: (
                 sum(1 for token in tokens if token in (cand.title + " " + cand.description).casefold()),
                 1 if "transparent" in (cand.title + " " + cand.description).casefold() else 0,
-                min(cand.width, 2200) * min(cand.height, 2200),
+                min(cand.width, 2400) * min(cand.height, 2400),
             ),
             reverse=True,
         )
 
-        for candidate in pngs[:5]:
+        for candidate in pngs[:6]:
             tested += 1
             preview = target.with_name(target.stem + f"_candidate_{tested}.png")
             try:
@@ -330,6 +385,8 @@ def _find_png(query: str, target: Path, client):
                 preview.unlink(missing_ok=True)
                 continue
 
+            score = 45.0
+            quality = 45.0
             accepted = True
             try:
                 probe_scene = Scene(
@@ -337,7 +394,7 @@ def _find_png(query: str, target: Path, client):
                     end=1.0,
                     query=query,
                     caption=query,
-                    visual_description=f"isolated clear cutout of {query}",
+                    visual_description=f"single clear isolated cutout of {query}",
                     visual_mode="image",
                     source_mode="generic_image",
                     motion_preset="none",
@@ -350,21 +407,38 @@ def _find_png(query: str, target: Path, client):
                     match_level="exact",
                 )
                 if judgement is not None:
-                    accepted = bool(judgement.accept and judgement.score >= 55 and judgement.quality_score >= 42)
+                    score = float(judgement.score)
+                    quality = float(judgement.quality_score)
+                    accepted = bool(judgement.accept and score >= 50 and quality >= 44)
             except Exception:
                 accepted = True
 
             if accepted:
-                preview.replace(target)
-                for stale in target.parent.glob(target.stem + "_candidate_*.png"):
-                    stale.unlink(missing_ok=True)
-                return candidate
-            preview.unlink(missing_ok=True)
+                # Prefer relevance first, then visual quality. Evaluate several
+                # candidates so a mediocre first hit does not win by accident.
+                rank = score * 0.68 + quality * 0.32
+                scored.append((rank, candidate, preview))
+            else:
+                preview.unlink(missing_ok=True)
 
+            if len(scored) >= 3:
+                break
+        if len(scored) >= 3:
+            break
+
+    if not scored:
+        for stale in target.parent.glob(target.stem + "_candidate_*.png"):
+            stale.unlink(missing_ok=True)
+        return None
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    _, best_candidate, best_preview = scored[0]
+    best_preview.replace(target)
+    for _, _, preview in scored[1:]:
+        preview.unlink(missing_ok=True)
     for stale in target.parent.glob(target.stem + "_candidate_*.png"):
         stale.unlink(missing_ok=True)
-    return None
-
+    return best_candidate
 
 def _anchor_start(scene: Scene, anchor: str) -> float | None:
     wanted = _tokens(anchor)
@@ -395,6 +469,17 @@ def _explicit_quantity(caption: str) -> str | None:
         flags=re.IGNORECASE,
     )
     return " ".join(match.group(0).split()) if match else None
+
+def _short_anchor_label(anchor: str) -> str:
+    words = [w for w in anchor.strip().split() if w]
+    if not words or len(words) > 3:
+        return ""
+    label = " ".join(words)
+    if len(label) > 22:
+        return ""
+    # Uppercase Cyrillic/Latin naturally; preserve numbers and units.
+    return label.upper()
+
 
 def _clean_query(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9 '\-]", " ", value)
