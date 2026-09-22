@@ -519,19 +519,23 @@ Schema:
                     flush=True,
                 )
 
-    # Absolute safety net: if Gemini still leaves the edit sparse, add a very
-    # small number of grounded keyword cards from UNUSED scenes. These are not
-    # invented words; every card is taken directly from narration.
+    # Absolute safety net: fill remaining rhythm locally from the storyboard.
+    #
+    # Never flash arbitrary verbs/adverbs just to hit a count. Prefer a concrete
+    # PNG query already present in the scene plan. Text-only fallback is reserved
+    # for explicit spoken quantities/values.
     if len(overlays) < min_target:
         for scene_index, scene in enumerate(plan.scenes):
             if len(overlays) >= min_target:
                 break
             if scene_index in used_scenes:
                 continue
-            label = _fallback_scene_keyword(scene.caption or "")
-            if not label:
-                continue
-            start = max(float(scene.start) + 0.10, float(scene.start))
+
+            caption = scene.caption or ""
+            quantity = _explicit_quantity(caption)
+            query = _best_local_png_query(scene)
+
+            start = max(float(scene.start) + 0.12, float(scene.start))
             if any(abs(start - old_start) < 0.65 for old_start in used_times):
                 continue
             display_end = (
@@ -539,35 +543,84 @@ Schema:
                 if scene_index + 1 < len(plan.scenes)
                 else float(scene.end)
             )
-            end = min(display_end, start + 0.78)
+            end = min(display_end, start + 0.90)
             if end - start < 0.42:
                 continue
-            effect = {
-                "scene": scene_index,
-                "type": "text",
-                "asset": "",
-                "query": "",
-                "anchor": label,
-                "label": label.upper(),
-                "position": "center",
-                "animation": ("pop", "drop", "pop")[len(overlays) % 3],
-                "size": "large",
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "source": "narration_keyword",
-                "title": label,
-                "page_url": "",
-                "license": "",
-            }
-            overlays.append(effect)
-            used_scenes.add(scene_index)
-            used_times.append(start)
-            used_concepts.add(label.casefold())
-            print(
-                f"[fx] rhythm fallback {len(overlays)}/{min_target}: "
-                f"scene={scene_index + 1} label={label!r}",
-                flush=True,
-            )
+
+            # First choice: a concrete PNG from the existing storyboard query.
+            if query:
+                concept = query.casefold()
+                if concept not in used_concepts:
+                    target = out / f"overlay_{len(overlays):02d}.png"
+                    candidate = _find_png(query, target, client)
+                    if candidate is not None:
+                        effect = {
+                            "scene": scene_index,
+                            "type": "png_text" if quantity else "png",
+                            "asset": str(target),
+                            "query": query,
+                            "anchor": quantity or "",
+                            "label": quantity or "",
+                            "position": "left" if len(overlays) % 2 else "right",
+                            "animation": ("fly", "drop", "pop")[len(overlays) % 3],
+                            "size": "hero" if quantity else "large",
+                            "start": round(start, 3),
+                            "end": round(end, 3),
+                            "source": candidate.source,
+                            "title": candidate.title,
+                            "page_url": candidate.page_url,
+                            "license": candidate.license,
+                        }
+                        overlays.append(effect)
+                        used_scenes.add(scene_index)
+                        used_times.append(start)
+                        used_concepts.add(concept)
+                        print(
+                            f"[fx] local visual fill {len(overlays)}/{min_target}: "
+                            f"scene={scene_index + 1} query={query!r}"
+                            + (f" label={quantity!r}" if quantity else ""),
+                            flush=True,
+                        )
+                        continue
+                    target.unlink(missing_ok=True)
+
+            # Second choice: only a factual value that is literally spoken.
+            if quantity:
+                concept = ("qty:" + quantity.casefold())
+                if concept not in used_concepts:
+                    effect = {
+                        "scene": scene_index,
+                        "type": "text",
+                        "asset": "",
+                        "query": "",
+                        "anchor": quantity,
+                        "label": quantity,
+                        "position": "center",
+                        "animation": "pop",
+                        "size": "hero",
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "source": "spoken_quantity",
+                        "title": quantity,
+                        "page_url": "",
+                        "license": "",
+                    }
+                    overlays.append(effect)
+                    used_scenes.add(scene_index)
+                    used_times.append(start)
+                    used_concepts.add(concept)
+                    print(
+                        f"[fx] quantity fill {len(overlays)}/{min_target}: "
+                        f"scene={scene_index + 1} label={quantity!r}",
+                        flush=True,
+                    )
+
+    if len(overlays) < min_target:
+        print(
+            f"[fx] density stopped at {len(overlays)}/{min_target}: "
+            "no more grounded visual/value inserts found",
+            flush=True,
+        )
 
     (out / "overlays.json").write_text(
         json.dumps({"effects": overlays, "overlays": overlays}, ensure_ascii=False, indent=2),
@@ -706,6 +759,52 @@ def _explicit_quantity(caption: str) -> str | None:
         flags=re.IGNORECASE,
     )
     return " ".join(match.group(0).split()) if match else None
+
+def _best_local_png_query(scene: Scene) -> str:
+    """Choose a compact existing storyboard query suitable for a foreground PNG."""
+    candidates: list[str] = []
+
+    scene_query = str(getattr(scene, "query", "") or "").strip()
+    if scene_query:
+        candidates.append(scene_query)
+
+    search_queries = getattr(scene, "search_queries", None)
+    if isinstance(search_queries, list):
+        candidates.extend(str(value).strip() for value in search_queries if str(value).strip())
+
+    # Required entities are often better foreground subjects than a full B-roll
+    # query, provided they are already in English/ASCII.
+    entities = getattr(scene, "required_entities", None)
+    if isinstance(entities, list):
+        candidates.extend(str(value).strip() for value in entities if str(value).strip())
+
+    seen: set[str] = set()
+    for value in candidates:
+        cleaned = _clean_query(value)
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        words = cleaned.split()
+        if not (1 <= len(words) <= 5):
+            continue
+
+        # Reject obvious full-scene/context searches that make poor cutouts.
+        lowered = key
+        bad = {
+            "supermarket aisle", "grocery store aisle", "shopping scene",
+            "historical archive", "street scene", "crowd scene",
+            "interior", "exterior", "background", "wide shot",
+        }
+        if lowered in bad:
+            continue
+        return cleaned
+
+    return ""
+
 
 def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]]:
     """Grounded no-Gemini fallback so Shorts FX never collapses to zero.
