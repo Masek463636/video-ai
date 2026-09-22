@@ -83,6 +83,42 @@ Schema:
     if not isinstance(raw, list):
         return []
 
+    # Gemini may nominate the same object several times (e.g. milk, 930 ml,
+    # packaging). Keep one strong insert per concrete concept, preferring the
+    # occurrence that carries an explicit spoken quantity/label.
+    best_by_query: dict[str, dict[str, Any]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for raw_item in raw:
+        if not isinstance(raw_item, dict):
+            continue
+        key = _clean_query(str(raw_item.get("query") or "")).casefold()
+        if not key:
+            passthrough.append(raw_item)
+            continue
+        try:
+            scene_index = int(raw_item.get("scene"))
+        except (TypeError, ValueError):
+            scene_index = -1
+        scene_caption = plan.scenes[scene_index].caption if 0 <= scene_index < len(plan.scenes) else ""
+        score = 0
+        if str(raw_item.get("label") or "").strip():
+            score += 4
+        if _explicit_quantity(scene_caption or ""):
+            score += 3
+        anchor = str(raw_item.get("anchor") or "")
+        if any(ch.isdigit() for ch in anchor):
+            score += 2
+        previous = best_by_query.get(key)
+        if previous is None or score > int(previous.get("_dedupe_score", -1)):
+            chosen = dict(raw_item)
+            chosen["_dedupe_score"] = score
+            best_by_query[key] = chosen
+
+    raw = sorted(
+        [*best_by_query.values(), *passthrough],
+        key=lambda item: int(item.get("scene", 10**6)) if str(item.get("scene", "")).lstrip("-").isdigit() else 10**6,
+    )
+
     used_scenes: set[int] = set()
     overlays: list[dict[str, Any]] = []
     for item in raw:
