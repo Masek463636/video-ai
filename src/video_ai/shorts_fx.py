@@ -33,8 +33,7 @@ def build_shorts_overlays(
     except Exception:
         client = None
     if client is None:
-        print("[fx] Gemini unavailable; skipping PNG inserts", flush=True)
-        return []
+        print("[fx] Gemini unavailable; using local Shorts FX fallback", flush=True)
 
     scene_rows = []
     for index, scene in enumerate(plan.scenes):
@@ -106,7 +105,7 @@ Return ONLY JSON:
         data = client._generate_json([{"text": prompt}], temperature=0.18)
     except Exception as exc:
         print(f"[fx] overlay planning unavailable: {exc}", flush=True)
-        return []
+        data = {}
 
     raw = (data.get("effects") or data.get("overlays") or []) if isinstance(data, dict) else []
     if not isinstance(raw, list):
@@ -145,12 +144,19 @@ Schema:
 {{"effects":[{{"scene":4,"type":"png","query":"shopping basket","anchor":"корзина","label":"","position":"left","animation":"drop","size":"large","duration":0.95}}]}}
 """
             try:
+                if client is None:
+                    raise RuntimeError("Gemini unavailable")
                 extra = client._generate_json([{"text": fill_prompt}], temperature=0.12)
                 extra_raw = (extra.get("effects") or []) if isinstance(extra, dict) else []
                 if isinstance(extra_raw, list):
                     raw.extend(item for item in extra_raw if isinstance(item, dict))
             except Exception as exc:
                 print(f"[fx] fill pass unavailable: {exc}", flush=True)
+
+    if not raw:
+        raw = _local_effect_candidates(plan, budget)
+        if raw:
+            print(f"[fx] local fallback planned {len(raw)} candidate effects", flush=True)
 
     # Gemini may nominate the same object several times (e.g. milk, 930 ml,
     # packaging). Keep one strong insert per concrete concept, preferring the
@@ -388,6 +394,8 @@ Schema:
 ]}}
 """
             try:
+                if client is None:
+                    raise RuntimeError("Gemini unavailable")
                 repair_data = client._generate_json([{"text": repair_prompt}], temperature=0.10)
                 repair_items = (repair_data.get("effects") or []) if isinstance(repair_data, dict) else []
             except Exception as exc:
@@ -628,7 +636,7 @@ def _find_png(query: str, target: Path, client):
                     source_mode="generic_image",
                     motion_preset="none",
                 )
-                judgement = client.judge_visual(
+                judgement = None if client is None else client.judge_visual(
                     probe_scene,
                     preview,
                     candidate_title=candidate.title,
@@ -698,6 +706,79 @@ def _explicit_quantity(caption: str) -> str | None:
         flags=re.IGNORECASE,
     )
     return " ".join(match.group(0).split()) if match else None
+
+def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]]:
+    """Grounded no-Gemini fallback so Shorts FX never collapses to zero.
+
+    It prefers explicit quantities and existing scene search queries already
+    produced by the storyboard. If a useful PNG query is unavailable, the later
+    rhythm fallback still creates text accents from narration.
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for index, scene in enumerate(plan.scenes):
+        if len(out) >= budget:
+            break
+        caption = (scene.caption or "").strip()
+        if not caption:
+            continue
+
+        quantity = _explicit_quantity(caption)
+        query = ""
+        candidates = []
+        search_queries = getattr(scene, "search_queries", None)
+        if isinstance(search_queries, list):
+            candidates.extend(str(q).strip() for q in search_queries if str(q).strip())
+        scene_query = str(getattr(scene, "query", "") or "").strip()
+        if scene_query:
+            candidates.insert(0, scene_query)
+
+        for candidate in candidates:
+            cleaned = _clean_query(candidate)
+            # Keep only reasonably compact concrete-looking queries. Long
+            # storyboard sentences are poor PNG searches.
+            if cleaned and 1 <= len(cleaned.split()) <= 5:
+                query = cleaned
+                break
+
+        if quantity:
+            key = ("qty:" + quantity.casefold())
+            if key not in seen:
+                anchor = quantity if quantity.casefold() in caption.casefold() else _fallback_scene_keyword(caption)
+                out.append({
+                    "scene": index,
+                    "type": "png_text" if query else "text",
+                    "query": query,
+                    "anchor": anchor or quantity,
+                    "label": quantity,
+                    "position": "right" if len(out) % 2 == 0 else "left",
+                    "animation": ("fly", "drop", "pop")[len(out) % 3],
+                    "size": "hero",
+                    "duration": 1.0,
+                })
+                seen.add(key)
+                continue
+
+        keyword = _fallback_scene_keyword(caption)
+        if query and keyword:
+            key = "q:" + query.casefold()
+            if key not in seen:
+                out.append({
+                    "scene": index,
+                    "type": "png",
+                    "query": query,
+                    "anchor": keyword,
+                    "label": "",
+                    "position": "left" if len(out) % 2 else "right",
+                    "animation": ("drop", "fly", "pop")[len(out) % 3],
+                    "size": "large",
+                    "duration": 0.95,
+                })
+                seen.add(key)
+
+    return out
+
 
 def _fallback_scene_keyword(caption: str) -> str:
     """Pick one grounded 1-2 word callout from narration as an emergency beat.
