@@ -386,6 +386,7 @@ def main() -> None:
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
+    p_render.add_argument("--shorts-fx-local", action="store_true", help="Use Shorts FX without Gemini; skip API calls and use local storyboard fallback")
     p_render.add_argument("--max-overlays", type=int, default=8, help="Maximum Shorts foreground accents when --shorts-fx is enabled")
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
@@ -461,7 +462,12 @@ def main() -> None:
             attach_caption_timings(plan, load_transcript(args.transcript))
         render_work = Path(args.work_dir) if args.work_dir else Path(args.output).with_suffix("").with_name(Path(args.output).stem + "-work")
         overlays = (
-            build_shorts_overlays(plan, render_work / "shorts_fx", max_overlays=max(0, args.max_overlays))
+            build_shorts_overlays(
+                plan,
+                render_work / "shorts_fx",
+                max_overlays=max(0, args.max_overlays),
+                use_gemini=not args.shorts_fx_local,
+            )
             if args.shorts_fx else []
         )
         output = render_plan(
