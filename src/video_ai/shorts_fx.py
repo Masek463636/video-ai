@@ -631,14 +631,23 @@ Schema:
 
 
 def _find_png(query: str, target: Path, client):
-    """Find a REAL transparent meme-style cutout, never a rectangular screenshot.
+    """Find a meme-style foreground visual with a guaranteed visual fallback.
 
-    Local mode uses CLIP when available. Candidates without meaningful alpha,
-    logos/articles/diagrams and other flat graphic junk are rejected before they
-    can reach the edit. The winner is converted into a sticker with a white
-    outline + soft shadow so it reads like a handmade meme insert.
+    First prefer a real transparent cutout. If Commons has no good cutout,
+    choose a relevant regular image with local CLIP and convert it into a
+    rounded meme-card sticker. This keeps the edit dense instead of collapsing
+    to zero inserts just because transparent PNG coverage is poor.
     """
-    searches = [
+    reject_words = {
+        "logo", "seal", "emblem", "badge", "flag", "coat of arms",
+        "newspaper", "article", "document", "screenshot", "diagram",
+        "chart", "map", "poster", "banner", "infographic", "symbol",
+    }
+    tokens = set(_tokens(query))
+    tested = 0
+
+    # 1) Best case: real transparent meme/cutout.
+    cutout_searches = [
         f"{query} funny meme sticker transparent png",
         f"{query} funny cartoon transparent png",
         f"{query} reaction sticker transparent png",
@@ -646,87 +655,159 @@ def _find_png(query: str, target: Path, client):
         f"{query} transparent cutout png",
         f"{query} isolated transparent png",
     ]
-    tested = 0
-    accepted: list[tuple[Any, Path, float]] = []
-    reject_words = {
-        "logo", "seal", "emblem", "badge", "flag", "coat of arms",
-        "newspaper", "article", "document", "screenshot", "diagram",
-        "chart", "map", "poster", "banner", "infographic", "symbol",
-    }
-
-    for search in searches:
+    cutouts: list[tuple[Any, Path, float]] = []
+    for search in cutout_searches:
         try:
             candidates = search_commons(search, limit=30)
         except Exception:
             continue
-        pngs = [
-            cand for cand in candidates
-            if cand.kind == "image"
-            and cand.mime == "image/png"
-            and cand.download_url
-            and cand.width >= 260
-            and cand.height >= 260
-        ]
-        if not pngs:
-            continue
-
-        tokens = set(_tokens(query))
-        pngs.sort(
-            key=lambda cand: (
-                sum(1 for token in tokens if token in (cand.title + " " + cand.description).casefold()),
-                1 if any(word in (cand.title + " " + cand.description).casefold() for word in ("sticker", "cartoon", "cutout", "transparent")) else 0,
-                min(cand.width, 2200) * min(cand.height, 2200),
-            ),
-            reverse=True,
-        )
-
-        for candidate in pngs[:8]:
+        for candidate in candidates:
+            if (
+                candidate.kind != "image"
+                or candidate.mime != "image/png"
+                or not candidate.download_url
+                or candidate.width < 240
+                or candidate.height < 240
+            ):
+                continue
             meta = (candidate.title + " " + candidate.description).casefold()
             if any(word in meta for word in reject_words):
                 continue
 
             tested += 1
-            preview = target.with_name(target.stem + f"_candidate_{tested}.png")
+            preview = target.with_name(target.stem + f"_cutout_{tested}.png")
+            try:
+                _download(candidate.download_url, preview)
+            except Exception:
+                preview.unlink(missing_ok=True)
+                continue
+            if not _is_real_cutout_png(preview):
+                preview.unlink(missing_ok=True)
+                continue
+
+            overlap = sum(1 for token in tokens if token in meta)
+            style_bonus = 3.0 if any(x in meta for x in ("sticker", "cartoon", "funny", "cutout")) else 0.0
+            cutouts.append((candidate, preview, overlap * 4.0 + style_bonus))
+            if len(cutouts) >= 8:
+                break
+        if len(cutouts) >= 8:
+            break
+
+    if cutouts:
+        scored = _score_overlay_candidates(
+            query,
+            cutouts,
+            client=client,
+            prompt=f"funny meme sticker cutout of {query}",
+        )
+        if scored:
+            _, best_candidate, best_preview = scored[0]
+            best_preview.replace(target)
+            _meme_stickerize(target)
+            for _, _, preview in scored[1:]:
+                preview.unlink(missing_ok=True)
+            for stale in target.parent.glob(target.stem + "_cutout_*.png"):
+                stale.unlink(missing_ok=True)
+            return best_candidate
+
+    # 2) Fallback: regular relevant image -> rounded meme-card sticker.
+    # This is intentionally better than returning None: for Shorts, a clean
+    # meme card is more useful than having no foreground beat at all.
+    fallback_searches = [
+        f"{query} funny",
+        f"{query} reaction",
+        f"{query} close up",
+        query,
+    ]
+    regular: list[tuple[Any, Path, float]] = []
+    seen_urls: set[str] = set()
+    for search in fallback_searches:
+        try:
+            candidates = search_commons(search, limit=30)
+        except Exception:
+            continue
+        for candidate in candidates:
+            if (
+                candidate.kind != "image"
+                or not candidate.download_url
+                or candidate.download_url in seen_urls
+                or candidate.width < 420
+                or candidate.height < 320
+            ):
+                continue
+            seen_urls.add(candidate.download_url)
+            meta = (candidate.title + " " + candidate.description).casefold()
+            if any(word in meta for word in reject_words):
+                continue
+
+            suffix = ".png" if candidate.mime == "image/png" else ".jpg"
+            tested += 1
+            preview = target.with_name(target.stem + f"_card_{tested}{suffix}")
             try:
                 _download(candidate.download_url, preview)
             except Exception:
                 preview.unlink(missing_ok=True)
                 continue
 
-            if not _is_real_cutout_png(preview):
-                preview.unlink(missing_ok=True)
-                continue
-
-            # Metadata relevance first; local CLIP refines all survivors below.
             overlap = sum(1 for token in tokens if token in meta)
-            style_bonus = 2.0 if any(x in meta for x in ("sticker", "cartoon", "funny", "cutout")) else 0.0
-            accepted.append((candidate, preview, overlap * 3.0 + style_bonus))
-
-            if len(accepted) >= 10:
+            regular.append((candidate, preview, overlap * 4.0))
+            if len(regular) >= 10:
                 break
-        if len(accepted) >= 10:
+        if len(regular) >= 10:
             break
 
-    if not accepted:
-        for stale in target.parent.glob(target.stem + "_candidate_*.png"):
-            stale.unlink(missing_ok=True)
+    if not regular:
+        for stale in target.parent.glob(target.stem + "_*"):
+            if stale != target:
+                stale.unlink(missing_ok=True)
         return None
 
-    # Gemini can still judge when available, but local-only mode gets a real
-    # visual ranking too instead of taking the first Commons hit.
+    scored = _score_overlay_candidates(
+        query,
+        regular,
+        client=client,
+        prompt=f"clear funny meme visual of {query}",
+    )
+    if not scored:
+        scored = [
+            (base_score, candidate, preview)
+            for candidate, preview, base_score in regular
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+    _, best_candidate, best_preview = scored[0]
+    _meme_cardize(best_preview, target)
+
+    for _, _, preview in scored:
+        if preview.exists():
+            preview.unlink(missing_ok=True)
+    for stale in target.parent.glob(target.stem + "_card_*"):
+        stale.unlink(missing_ok=True)
+
+    return best_candidate if target.exists() else None
+
+
+def _score_overlay_candidates(
+    query: str,
+    candidates: list[tuple[Any, Path, float]],
+    *,
+    client,
+    prompt: str,
+) -> list[tuple[float, Any, Path]]:
+    """Rank overlay images visually; local CLIP is the default judge."""
     scored: list[tuple[float, Any, Path]] = []
     if client is not None:
-        for candidate, preview, base_score in accepted:
+        for candidate, preview, base_score in candidates:
             score = 50.0 + base_score
             quality = 50.0
-            accepted_by_ai = True
+            accepted = True
             try:
                 probe_scene = Scene(
                     start=0.0,
                     end=1.0,
                     query=query,
                     caption=query,
-                    visual_description=f"funny meme sticker cutout of {query}",
+                    visual_description=prompt,
                     visual_mode="image",
                     source_mode="generic_image",
                     motion_preset="none",
@@ -741,43 +822,86 @@ def _find_png(query: str, target: Path, client):
                 if judgement is not None:
                     score = float(judgement.score) + base_score
                     quality = float(judgement.quality_score)
-                    accepted_by_ai = bool(judgement.accept and score >= 50 and quality >= 44)
+                    accepted = bool(judgement.accept and score >= 45 and quality >= 40)
             except Exception:
                 pass
-            if accepted_by_ai:
+            if accepted:
                 scored.append((score * 0.68 + quality * 0.32, candidate, preview))
     else:
         try:
             from .multimodal import get_clip_ranker
             ranker = get_clip_ranker()
-            prompt = f"funny meme sticker cutout of {query}"
-            sims = ranker.score_images(prompt, [item[1] for item in accepted])
-            for (candidate, preview, base_score), sim in zip(accepted, sims):
+            sims = ranker.score_images(prompt, [item[1] for item in candidates])
+            for (candidate, preview, base_score), sim in zip(candidates, sims):
                 scored.append((float(sim) * 100.0 + base_score, candidate, preview))
         except Exception:
             scored = [
                 (base_score, candidate, preview)
-                for candidate, preview, base_score in accepted
+                for candidate, preview, base_score in candidates
             ]
 
-    if not scored:
-        for _, preview, _ in accepted:
-            preview.unlink(missing_ok=True)
-        return None
-
     scored.sort(key=lambda item: item[0], reverse=True)
-    _, best_candidate, best_preview = scored[0]
-    best_preview.replace(target)
+    return scored
 
-    # Convert the clean cutout into a meme sticker. If Pillow is unavailable,
-    # keep the transparent PNG rather than degrading to a rectangular image.
-    _meme_stickerize(target)
 
-    for _, _, preview in scored[1:]:
-        preview.unlink(missing_ok=True)
-    for stale in target.parent.glob(target.stem + "_candidate_*.png"):
-        stale.unlink(missing_ok=True)
-    return best_candidate
+def _meme_cardize(source: Path, target: Path) -> None:
+    """Turn any regular image into a Shorts-style meme sticker card."""
+    try:
+        from PIL import Image, ImageDraw, ImageFilter, ImageEnhance
+
+        with Image.open(source) as opened:
+            image = opened.convert("RGB")
+
+        # Center square crop keeps the subject big on a phone.
+        side = min(image.width, image.height)
+        left = max(0, (image.width - side) // 2)
+        top = max(0, (image.height - side) // 2)
+        image = image.crop((left, top, left + side, top + side))
+        image.thumbnail((780, 780), Image.Resampling.LANCZOS)
+        image = ImageEnhance.Contrast(image).enhance(1.08)
+        image = ImageEnhance.Color(image).enhance(1.10)
+
+        radius = max(24, int(min(image.size) * 0.12))
+        border = max(16, int(min(image.size) * 0.035))
+        shadow_pad = border * 3
+
+        mask = Image.new("L", image.size, 0)
+        draw = ImageDraw.Draw(mask)
+        draw.rounded_rectangle(
+            (0, 0, image.width - 1, image.height - 1),
+            radius=radius,
+            fill=255,
+        )
+
+        card = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        card.paste(image.convert("RGBA"), (0, 0), mask)
+
+        canvas = Image.new(
+            "RGBA",
+            (
+                image.width + shadow_pad * 2,
+                image.height + shadow_pad * 2,
+            ),
+            (0, 0, 0, 0),
+        )
+
+        shadow_mask = mask.filter(ImageFilter.GaussianBlur(max(6, border * 0.75)))
+        shadow_rgba = Image.new("RGBA", image.size, (0, 0, 0, 115))
+        shadow_rgba.putalpha(shadow_mask.point(lambda a: int(a * 0.52)))
+        canvas.alpha_composite(
+            shadow_rgba,
+            (shadow_pad + border // 2, shadow_pad + border // 2),
+        )
+
+        outline_mask = mask.filter(ImageFilter.MaxFilter(border * 2 + 1))
+        outline = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        outline.putalpha(outline_mask)
+        canvas.alpha_composite(outline, (shadow_pad, shadow_pad))
+        canvas.alpha_composite(card, (shadow_pad, shadow_pad))
+        canvas.save(target)
+    except Exception:
+        target.unlink(missing_ok=True)
+
 
 
 def _is_real_cutout_png(path: Path) -> bool:
