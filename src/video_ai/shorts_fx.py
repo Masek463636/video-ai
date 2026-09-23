@@ -281,6 +281,10 @@ Schema:
             animation = ("pop" if effect_type == "text" else ("fly" if len(overlays) % 2 == 0 else "drop"))
         if overlays and animation == overlays[-1].get("animation"):
             animation = {"fly":"pop","pop":"drop","drop":"fly"}[animation]
+        # Foreground visual inserts use one consistent meme motion language:
+        # fast fly-in + slow cubic ease-out stop. Text-only emphasis may pop.
+        if effect_type in {"png", "png_text"}:
+            animation = "fly"
 
         size = str(item.get("size") or "").lower()
         if size not in {"large", "hero"}:
@@ -628,7 +632,12 @@ Schema:
 
 def _find_png(query: str, target: Path, client):
     """Choose the best visually verified PNG candidate, not the first acceptable one."""
+    # Prefer playful/cartoon/sticker versions first. They read much more
+    # like meme inserts in Shorts; plain catalogue PNGs remain a fallback.
     searches = [
+        f"{query} funny sticker transparent png",
+        f"{query} cartoon sticker png",
+        f"{query} emoji transparent png",
         f"{query} transparent png",
         f"{query} isolated png",
         f"{query} png",
@@ -870,7 +879,7 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
                     "anchor": quantity,
                     "label": quantity,
                     "position": "right" if index % 2 == 0 else "left",
-                    "animation": ("fly", "drop", "pop")[index % 3],
+                    "animation": "fly",
                     "size": "hero",
                     "duration": 0.95,
                     "_local": True,
@@ -889,7 +898,7 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
                     "anchor": "",
                     "label": "",
                     "position": "left" if index % 2 else "right",
-                    "animation": ("drop", "fly", "pop")[index % 3],
+                    "animation": "fly",
                     "size": "hero" if index % 4 == 0 else "large",
                     "duration": 0.90,
                     "_local": True,
