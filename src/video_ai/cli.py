@@ -258,7 +258,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
                 meme_dir=args.meme_dir,
                 registry=registry,
                 allow_coverage_reuse=False,
-                judge_with_gemini=(rescue_pass == 0),
+                judge_with_gemini=(use_gemini_material and rescue_pass == 0),
             )
             qc_results = inspect_plan(plan)
 
