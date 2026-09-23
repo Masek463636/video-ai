@@ -22,6 +22,7 @@ def render_plan(
     crf: int = 20,
     editing_polish: bool = False,
     overlays: list[dict] | None = None,
+    reference_framing: bool = False,
 ) -> Path:
     _require("ffmpeg")
     _require("ffprobe")
@@ -47,7 +48,15 @@ def render_plan(
         clips: list[Path] = []
         for index, (scene, start, end) in enumerate(spans):
             clip = clips_dir / f"span_{index:03d}.mp4"
-            _render_scene(scene, end - start, plan, clip, crf=crf, editing_polish=editing_polish)
+            _render_scene(
+                scene,
+                end - start,
+                plan,
+                clip,
+                crf=crf,
+                editing_polish=editing_polish,
+                reference_framing=reference_framing,
+            )
             clips.append(clip)
 
         concat_file = root / "concat.txt"
@@ -156,7 +165,16 @@ def _same_visual(a: Scene, b: Scene) -> bool:
     return True
 
 
-def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *, crf: int, editing_polish: bool = False) -> None:
+def _render_scene(
+    scene: Scene,
+    duration: float,
+    plan: ShotPlan,
+    output: Path,
+    *,
+    crf: int,
+    editing_polish: bool = False,
+    reference_framing: bool = False,
+) -> None:
     duration = max(0.05, duration)
     common = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p", "-r", str(plan.fps), "-t", f"{duration:.3f}", str(output)]
 
@@ -186,20 +204,66 @@ def _render_scene(scene: Scene, duration: float, plan: ShotPlan, output: Path, *
                     vf = f"{vf},tpad=stop_mode=clone:stop_duration={duration:.3f}"
             _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(asset), "-vf", vf, *common])
             return
-        _render_reference_video(asset, scene, duration, plan, output, crf=crf, editing_polish=editing_polish)
+        _render_reference_video(
+            asset,
+            scene,
+            duration,
+            plan,
+            output,
+            crf=crf,
+            editing_polish=editing_polish,
+            reference_framing=reference_framing,
+        )
         return
 
     _render_safe_background(duration, plan, output, crf=crf)
 
 
-def _render_reference_video(asset: Path, scene: Scene, duration: float, plan: ShotPlan, output: Path, *, crf: int, editing_polish: bool = False) -> None:
-    """Render stock B-roll full-bleed.
+def _render_reference_video(
+    asset: Path,
+    scene: Scene,
+    duration: float,
+    plan: ShotPlan,
+    output: Path,
+    *,
+    crf: int,
+    editing_polish: bool = False,
+    reference_framing: bool = False,
+) -> None:
+    """Render live B-roll with reference-style framing when requested.
 
-    Editing polish deliberately changes only framing/motion. The selected asset
-    and storyboard cut points stay untouched so the same materialized plan can
-    be compared A/B.
+    Wide/square sources are not brutally cropped into 9:16. Instead the source
+    stays readable over a blurred full-frame copy, matching common Shorts/TikTok
+    editing and the supplied reference. Portrait sources still fill the frame.
     """
     w, h, fps = plan.width, plan.height, plan.fps
+    size = _probe_video_size(asset)
+    ratio = (size[0] / size[1]) if size and size[1] else None
+    use_blur_fit = bool(reference_framing and ratio is not None and ratio > 0.82)
+
+    if use_blur_fit:
+        # Keep a readable foreground subject while using the same source as a
+        # soft full-frame background. No fake side bars, no destructive crop.
+        fg_w = int(w * 0.94)
+        fg_h = int(h * 0.94)
+        filter_complex = (
+            f"[0:v]split=2[bg][fg];"
+            f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},gblur=sigma=28:steps=2[bg2];"
+            f"[fg]scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease[fg2];"
+            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2:shortest=1,"
+            f"fps={fps}[v]"
+        )
+        _run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-stream_loop", "-1", "-i", str(asset),
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+            "-pix_fmt", "yuv420p", "-r", str(fps), "-t", f"{duration:.3f}", str(output),
+        ])
+        return
+
     if editing_polish:
         vf = _editorial_video_filter(scene, plan, duration)
     else:
@@ -215,6 +279,29 @@ def _render_reference_video(asset: Path, scene: Scene, duration: float, plan: Sh
         "-pix_fmt", "yuv420p", "-r", str(fps), "-t", f"{duration:.3f}", str(output),
     ])
 
+
+def _probe_video_size(path: str | Path) -> tuple[int, int] | None:
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        streams = json.loads(completed.stdout).get("streams") or []
+        if not streams:
+            return None
+        width = int(streams[0].get("width") or 0)
+        height = int(streams[0].get("height") or 0)
+        return (width, height) if width > 0 and height > 0 else None
+    except Exception:
+        return None
 
 def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Path, *, crf: int) -> None:
     """Composite PNG inserts over the existing edit without touching audio.
