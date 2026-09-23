@@ -758,8 +758,34 @@ def _explicit_quantity(caption: str) -> str | None:
     return " ".join(match.group(0).split()) if match else None
 
 def _best_local_png_query(scene: Scene) -> str:
-    """Choose the most object-like existing storyboard query for a PNG cutout."""
+    """Choose a concrete object query for a foreground cutout.
+
+    Material Brain queries often describe an action ("customer checking price
+    tag"). For a foreground insert we want the actual prop ("price tag"), not
+    the whole stock-video sentence.
+    """
     candidates: list[str] = []
+
+    hay = " ".join([
+        str(getattr(scene, "caption", "") or ""),
+        str(getattr(scene, "query", "") or ""),
+        " ".join(getattr(scene, "search_queries", None) or []),
+    ]).casefold()
+    concrete_rules = [
+        (("milk", "молок"), "milk carton"),
+        (("price tag", "ценник", "цена"), "price tag"),
+        (("shopping cart", "корзин", "тележ"), "shopping cart"),
+        (("package", "packaging", "упаков"), "product package"),
+        (("factory", "production line", "производ"), "cardboard box"),
+        (("phone", "smartphone", "телефон"), "smartphone"),
+        (("money", "cash", "деньг", "доллар", "грив"), "cash money"),
+        (("car", "автомоб"), "car"),
+        (("dog", "собак"), "dog"),
+        (("cat", "кош"), "cat"),
+    ]
+    for needles, query in concrete_rules:
+        if any(needle in hay for needle in needles):
+            return query
 
     entities = getattr(scene, "required_entities", None)
     if isinstance(entities, list):
@@ -818,38 +844,37 @@ def _best_local_png_query(scene: Scene) -> str:
 
 
 def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]]:
-    """No-Gemini fallback using only storyboard visuals and spoken values.
+    """Local foreground accents with deliberate Shorts pacing.
 
-    Never creates arbitrary word cards. If a scene has no usable concrete PNG
-    query and no explicit quantity/value, it is skipped.
+    Prefer 3-6 concrete, non-repeating inserts distributed across the whole
+    narration rather than filling the first few scenes. Quantities get hero
+    emphasis; concrete props get PNG cutouts.
     """
-    out: list[dict[str, Any]] = []
+    raw: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     for index, scene in enumerate(plan.scenes):
-        if len(out) >= budget:
-            break
         caption = (scene.caption or "").strip()
         if not caption:
             continue
-
         quantity = _explicit_quantity(caption)
         query = _best_local_png_query(scene)
 
         if quantity:
             key = "qty:" + quantity.casefold()
             if key not in seen:
-                out.append({
+                raw.append({
                     "scene": index,
                     "type": "png_text" if query else "text",
                     "query": query,
                     "anchor": quantity,
                     "label": quantity,
-                    "position": "right" if len(out) % 2 == 0 else "left",
-                    "animation": ("fly", "drop", "pop")[len(out) % 3],
+                    "position": "right" if index % 2 == 0 else "left",
+                    "animation": ("fly", "drop", "pop")[index % 3],
                     "size": "hero",
-                    "duration": 1.0,
+                    "duration": 0.95,
                     "_local": True,
+                    "_strength": 3,
                 })
                 seen.add(key)
                 continue
@@ -857,21 +882,46 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
         if query:
             key = "q:" + query.casefold()
             if key not in seen:
-                out.append({
+                raw.append({
                     "scene": index,
                     "type": "png",
                     "query": query,
                     "anchor": "",
                     "label": "",
-                    "position": "left" if len(out) % 2 else "right",
-                    "animation": ("drop", "fly", "pop")[len(out) % 3],
-                    "size": "large",
-                    "duration": 0.95,
+                    "position": "left" if index % 2 else "right",
+                    "animation": ("drop", "fly", "pop")[index % 3],
+                    "size": "hero" if index % 4 == 0 else "large",
+                    "duration": 0.90,
                     "_local": True,
+                    "_strength": 2,
                 })
                 seen.add(key)
 
-    return out
+    if len(raw) <= budget:
+        return raw
+
+    # Spread accents over the full timeline. Pick the strongest candidate close
+    # to evenly spaced target positions, then sort back into chronological order.
+    total = max(1, len(plan.scenes) - 1)
+    chosen: list[dict[str, Any]] = []
+    remaining = raw[:]
+    for slot in range(budget):
+        target = (slot + 0.5) / budget * total
+        best = min(
+            remaining,
+            key=lambda item: (
+                abs(int(item["scene"]) - target) - 0.20 * int(item.get("_strength", 1)),
+                int(item["scene"]),
+            ),
+        )
+        chosen.append(best)
+        remaining.remove(best)
+        if not remaining:
+            break
+
+    chosen.sort(key=lambda item: int(item["scene"]))
+    return chosen
+
 
 
 def _fallback_scene_keyword(caption: str) -> str:
