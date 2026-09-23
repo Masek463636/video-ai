@@ -132,31 +132,47 @@ def apply_material_brain_v2(plan: ShotPlan) -> list[int]:
             " ",
             (scene.visual_description or scene.caption or scene.query or "real moving subject"),
         ).strip(" .")
-        scene.visual_description = (
-            f"{base}. Show a clear moving subject performing a visible action. "
-            "Prefer real human/animal/hands/object interaction footage over static objects, "
-            "posters, diagrams or generic establishing shots. The main subject must remain "
-            "easy to understand in a vertical Short."
-        )[:700]
+        marker = "Show a clear moving subject performing a visible action."
+        if marker not in base:
+            scene.visual_description = (
+                f"{base}. {marker} "
+                "Prefer real human/animal/hands/object interaction footage over static objects, "
+                "posters, diagrams or generic establishing shots. The main subject must remain "
+                "easy to understand in a vertical Short."
+            )[:700]
         changed.append(index)
 
     return changed
 
 
 def _action_queries(scene: Scene) -> list[str]:
-    text = " ".join(
-        [
-            scene.caption or "",
-            scene.visual_description or "",
-            scene.query or "",
-            *(scene.search_queries or []),
-        ]
-    ).casefold()
+    # The CURRENT caption is the authority. Do not let a previous Material Brain
+    # pass contaminate the next one through visual_description/search_queries.
+    # This keeps rescue passes idempotent instead of drifting from "price" to
+    # "package" (or another neighboring concept) on repeated application.
+    caption_text = (scene.caption or "").casefold()
+
+    ranked_rules: list[tuple[int, list[str]]] = []
+    for needles, queries in _RULES:
+        hits = [caption_text.find(needle) for needle in needles if needle in caption_text]
+        if hits:
+            ranked_rules.append((min(hits), queries))
+    ranked_rules.sort(key=lambda item: item[0])
 
     out: list[str] = []
-    for needles, queries in _RULES:
-        if any(needle in text for needle in needles):
-            out.extend(queries)
+    for _, queries in ranked_rules:
+        out.extend(queries)
+
+    # If the caption itself has no known rule, fall back to the donor/current
+    # retrieval intent. Keep this secondary so repeated rescue passes do not
+    # rewrite the scene's meaning.
+    if not out:
+        fallback_text = " ".join(
+            [scene.query or "", *(scene.search_queries or [])]
+        ).casefold()
+        for needles, queries in _RULES:
+            if any(needle in fallback_text for needle in needles):
+                out.extend(queries)
 
     # Existing English queries are valuable, but turn noun-only B-roll searches
     # into visible actions/subject interaction.
