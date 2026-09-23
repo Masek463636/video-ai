@@ -138,7 +138,72 @@ def local_quality_guard(
             issues.append("too_short")
             score -= 25
 
+        flat_gray = _flat_gray_video(path, duration)
+        if flat_gray:
+            issues.append("flat_gray_video")
+            score -= 60
+
     return LocalQualityResult(accept=score >= 55, score=max(0, score), issues=issues)
+
+
+def _flat_gray_video(path: Path, duration: float) -> bool:
+    """Reject only genuinely flat/gray stock clips, not normal desaturated footage.
+
+    Sample three moments and use FFmpeg signalstats. A frame counts as bad only
+    when it is both nearly colorless AND has very little luma range. Requiring
+    two bad samples avoids rejecting legitimate black-and-white footage.
+    """
+    if shutil.which("ffmpeg") is None or duration <= 0:
+        return False
+
+    sample_times = [
+        max(0.05, min(duration * 0.18, max(0.05, duration - 0.05))),
+        max(0.05, min(duration * 0.50, max(0.05, duration - 0.05))),
+        max(0.05, min(duration * 0.82, max(0.05, duration - 0.05))),
+    ]
+    bad = 0
+    seen = 0
+    for second in sample_times:
+        try:
+            completed = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "info",
+                    "-ss", f"{second:.3f}", "-i", str(path),
+                    "-frames:v", "1",
+                    "-vf", "scale=320:-2,signalstats,metadata=print",
+                    "-f", "null", "-",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except Exception:
+            continue
+
+        payload = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        values: dict[str, float] = {}
+        for key in ("SATAVG", "YMIN", "YMAX", "YAVG"):
+            match = re.search(rf"lavfi\.signalstats\.{key}=([0-9.]+)", payload)
+            if match:
+                try:
+                    values[key] = float(match.group(1))
+                except ValueError:
+                    pass
+        if "YMIN" not in values or "YMAX" not in values:
+            continue
+
+        seen += 1
+        saturation = values.get("SATAVG", 999.0)
+        luma_range = values["YMAX"] - values["YMIN"]
+        # Deliberately strict: a normal black-and-white shot usually has plenty
+        # of contrast, while the bad stock frame we want to catch is a nearly
+        # uniform gray plate.
+        if saturation < 9.0 and luma_range < 34.0:
+            bad += 1
+
+    return seen >= 2 and bad >= 2
 
 
 def _looks_like_supported_image(path: Path) -> bool:
