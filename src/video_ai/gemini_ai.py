@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -646,27 +647,52 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
         errors: list[str] = []
         for model in self.models:
             url = f"{_API_ROOT}/models/{urllib.parse.quote(model, safe='')}:generateContent"
-            req = urllib.request.Request(url, data=body, method="POST", headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": self.api_key,
-                "User-Agent": "video-ai/2.0.0",
-            })
-            try:
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    response_data = json.load(response)
-                parsed = _parse_json_text(_extract_text(response_data))
-                self.last_model = model
-                self.last_error = None
-                return parsed
-            except urllib.error.HTTPError as exc:
-                detail = ""
+            for attempt in range(2):
+                req = urllib.request.Request(url, data=body, method="POST", headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key,
+                    "User-Agent": "video-ai/2.0.0",
+                })
                 try:
-                    detail = exc.read().decode("utf-8", errors="ignore")[:500]
-                except Exception:
-                    pass
-                errors.append(f"{model}: HTTP {exc.code} {detail}")
-            except Exception as exc:
-                errors.append(f"{model}: {exc}")
+                    with urllib.request.urlopen(req, timeout=60) as response:
+                        response_data = json.load(response)
+                    parsed = _parse_json_text(_extract_text(response_data))
+                    self.last_model = model
+                    self.last_error = None
+                    return parsed
+                except urllib.error.HTTPError as exc:
+                    detail = ""
+                    try:
+                        detail = exc.read().decode("utf-8", errors="ignore")[:2000]
+                    except Exception:
+                        pass
+
+                    # Free-tier 429s commonly include a short "Please retry in
+                    # 16.8s" hint. Waiting once is much better than immediately
+                    # falling through to another model and then hammering the
+                    # next scene/batch.
+                    if exc.code == 429 and attempt == 0:
+                        match = re.search(
+                            r"Please retry in\s+([0-9.]+)\s*(ms|s)",
+                            detail,
+                            flags=re.IGNORECASE,
+                        )
+                        if match:
+                            value = float(match.group(1))
+                            delay = value / 1000.0 if match.group(2).lower() == "ms" else value
+                            delay = max(0.25, min(delay + 0.35, 30.0))
+                            print(
+                                f"[gemini] rate limited on {model}; waiting {delay:.2f}s and retrying once",
+                                flush=True,
+                            )
+                            time.sleep(delay)
+                            continue
+
+                    errors.append(f"{model}: HTTP {exc.code} {detail[:500]}")
+                    break
+                except Exception as exc:
+                    errors.append(f"{model}: {exc}")
+                    break
         self.last_error = " | ".join(errors)
         raise RuntimeError("Gemini request failed: " + self.last_error)
 
