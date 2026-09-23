@@ -14,6 +14,7 @@ def build_shorts_overlays(
     out_dir: str | Path,
     *,
     max_overlays: int = 4,
+    use_gemini: bool = True,
 ) -> list[dict[str, Any]]:
     """Plan a few concrete TikTok/Shorts-style PNG pop-ins.
 
@@ -27,13 +28,17 @@ def build_shorts_overlays(
     if not plan.scenes or max_overlays <= 0:
         return []
 
-    try:
-        from .gemini_ai import get_gemini_client
-        client = get_gemini_client()
-    except Exception:
-        client = None
-    if client is None:
-        print("[fx] Gemini unavailable; using local Shorts FX fallback", flush=True)
+    client = None
+    if use_gemini:
+        try:
+            from .gemini_ai import get_gemini_client
+            client = get_gemini_client()
+        except Exception:
+            client = None
+        if client is None:
+            print("[fx] Gemini unavailable; using local Shorts FX fallback", flush=True)
+    else:
+        print("[fx] local-only Shorts FX mode: Gemini skipped", flush=True)
 
     scene_rows = []
     for index, scene in enumerate(plan.scenes):
@@ -101,11 +106,14 @@ Return ONLY JSON:
 ]}}
 """
 
-    try:
-        data = client._generate_json([{"text": prompt}], temperature=0.18)
-    except Exception as exc:
-        print(f"[fx] overlay planning unavailable: {exc}", flush=True)
+    if client is None:
         data = {}
+    else:
+        try:
+            data = client._generate_json([{"text": prompt}], temperature=0.18)
+        except Exception as exc:
+            print(f"[fx] overlay planning unavailable: {exc}", flush=True)
+            data = {}
 
     raw = (data.get("effects") or data.get("overlays") or []) if isinstance(data, dict) else []
     if not isinstance(raw, list):
