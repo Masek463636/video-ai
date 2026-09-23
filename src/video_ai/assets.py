@@ -1476,7 +1476,7 @@ def _hard_judge_reject(scene: Scene, judgement) -> bool:
 
 
 def _has_severe_local_issue(issues: list[str]) -> bool:
-    severe = {"too_short"}
+    severe = {"too_short", "flat_gray_video"}
     return any(issue in severe for issue in issues)
 
 
