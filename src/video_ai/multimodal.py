@@ -67,17 +67,25 @@ class ClipRanker:
         if not images:
             return scores
 
-        text_inputs = self.processor(text=[prompt], return_tensors="pt", padding=True)
-        image_inputs = self.processor(images=images, return_tensors="pt")
-        text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
-        pixel_values = image_inputs["pixel_values"].to(self.device)
+        # Use a single CLIP forward pass. Newer transformers versions can
+        # return BaseModelOutputWithPooling from get_text_features/get_image_features,
+        # so calling .norm() on those helper results crashes. CLIPModel.forward()
+        # exposes projection-space embeddings directly.
+        inputs = self.processor(
+            text=[prompt],
+            images=images,
+            return_tensors="pt",
+            padding=True,
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         with self.torch.no_grad():
-            text_features = self.model.get_text_features(**text_inputs)
-            image_features = self.model.get_image_features(pixel_values=pixel_values)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-            similarities = (image_features @ text_features.T).squeeze(-1).detach().cpu().tolist()
+            outputs = self.model(**inputs)
+            image_features = outputs.image_embeds
+            text_features = outputs.text_embeds
+            similarities = (
+                image_features @ text_features.T
+            ).squeeze(-1).detach().cpu().tolist()
 
         if isinstance(similarities, float):
             similarities = [similarities]
