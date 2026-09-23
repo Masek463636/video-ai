@@ -266,11 +266,13 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         side = str(item.get("position") or "right")
         animation = str(item.get("animation") or "fly")
         size = str(item.get("size") or "large")
-        scale_ratio = 0.56 if size == "hero" else 0.44
-        max_h_ratio = 0.46 if size == "hero" else 0.36
+        # Foreground inserts should read immediately on a phone. Keep them
+        # large and inside the upper third so they never compete with captions.
+        scale_ratio = 0.72 if size == "hero" else 0.60
+        max_h_ratio = 0.38 if size == "hero" else 0.31
         width = int(plan.width * scale_ratio)
         max_h = int(plan.height * max_h_ratio)
-        target_y = int(plan.height * (0.20 if size == "hero" else (0.24 if index % 2 == 0 else 0.37)))
+        target_y = int(plan.height * (0.055 if size == "hero" else 0.075))
 
         ov = f"[ov{index}]"
         nxt = f"[v{index}]"
@@ -278,16 +280,18 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         filters.append(
             f"[{input_index}:v]"
             f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,"
-            f"scale=w='min({width},iw)':h='min({max_h},ih)':force_original_aspect_ratio=decrease,"
+            # Deliberately allow upscaling. The old min(iw/ih) clamp left many
+            # Commons PNGs tiny even when the editor requested a hero insert.
+            f"scale=w={width}:h={max_h}:force_original_aspect_ratio=decrease,"
             f"format=rgba{ov}"
         )
 
         if side == "left":
-            settled_x = "70"
+            settled_x = "46"
         elif side == "center":
             settled_x = "(main_w-overlay_w)/2"
         else:
-            settled_x = "main_w-overlay_w-70"
+            settled_x = "main_w-overlay_w-46"
 
         y_expr = str(target_y)
         if animation == "fly":
@@ -648,8 +652,8 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
         # Text-only effects should read like deliberate Shorts callouts.
         if effect_type == "text":
             x = int(plan.width * 0.50)
-            y = int(plan.height * 0.30)
-            fs = max(86, int(plan.width * (0.115 if size == "hero" else 0.095)))
+            y = int(plan.height * 0.16)
+            fs = max(92, int(plan.width * (0.125 if size == "hero" else 0.105)))
             start_scale = 76 if animation == "pop" else 88
             safe = _ass_text_plain(label)
             events.append(
@@ -660,9 +664,9 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
             )
             continue
 
-        x = int(plan.width * (0.23 if side == "left" else 0.77 if side == "right" else 0.50))
-        y = int(plan.height * (0.17 if size == "hero" else 0.22))
-        fs = max(62, int(plan.width * (0.080 if size == "hero" else 0.068)))
+        x = int(plan.width * (0.25 if side == "left" else 0.75 if side == "right" else 0.50))
+        y = int(plan.height * (0.30 if size == "hero" else 0.28))
+        fs = max(68, int(plan.width * (0.088 if size == "hero" else 0.074)))
         safe = _ass_text_plain(label)
         events.append(
             f"Dialogue: 2,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,"
