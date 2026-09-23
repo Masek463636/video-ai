@@ -184,25 +184,56 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
                 f"[coverage] v2 unique-only unresolved scenes: {unresolved_after_v2}",
                 flush=True,
             )
-            prepare_diversity_repair(plan, unresolved_after_v2, pass_index=2)
-            print(
-                f"[coverage] cross-media unique rescue: {unresolved_after_v2}",
-                flush=True,
-            )
-            manifest = materialize_assets(
-                plan,
-                work / "assets",
-                limit=max(args.limit, 32),
-                semantic=args.semantic,
-                semantic_top_k=max(args.semantic_top_k, 10),
-                replace_scenes=set(unresolved_after_v2),
-                rank_offset=0,
-                meme_dir=args.meme_dir,
-                registry=registry,
-                allow_coverage_reuse=False,
-                judge_with_gemini=use_gemini_material,
-            )
-            qc_results = inspect_plan(plan)
+
+            # Material Brain 2 should stay video-first. Gemini can be overly
+            # conservative and return no choices even when providers have usable
+            # footage. Before degrading to still images, re-apply the action
+            # queries and perform one local stock-video selection pass.
+            if getattr(args, "material_v2", False):
+                apply_material_brain_v2(plan)
+                print(
+                    f"[coverage] material-v2 local video rescue: {unresolved_after_v2}",
+                    flush=True,
+                )
+                manifest = materialize_assets(
+                    plan,
+                    work / "assets",
+                    limit=max(args.limit, 40),
+                    semantic=args.semantic,
+                    semantic_top_k=max(args.semantic_top_k, 12),
+                    replace_scenes=set(unresolved_after_v2),
+                    rank_offset=0,
+                    meme_dir=args.meme_dir,
+                    registry=registry,
+                    allow_coverage_reuse=False,
+                    judge_with_gemini=False,
+                )
+                qc_results = inspect_plan(plan)
+
+            unresolved_after_video_rescue = [
+                i for i, scene in enumerate(plan.scenes)
+                if not scene.asset or not Path(scene.asset).exists() or scene.asset_kind == "blank"
+            ]
+            if unresolved_after_video_rescue:
+                prepare_diversity_repair(plan, unresolved_after_video_rescue, pass_index=2)
+                print(
+                    f"[coverage] cross-media unique rescue: {unresolved_after_video_rescue}",
+                    flush=True,
+                )
+                manifest = materialize_assets(
+                    plan,
+                    work / "assets",
+                    limit=max(args.limit, 32),
+                    semantic=args.semantic,
+                    semantic_top_k=max(args.semantic_top_k, 10),
+                    replace_scenes=set(unresolved_after_video_rescue),
+                    rank_offset=0,
+                    meme_dir=args.meme_dir,
+                    registry=registry,
+                    allow_coverage_reuse=False,
+                    judge_with_gemini=use_gemini_material,
+                )
+                qc_results = inspect_plan(plan)
 
         # If Gemini is still too strict, do one final UNIQUE local-ranked pass.
         # It may accept a slightly less perfect shot, but never copies an asset
