@@ -855,6 +855,13 @@ def _v2_select_roll_batch(
                 flush=True,
             )
             choices = gemini.choose_roll_visuals(plan.scenes, chunk)
+            if not choices and getattr(gemini, "last_error", None):
+                print(
+                    f"{prefix} Gemini API unavailable after bounded retry; "
+                    "skipping remaining Gemini batches and using local rescue",
+                    flush=True,
+                )
+                break
 
             selected_in_batch = 0
             for choice in choices:
