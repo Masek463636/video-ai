@@ -221,6 +221,33 @@ def materialize_assets(
     if soft_story_context:
         print(f"[context] soft story setting: {soft_story_context}", flush=True)
 
+    # Whole-roll Visual Director: one Gemini request for all unresolved donor
+    # stock-video scenes. This replaces the old one-request-per-scene v2 path.
+    v2_batch: dict[int, tuple[AssetCandidate, str, dict, list[str], int]] = {}
+    if plan.director_source == "donor_gemini" and gemini is not None:
+        batch_indexes = [
+            index for index, scene in enumerate(plan.scenes)
+            if (
+                scene.visual_mode == "video"
+                and scene.source_mode == "stock_video"
+                and not scene.semantic_lock
+                and (
+                    overwrite
+                    or index in replace_scenes
+                    or not scene.asset
+                    or not Path(scene.asset).exists()
+                )
+            )
+        ]
+        if batch_indexes:
+            v2_batch = _v2_select_roll_batch(
+                plan,
+                batch_indexes,
+                gemini=gemini,
+                used_urls=used_urls,
+                prefix="[v2-roll]",
+            )
+
     for index, scene in enumerate(plan.scenes):
         prefix = f"[{index + 1}/{total_scenes}]"
         force_replace = index in replace_scenes
@@ -244,15 +271,8 @@ def materialize_assets(
             and not scene.semantic_lock
         )
         if use_v2_stock:
-            chosen_v2, target_v2, search_v2, info_v2, queries_v2, previews_v2 = _v2_select_stock_video(
-                scene,
-                out_dir,
-                index=index,
-                gemini=gemini,
-                used_urls=used_urls,
-                prefix=prefix,
-            )
-            if chosen_v2 is None or target_v2 is None:
+            batch_choice = v2_batch.get(index)
+            if batch_choice is None:
                 scene.asset = None
                 scene.asset_kind = "blank"
                 scene.focus_x = scene.focus_y = None
@@ -265,10 +285,56 @@ def materialize_assets(
                     "tone": scene.tone,
                     "visual_mode": scene.visual_mode,
                     "source_mode": scene.source_mode,
+                    "queries_tried": list(scene.search_queries or [scene.query]),
+                    "v2_previews": 0,
+                })
+                print(f"{prefix} [v2-roll] no usable batch choice; local rescue later", flush=True)
+                continue
+
+            chosen_v2, search_v2, info_v2, queries_v2, previews_v2 = batch_choice
+            target_v2 = out_dir / f"_scene_{index:03d}_v2{_suffix(chosen_v2)}"
+            try:
+                _download(chosen_v2.download_url, target_v2)
+            except Exception:
+                target_v2.unlink(missing_ok=True)
+                scene.asset = None
+                scene.asset_kind = "blank"
+                manifest.append({
+                    "scene": index,
+                    "status": "v2_download_failed",
+                    "query": scene.query,
                     "queries_tried": queries_v2,
                     "v2_previews": previews_v2,
                 })
-                print(f"{prefix} [v2] no usable unique candidate", flush=True)
+                print(f"{prefix} [v2-roll] selected candidate download failed", flush=True)
+                continue
+
+            guard = local_quality_guard(
+                target_v2,
+                title=chosen_v2.title,
+                description=chosen_v2.description,
+                width=chosen_v2.width,
+                height=chosen_v2.height,
+                kind=chosen_v2.kind,
+            )
+            if guard.score < 38 or _has_severe_local_issue(guard.issues):
+                target_v2.unlink(missing_ok=True)
+                scene.asset = None
+                scene.asset_kind = "blank"
+                manifest.append({
+                    "scene": index,
+                    "status": "v2_local_quality_reject",
+                    "query": scene.query,
+                    "queries_tried": queries_v2,
+                    "v2_previews": previews_v2,
+                    "local_quality_rejected": [{
+                        "title": chosen_v2.title,
+                        "source": chosen_v2.source,
+                        "quality_score": guard.score,
+                        "issues": guard.issues,
+                    }],
+                })
+                print(f"{prefix} [v2-roll] local quality rejected batch choice", flush=True)
                 continue
 
             final_target = out_dir / f"scene_{index:03d}{target_v2.suffix.lower()}"
@@ -287,7 +353,7 @@ def materialize_assets(
             _apply_focus(scene, final_target)
             manifest.append({
                 "scene": index,
-                "status": "v2_visual_director",
+                "status": "v2_roll_visual_director",
                 "query": scene.query,
                 "tone": scene.tone,
                 "visual_mode": scene.visual_mode,
@@ -302,7 +368,7 @@ def materialize_assets(
                 **asdict(chosen_v2),
             })
             print(
-                f"{prefix} [v2] selected {chosen_v2.title[:55]} | fit={info_v2.get('score') if info_v2 else '?'}",
+                f"{prefix} [v2-roll] selected {chosen_v2.title[:55]} | fit={info_v2.get('score')}",
                 flush=True,
             )
             continue
@@ -673,6 +739,126 @@ def _v2_extract_preview(candidate: AssetCandidate, root: Path, index: int) -> Pa
     finally:
         video_path.unlink(missing_ok=True)
     return None
+
+
+def _v2_select_roll_batch(
+    plan: ShotPlan,
+    indexes: list[int],
+    *,
+    gemini: Any,
+    used_urls: set[str],
+    prefix: str,
+) -> dict[int, tuple[AssetCandidate, str, dict, list[str], int]]:
+    """Search locally for every scene, then spend ONE Gemini request on the roll."""
+    candidate_maps: dict[int, dict[int, tuple[AssetCandidate, str]]] = {}
+    queries_by_scene: dict[int, list[str]] = {}
+    groups: list[dict[str, Any]] = []
+    preview_counts: dict[int, int] = {}
+
+    with tempfile.TemporaryDirectory(prefix="video-ai-v2-roll-") as d:
+        root = Path(d)
+        for scene_index in indexes:
+            scene = plan.scenes[scene_index]
+            base = [q for q in (scene.search_queries or []) if q.strip()]
+            if scene.query:
+                base.append(scene.query)
+
+            queries: list[str] = []
+            seen_q: set[str] = set()
+            for raw in base:
+                q = re.sub(r"\s+", " ", str(raw)).strip()
+                key = q.casefold()
+                if q and key not in seen_q:
+                    seen_q.add(key)
+                    queries.append(q)
+                if len(queries) >= 3:
+                    break
+            queries_by_scene[scene_index] = queries
+            if not queries:
+                continue
+
+            pairs = _v2_stock_candidates(
+                queries,
+                used_urls=used_urls,
+                max_candidates=12,
+                per_query=4,
+            )
+            if not pairs:
+                continue
+
+            rows: list[dict[str, Any]] = []
+            by_candidate: dict[int, tuple[AssetCandidate, str]] = {}
+            local_id = 1
+            # Use at most 4 previews per scene to keep one multimodal request
+            # small enough for free-tier use while preserving variety.
+            for candidate, search in pairs[:4]:
+                frame = _v2_extract_preview(candidate, root, scene_index * 10 + local_id)
+                if frame is None:
+                    continue
+                rows.append({
+                    "candidate": local_id,
+                    "preview_path": str(frame),
+                    "title": candidate.title,
+                    "source": candidate.source,
+                    "search": search,
+                })
+                by_candidate[local_id] = (candidate, search)
+                local_id += 1
+
+            if rows:
+                candidate_maps[scene_index] = by_candidate
+                preview_counts[scene_index] = len(rows)
+                groups.append({"scene": scene_index, "candidates": rows})
+
+        if not groups:
+            return {}
+
+        print(
+            f"{prefix} one Gemini request for {len(groups)} scene(s), "
+            f"{sum(preview_counts.values())} preview(s)",
+            flush=True,
+        )
+        choices = gemini.choose_roll_visuals(plan.scenes, groups)
+
+        results: dict[int, tuple[AssetCandidate, str, dict, list[str], int]] = {}
+        for choice in choices:
+            try:
+                scene_index = int(choice.get("scene"))
+                candidate_index = int(choice.get("candidate"))
+                fit = int(choice.get("fit", 0))
+            except (TypeError, ValueError):
+                continue
+            if candidate_index == 0 or fit < 30:
+                continue
+            pair = candidate_maps.get(scene_index, {}).get(candidate_index)
+            if pair is None:
+                continue
+            candidate, search = pair
+            candidate.score = float(fit)
+            candidate.semantic_score = fit / 100.0
+            info = {
+                "score": fit,
+                "accept": fit >= 50,
+                "reason": str(choice.get("reason") or ""),
+                "mismatch": "",
+                "tone_match": 100,
+                "quality_score": 0,
+                "match_level": "v2_roll",
+            }
+            results[scene_index] = (
+                candidate,
+                search,
+                info,
+                queries_by_scene.get(scene_index, []),
+                preview_counts.get(scene_index, 0),
+            )
+
+        print(
+            f"{prefix} Gemini selected {len(results)}/{len(groups)} scene(s); "
+            "missing scenes will use local rescue",
+            flush=True,
+        )
+        return results
 
 
 def _v2_select_stock_video(
