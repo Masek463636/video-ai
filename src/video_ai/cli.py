@@ -12,6 +12,7 @@ from .broll_planner import build_donor_shot_plan
 from .editing_grammar import apply_pre_asset_grammar, diversity_repair_indexes
 from .io import load_shot_plan, save_shot_plan
 from .material_brain import diversity_summary, find_duplicate_scenes, prepare_diversity_repair
+from .material_v2 import apply_material_brain_v2
 from .probe import probe
 from .qc import failed_scene_indexes, inspect_plan, save_qc
 from .renderer import render_plan
@@ -388,6 +389,7 @@ def main() -> None:
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
     p_render.add_argument("--shorts-fx-local", action="store_true", help="Use Shorts FX without Gemini; skip API calls and use local storyboard fallback")
     p_render.add_argument("--max-overlays", type=int, default=8, help="Maximum Shorts foreground accents when --shorts-fx is enabled")
+    p_render.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
     p_make.add_argument("-o", "--output", required=True)
@@ -395,6 +397,8 @@ def main() -> None:
     p_make.add_argument("--no-captions", action="store_true")
     _add_quality_args(p_make)
     _add_audio_args(p_make)
+    p_make.add_argument("--material-v2", action="store_true", help="Action-first Material Brain 2: prefer live stock video and visible actions")
+    p_make.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
     p_create = sub.add_parser("create", help="voiceover -> Editing Brain -> sources -> judge -> render")
     p_create.add_argument("audio")
     p_create.add_argument("-o", "--output", required=True)
@@ -407,6 +411,8 @@ def main() -> None:
     p_create.add_argument("--no-captions", action="store_true")
     _add_quality_args(p_create)
     _add_audio_args(p_create)
+    p_create.add_argument("--material-v2", action="store_true", help="Action-first Material Brain 2: prefer live stock video and visible actions")
+    p_create.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
     args = parser.parse_args()
 
     if args.command == "probe":
@@ -478,6 +484,7 @@ def main() -> None:
             crf=args.crf,
             editing_polish=args.editing_polish,
             overlays=overlays,
+            reference_framing=args.reference_framing,
         )
         print(json.dumps({
             "ok": True,
@@ -531,6 +538,12 @@ def main() -> None:
             transcript_path = None
             plan = load_shot_plan(args.plan)
 
+        material_v2_scenes: list[int] = []
+        if getattr(args, "material_v2", False):
+            material_v2_scenes = apply_material_brain_v2(plan)
+            if material_v2_scenes:
+                print(f"[material-v2] action-first scenes: {material_v2_scenes}", flush=True)
+
         manifest, qc_results, diversity_repairs = _resolve_and_repair(plan, work, args)
         materialized = save_shot_plan(plan, work / "shot_plan.materialized.json")
         audio_plan = build_audio_plan(plan)
@@ -540,7 +553,13 @@ def main() -> None:
         mixed_audio = _mix_if_requested(plan, audio_plan, work, args)
         plan.audio = mixed_audio
         try:
-            output = render_plan(plan, args.output, work_dir=work / "render", captions=not args.no_captions)
+            output = render_plan(
+                plan,
+                args.output,
+                work_dir=work / "render",
+                captions=not args.no_captions,
+                reference_framing=getattr(args, "reference_framing", False),
+            )
         finally:
             plan.audio = original_audio
 
@@ -567,6 +586,7 @@ def main() -> None:
             "planner_mode": plan.director_source,
             "diversity_repair_scenes": diversity_repairs,
             "material_diversity": diversity_summary(plan),
+            "material_v2_scenes": material_v2_scenes,
         }
         payload.update(_gemini_manifest_stats(manifest))
         payload.update(_lock_stats(plan, manifest))
