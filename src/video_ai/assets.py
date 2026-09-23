@@ -749,7 +749,12 @@ def _v2_select_roll_batch(
     used_urls: set[str],
     prefix: str,
 ) -> dict[int, tuple[AssetCandidate, str, dict, list[str], int]]:
-    """Search locally for every scene, then spend ONE Gemini request on the roll."""
+    """Search locally, then let Gemini judge small cross-scene batches.
+
+    Three previews per scene are balanced across different search queries.
+    Batches are capped at four scenes (<=12 images) so the multimodal request
+    stays reliable while still using only a few Gemini calls per whole Short.
+    """
     candidate_maps: dict[int, dict[int, tuple[AssetCandidate, str]]] = {}
     queries_by_scene: dict[int, list[str]] = {}
     groups: list[dict[str, Any]] = []
@@ -786,12 +791,36 @@ def _v2_select_roll_batch(
             if not pairs:
                 continue
 
+            # Do NOT take pairs[:N]: _v2_stock_candidates is grouped by query,
+            # so that used to show Gemini four near-identical results from only
+            # the first search. Round-robin across search queries instead.
+            buckets: dict[str, list[tuple[AssetCandidate, str]]] = {}
+            order: list[str] = []
+            for candidate, search in pairs:
+                if search not in buckets:
+                    buckets[search] = []
+                    order.append(search)
+                buckets[search].append((candidate, search))
+
+            balanced: list[tuple[AssetCandidate, str]] = []
+            cursor = 0
+            while len(balanced) < 3 and order:
+                progressed = False
+                for search in order:
+                    bucket = buckets.get(search) or []
+                    if cursor < len(bucket):
+                        balanced.append(bucket[cursor])
+                        progressed = True
+                        if len(balanced) >= 3:
+                            break
+                if not progressed:
+                    break
+                cursor += 1
+
             rows: list[dict[str, Any]] = []
             by_candidate: dict[int, tuple[AssetCandidate, str]] = {}
             local_id = 1
-            # Use at most 4 previews per scene to keep one multimodal request
-            # small enough for free-tier use while preserving variety.
-            for candidate, search in pairs[:4]:
+            for candidate, search in balanced:
                 frame = _v2_extract_preview(candidate, root, scene_index * 10 + local_id)
                 if frame is None:
                     continue
@@ -813,44 +842,58 @@ def _v2_select_roll_batch(
         if not groups:
             return {}
 
-        print(
-            f"{prefix} one Gemini request for {len(groups)} scene(s), "
-            f"{sum(preview_counts.values())} preview(s)",
-            flush=True,
-        )
-        choices = gemini.choose_roll_visuals(plan.scenes, groups)
-
         results: dict[int, tuple[AssetCandidate, str, dict, list[str], int]] = {}
-        for choice in choices:
-            try:
-                scene_index = int(choice.get("scene"))
-                candidate_index = int(choice.get("candidate"))
-                fit = int(choice.get("fit", 0))
-            except (TypeError, ValueError):
-                continue
-            if candidate_index == 0 or fit < 30:
-                continue
-            pair = candidate_maps.get(scene_index, {}).get(candidate_index)
-            if pair is None:
-                continue
-            candidate, search = pair
-            candidate.score = float(fit)
-            candidate.semantic_score = fit / 100.0
-            info = {
-                "score": fit,
-                "accept": fit >= 50,
-                "reason": str(choice.get("reason") or ""),
-                "mismatch": "",
-                "tone_match": 100,
-                "quality_score": 0,
-                "match_level": "v2_roll",
-            }
-            results[scene_index] = (
-                candidate,
-                search,
-                info,
-                queries_by_scene.get(scene_index, []),
-                preview_counts.get(scene_index, 0),
+        batch_size = 4
+        total_batches = (len(groups) + batch_size - 1) // batch_size
+
+        for batch_no, offset in enumerate(range(0, len(groups), batch_size), start=1):
+            chunk = groups[offset:offset + batch_size]
+            image_count = sum(len(group.get("candidates") or []) for group in chunk)
+            print(
+                f"{prefix} Gemini batch {batch_no}/{total_batches}: "
+                f"{len(chunk)} scene(s), {image_count} preview(s)",
+                flush=True,
+            )
+            choices = gemini.choose_roll_visuals(plan.scenes, chunk)
+
+            selected_in_batch = 0
+            for choice in choices:
+                try:
+                    scene_index = int(choice.get("scene"))
+                    candidate_index = int(choice.get("candidate"))
+                    fit = int(choice.get("fit", 0))
+                except (TypeError, ValueError):
+                    continue
+                if candidate_index == 0 or fit < 35:
+                    continue
+                pair = candidate_maps.get(scene_index, {}).get(candidate_index)
+                if pair is None:
+                    continue
+                candidate, search = pair
+                candidate.score = float(fit)
+                candidate.semantic_score = fit / 100.0
+                info = {
+                    "score": fit,
+                    "accept": fit >= 50,
+                    "reason": str(choice.get("reason") or ""),
+                    "mismatch": "",
+                    "tone_match": 100,
+                    "quality_score": 0,
+                    "match_level": "v2_roll",
+                }
+                results[scene_index] = (
+                    candidate,
+                    search,
+                    info,
+                    queries_by_scene.get(scene_index, []),
+                    preview_counts.get(scene_index, 0),
+                )
+                selected_in_batch += 1
+
+            print(
+                f"{prefix} batch {batch_no}/{total_batches} selected "
+                f"{selected_in_batch}/{len(chunk)} scene(s)",
+                flush=True,
             )
 
         print(
@@ -859,6 +902,7 @@ def _v2_select_roll_batch(
             flush=True,
         )
         return results
+
 
 
 def _v2_select_stock_video(
