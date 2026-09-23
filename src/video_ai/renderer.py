@@ -244,18 +244,19 @@ def _render_reference_video(
     if use_blur_fit:
         # Keep a readable foreground subject while using the same source as a
         # soft full-frame background. No fake side bars, no destructive crop.
-        fg_w = int(w * 0.94)
-        fg_h = int(h * 0.94)
-        # Reference composition: keep fitted landscape B-roll in the UPPER
-        # part of the 9:16 canvas instead of vertically centering it. This
-        # leaves the lower/middle area free for large Shorts captions.
-        fg_y = int(h * 0.075)
+        # Put the real B-roll in a proper TOP PANEL that occupies about
+        # half of the 9:16 frame. A normal 16:9 clip fitted by width is only
+        # ~31% of a vertical canvas, which looked like a tiny strip at the top.
+        # Here we fill a ~48%-high panel and crop the left/right edges as needed.
+        fg_h = int(h * 0.48)
+        fg_y = int(h * 0.025)
         filter_complex = (
             f"[0:v]split=2[bg][fg];"
             f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
             f"crop={w}:{h},gblur=sigma=28:steps=2[bg2];"
-            f"[fg]scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease[fg2];"
-            f"[bg2][fg2]overlay=(W-w)/2:{fg_y}:shortest=1,"
+            f"[fg]scale={w}:{fg_h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{fg_h}[fg2];"
+            f"[bg2][fg2]overlay=0:{fg_y}:shortest=1,"
             f"fps={fps}[v]"
         )
         _run([
