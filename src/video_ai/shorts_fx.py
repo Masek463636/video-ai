@@ -631,24 +631,32 @@ Schema:
 
 
 def _find_png(query: str, target: Path, client):
-    """Choose the best visually verified PNG candidate, not the first acceptable one."""
-    # Prefer playful/cartoon/sticker versions first. They read much more
-    # like meme inserts in Shorts; plain catalogue PNGs remain a fallback.
+    """Find a REAL transparent meme-style cutout, never a rectangular screenshot.
+
+    Local mode uses CLIP when available. Candidates without meaningful alpha,
+    logos/articles/diagrams and other flat graphic junk are rejected before they
+    can reach the edit. The winner is converted into a sticker with a white
+    outline + soft shadow so it reads like a handmade meme insert.
+    """
     searches = [
-        f"{query} funny sticker transparent png",
+        f"{query} funny meme sticker transparent png",
+        f"{query} funny cartoon transparent png",
+        f"{query} reaction sticker transparent png",
         f"{query} cartoon sticker png",
-        f"{query} emoji transparent png",
-        f"{query} transparent png",
-        f"{query} isolated png",
-        f"{query} png",
-        query,
+        f"{query} transparent cutout png",
+        f"{query} isolated transparent png",
     ]
     tested = 0
-    scored: list[tuple[float, Any, Path]] = []
+    accepted: list[tuple[Any, Path, float]] = []
+    reject_words = {
+        "logo", "seal", "emblem", "badge", "flag", "coat of arms",
+        "newspaper", "article", "document", "screenshot", "diagram",
+        "chart", "map", "poster", "banner", "infographic", "symbol",
+    }
 
     for search in searches:
         try:
-            candidates = search_commons(search, limit=24)
+            candidates = search_commons(search, limit=30)
         except Exception:
             continue
         pngs = [
@@ -656,8 +664,8 @@ def _find_png(query: str, target: Path, client):
             if cand.kind == "image"
             and cand.mime == "image/png"
             and cand.download_url
-            and cand.width >= 220
-            and cand.height >= 220
+            and cand.width >= 260
+            and cand.height >= 260
         ]
         if not pngs:
             continue
@@ -666,13 +674,17 @@ def _find_png(query: str, target: Path, client):
         pngs.sort(
             key=lambda cand: (
                 sum(1 for token in tokens if token in (cand.title + " " + cand.description).casefold()),
-                1 if "transparent" in (cand.title + " " + cand.description).casefold() else 0,
-                min(cand.width, 2400) * min(cand.height, 2400),
+                1 if any(word in (cand.title + " " + cand.description).casefold() for word in ("sticker", "cartoon", "cutout", "transparent")) else 0,
+                min(cand.width, 2200) * min(cand.height, 2200),
             ),
             reverse=True,
         )
 
-        for candidate in pngs[:6]:
+        for candidate in pngs[:8]:
+            meta = (candidate.title + " " + candidate.description).casefold()
+            if any(word in meta for word in reject_words):
+                continue
+
             tested += 1
             preview = target.with_name(target.stem + f"_candidate_{tested}.png")
             try:
@@ -681,60 +693,173 @@ def _find_png(query: str, target: Path, client):
                 preview.unlink(missing_ok=True)
                 continue
 
-            score = 45.0
-            quality = 45.0
-            accepted = True
+            if not _is_real_cutout_png(preview):
+                preview.unlink(missing_ok=True)
+                continue
+
+            # Metadata relevance first; local CLIP refines all survivors below.
+            overlap = sum(1 for token in tokens if token in meta)
+            style_bonus = 2.0 if any(x in meta for x in ("sticker", "cartoon", "funny", "cutout")) else 0.0
+            accepted.append((candidate, preview, overlap * 3.0 + style_bonus))
+
+            if len(accepted) >= 10:
+                break
+        if len(accepted) >= 10:
+            break
+
+    if not accepted:
+        for stale in target.parent.glob(target.stem + "_candidate_*.png"):
+            stale.unlink(missing_ok=True)
+        return None
+
+    # Gemini can still judge when available, but local-only mode gets a real
+    # visual ranking too instead of taking the first Commons hit.
+    scored: list[tuple[float, Any, Path]] = []
+    if client is not None:
+        for candidate, preview, base_score in accepted:
+            score = 50.0 + base_score
+            quality = 50.0
+            accepted_by_ai = True
             try:
                 probe_scene = Scene(
                     start=0.0,
                     end=1.0,
                     query=query,
                     caption=query,
-                    visual_description=f"single clear isolated cutout of {query}",
+                    visual_description=f"funny meme sticker cutout of {query}",
                     visual_mode="image",
                     source_mode="generic_image",
                     motion_preset="none",
                 )
-                judgement = None if client is None else client.judge_visual(
+                judgement = client.judge_visual(
                     probe_scene,
                     preview,
                     candidate_title=candidate.title,
-                    source="commons overlay",
+                    source="commons meme overlay",
                     match_level="exact",
                 )
                 if judgement is not None:
-                    score = float(judgement.score)
+                    score = float(judgement.score) + base_score
                     quality = float(judgement.quality_score)
-                    accepted = bool(judgement.accept and score >= 50 and quality >= 44)
+                    accepted_by_ai = bool(judgement.accept and score >= 50 and quality >= 44)
             except Exception:
-                accepted = True
-
-            if accepted:
-                # Prefer relevance first, then visual quality. Evaluate several
-                # candidates so a mediocre first hit does not win by accident.
-                rank = score * 0.68 + quality * 0.32
-                scored.append((rank, candidate, preview))
-            else:
-                preview.unlink(missing_ok=True)
-
-            if len(scored) >= 3:
-                break
-        if len(scored) >= 3:
-            break
+                pass
+            if accepted_by_ai:
+                scored.append((score * 0.68 + quality * 0.32, candidate, preview))
+    else:
+        try:
+            from .multimodal import get_clip_ranker
+            ranker = get_clip_ranker()
+            prompt = f"funny meme sticker cutout of {query}"
+            sims = ranker.score_images(prompt, [item[1] for item in accepted])
+            for (candidate, preview, base_score), sim in zip(accepted, sims):
+                scored.append((float(sim) * 100.0 + base_score, candidate, preview))
+        except Exception:
+            scored = [
+                (base_score, candidate, preview)
+                for candidate, preview, base_score in accepted
+            ]
 
     if not scored:
-        for stale in target.parent.glob(target.stem + "_candidate_*.png"):
-            stale.unlink(missing_ok=True)
+        for _, preview, _ in accepted:
+            preview.unlink(missing_ok=True)
         return None
 
     scored.sort(key=lambda item: item[0], reverse=True)
     _, best_candidate, best_preview = scored[0]
     best_preview.replace(target)
+
+    # Convert the clean cutout into a meme sticker. If Pillow is unavailable,
+    # keep the transparent PNG rather than degrading to a rectangular image.
+    _meme_stickerize(target)
+
     for _, _, preview in scored[1:]:
         preview.unlink(missing_ok=True)
     for stale in target.parent.glob(target.stem + "_candidate_*.png"):
         stale.unlink(missing_ok=True)
     return best_candidate
+
+
+def _is_real_cutout_png(path: Path) -> bool:
+    """Require meaningful transparency and reject full rectangular screenshots."""
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            rgba = image.convert("RGBA")
+            alpha = rgba.getchannel("A")
+            extrema = alpha.getextrema()
+            if not extrema or extrema[0] >= 245:
+                return False
+            hist = alpha.histogram()
+            total = max(1, rgba.width * rgba.height)
+            transparent = sum(hist[:220]) / total
+            opaque = sum(hist[245:]) / total
+            bbox = alpha.getbbox()
+            if bbox is None:
+                return False
+            bw = max(1, bbox[2] - bbox[0])
+            bh = max(1, bbox[3] - bbox[1])
+            occupancy = (bw * bh) / total
+
+            # A meme sticker should have visible transparency around the object.
+            # Rectangular photos/articles usually have ~0% transparent pixels.
+            return (
+                0.06 <= transparent <= 0.92
+                and opaque >= 0.05
+                and 0.08 <= occupancy <= 0.96
+            )
+    except Exception:
+        return False
+
+
+def _meme_stickerize(path: Path) -> None:
+    """Add thick white outline + soft dark shadow around a transparent cutout."""
+    try:
+        from PIL import Image, ImageFilter
+        with Image.open(path) as opened:
+            image = opened.convert("RGBA")
+
+        alpha = image.getchannel("A")
+        bbox = alpha.getbbox()
+        if bbox:
+            image = image.crop(bbox)
+            alpha = image.getchannel("A")
+
+        min_side = max(1, min(image.width, image.height))
+        outline_px = max(5, min(15, int(min_side * 0.035)))
+        # MaxFilter requires an odd kernel size.
+        kernel = outline_px * 2 + 1
+        if kernel % 2 == 0:
+            kernel += 1
+
+        grown = alpha.filter(ImageFilter.MaxFilter(kernel))
+        shadow = grown.filter(ImageFilter.GaussianBlur(max(2, outline_px * 0.65)))
+
+        pad = outline_px * 3
+        canvas = Image.new(
+            "RGBA",
+            (image.width + pad * 2, image.height + pad * 2),
+            (0, 0, 0, 0),
+        )
+
+        shadow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        shadow_rgba = Image.new("RGBA", image.size, (0, 0, 0, 115))
+        shadow_rgba.putalpha(shadow.point(lambda a: int(a * 0.46)))
+        shadow_layer.alpha_composite(
+            shadow_rgba,
+            (pad + outline_px // 2, pad + outline_px // 2),
+        )
+        canvas.alpha_composite(shadow_layer)
+
+        outline_layer = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        outline_layer.putalpha(grown)
+        canvas.alpha_composite(outline_layer, (pad, pad))
+        canvas.alpha_composite(image, (pad, pad))
+        canvas.save(path)
+    except Exception:
+        return
+
+
 
 def _anchor_start(scene: Scene, anchor: str) -> float | None:
     wanted = _tokens(anchor)
@@ -849,7 +974,16 @@ def _best_local_png_query(scene: Scene) -> str:
     if not ranked:
         return ""
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return ranked[0][1]
+    best = ranked[0][1]
+    # Foreground meme inserts must be object-like, not full stock-video actions.
+    action_words = {
+        "customer", "person", "shopper", "looking", "checking", "holding",
+        "taking", "pushing", "comparing", "factory", "production", "line",
+    }
+    words = best.casefold().split()
+    if len(words) > 3 or sum(1 for word in words if word in action_words) >= 2:
+        return ""
+    return best
 
 
 def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]]:
