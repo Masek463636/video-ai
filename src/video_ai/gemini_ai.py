@@ -389,10 +389,14 @@ Return at most one row per scene. Cover every supplied scene.
 
         try:
             data = self._generate_json(parts, temperature=0.01)
-        except Exception:
+        except Exception as exc:
+            print(f"[v2-roll] Gemini batch request failed: {exc}", flush=True)
             return []
 
-        raw = data.get("choices", []) if isinstance(data, dict) else []
+        if not isinstance(data, dict):
+            print("[v2-roll] Gemini batch returned non-object JSON", flush=True)
+            return []
+        raw = data.get("choices") or data.get("selections") or data.get("scene_choices") or []
         out: list[dict[str, Any]] = []
         seen_scenes: set[int] = set()
         for item in raw:
@@ -415,6 +419,7 @@ Return at most one row per scene. Cover every supplied scene.
                 "fit": fit,
                 "reason": str(item.get("reason") or "")[:220],
             })
+        print(f"[v2-roll] Gemini parsed {len(out)}/{len(valid)} scene choice(s)", flush=True)
         return out
 
 
