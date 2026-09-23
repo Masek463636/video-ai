@@ -246,12 +246,16 @@ def _render_reference_video(
         # soft full-frame background. No fake side bars, no destructive crop.
         fg_w = int(w * 0.94)
         fg_h = int(h * 0.94)
+        # Reference composition: keep fitted landscape B-roll in the UPPER
+        # part of the 9:16 canvas instead of vertically centering it. This
+        # leaves the lower/middle area free for large Shorts captions.
+        fg_y = int(h * 0.075)
         filter_complex = (
             f"[0:v]split=2[bg][fg];"
             f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
             f"crop={w}:{h},gblur=sigma=28:steps=2[bg2];"
             f"[fg]scale={fg_w}:{fg_h}:force_original_aspect_ratio=decrease[fg2];"
-            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2:shortest=1,"
+            f"[bg2][fg2]overlay=(W-w)/2:{fg_y}:shortest=1,"
             f"fps={fps}[v]"
         )
         _run([
