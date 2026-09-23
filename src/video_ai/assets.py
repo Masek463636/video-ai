@@ -749,11 +749,12 @@ def _v2_select_roll_batch(
     used_urls: set[str],
     prefix: str,
 ) -> dict[int, tuple[AssetCandidate, str, dict, list[str], int]]:
-    """Search locally, then let Gemini judge small cross-scene batches.
+    """Search locally, rank every preview with local CLIP, then let Gemini refine.
 
-    Three previews per scene are balanced across different search queries.
-    Batches are capped at four scenes (<=12 images) so the multimodal request
-    stays reliable while still using only a few Gemini calls per whole Short.
+    Local CLIP is the reliable baseline: it scores the actual preview frame for
+    every candidate and produces a complete unique roll even if Gemini is rate
+    limited or unavailable. Gemini is optional and only overrides the CLIP pick
+    for scenes where a valid batch choice is returned.
     """
     candidate_maps: dict[int, dict[int, tuple[AssetCandidate, str]]] = {}
     queries_by_scene: dict[int, list[str]] = {}
@@ -791,9 +792,8 @@ def _v2_select_roll_batch(
             if not pairs:
                 continue
 
-            # Do NOT take pairs[:N]: _v2_stock_candidates is grouped by query,
-            # so that used to show Gemini four near-identical results from only
-            # the first search. Round-robin across search queries instead.
+            # Balance previews across query variants. Taking pairs[:N] used to
+            # show several near-identical results from the first search only.
             buckets: dict[str, list[tuple[AssetCandidate, str]]] = {}
             order: list[str] = []
             for candidate, search in pairs:
@@ -804,14 +804,14 @@ def _v2_select_roll_batch(
 
             balanced: list[tuple[AssetCandidate, str]] = []
             cursor = 0
-            while len(balanced) < 3 and order:
+            while len(balanced) < 4 and order:
                 progressed = False
                 for search in order:
                     bucket = buckets.get(search) or []
                     if cursor < len(bucket):
                         balanced.append(bucket[cursor])
                         progressed = True
-                        if len(balanced) >= 3:
+                        if len(balanced) >= 4:
                             break
                 if not progressed:
                     break
@@ -842,9 +842,127 @@ def _v2_select_roll_batch(
         if not groups:
             return {}
 
+        # Reliable baseline: local CLIP looks at the exact same preview frames
+        # that Gemini would see. No API quota is required.
+        clip_ranker = None
+        try:
+            from .multimodal import get_clip_ranker
+            clip_ranker = get_clip_ranker()
+            print(
+                f"{prefix} local CLIP baseline: {len(groups)} scene(s), "
+                f"{sum(preview_counts.values())} preview(s)",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"{prefix} local CLIP unavailable ({exc}); install with "
+                'python -m pip install -e ".[semantic]"',
+                flush=True,
+            )
+
+        local_rankings: dict[int, list[tuple[float, int]]] = {}
+        if clip_ranker is not None:
+            for group in groups:
+                scene_index = int(group["scene"])
+                scene = plan.scenes[scene_index]
+                rows = group.get("candidates") or []
+                prompt = " ".join(
+                    x for x in [
+                        scene.query or "",
+                        *(scene.search_queries or [])[:3],
+                        scene.visual_description or "",
+                    ] if x
+                ).strip()
+                paths = [Path(str(row.get("preview_path") or "")) for row in rows]
+                try:
+                    scores = clip_ranker.score_images(prompt, paths)
+                except Exception as exc:
+                    print(f"{prefix} CLIP scene {scene_index + 1} failed: {exc}", flush=True)
+                    continue
+                ranked_rows: list[tuple[float, int]] = []
+                for row, score in zip(rows, scores):
+                    try:
+                        candidate_id = int(row.get("candidate"))
+                    except (TypeError, ValueError):
+                        continue
+                    ranked_rows.append((float(score), candidate_id))
+                ranked_rows.sort(reverse=True)
+                if ranked_rows:
+                    local_rankings[scene_index] = ranked_rows
+                    compact = ", ".join(
+                        f"#{candidate_id}:{score:.3f}"
+                        for score, candidate_id in ranked_rows[:3]
+                    )
+                    print(f"{prefix} CLIP scene {scene_index + 1}: {compact}", flush=True)
+
+        # Build a unique local roll greedily. If two scenes want the same stock
+        # URL, the later scene takes its next-best CLIP candidate.
         results: dict[int, tuple[AssetCandidate, str, dict, list[str], int]] = {}
+        selected_urls: set[str] = set(used_urls)
+        for scene_index in indexes:
+            ranking = local_rankings.get(scene_index) or []
+            choice_pair = None
+            choice_score = None
+            choice_id = None
+            for score, candidate_id in ranking:
+                pair = candidate_maps.get(scene_index, {}).get(candidate_id)
+                if pair is None:
+                    continue
+                candidate, _ = pair
+                if candidate.download_url in selected_urls:
+                    continue
+                choice_pair = pair
+                choice_score = score
+                choice_id = candidate_id
+                break
+            # If CLIP is not installed, retain a deterministic provider-ranked
+            # fallback so Gemini remains optional instead of mandatory.
+            if choice_pair is None:
+                for candidate_id, pair in candidate_maps.get(scene_index, {}).items():
+                    candidate, _ = pair
+                    if candidate.download_url not in selected_urls:
+                        choice_pair = pair
+                        choice_score = None
+                        choice_id = candidate_id
+                        break
+            if choice_pair is None:
+                continue
+
+            candidate, search = choice_pair
+            fit = int(max(0.0, min(100.0, ((choice_score or 0.0) + 0.15) * 180.0))) if choice_score is not None else 45
+            candidate.score = float(fit)
+            candidate.semantic_score = float(choice_score) if choice_score is not None else None
+            info = {
+                "score": fit,
+                "accept": True,
+                "reason": "local CLIP preview ranking" if choice_score is not None else "provider-ranked local fallback",
+                "mismatch": "",
+                "tone_match": 100,
+                "quality_score": 0,
+                "match_level": "v2_local_clip" if choice_score is not None else "v2_local_provider",
+                "candidate": choice_id,
+            }
+            results[scene_index] = (
+                candidate,
+                search,
+                info,
+                queries_by_scene.get(scene_index, []),
+                preview_counts.get(scene_index, 0),
+            )
+            selected_urls.add(candidate.download_url)
+
+        if clip_ranker is not None:
+            print(
+                f"{prefix} local CLIP selected {len(results)}/{len(groups)} scene(s) baseline",
+                flush=True,
+            )
+
+        # Gemini is an optional refinement layer. If it is overloaded/rate
+        # limited, keep the complete CLIP baseline instead of dropping to a weak
+        # metadata-only rescue pass.
         batch_size = 4
         total_batches = (len(groups) + batch_size - 1) // batch_size
+        gemini_selected = 0
 
         for batch_no, offset in enumerate(range(0, len(groups), batch_size), start=1):
             chunk = groups[offset:offset + batch_size]
@@ -857,13 +975,12 @@ def _v2_select_roll_batch(
             choices = gemini.choose_roll_visuals(plan.scenes, chunk)
             if not choices and getattr(gemini, "last_error", None):
                 print(
-                    f"{prefix} Gemini API unavailable after bounded retry; "
-                    "skipping remaining Gemini batches and using local rescue",
+                    f"{prefix} Gemini unavailable; keeping local CLIP baseline "
+                    "for this and remaining batches",
                     flush=True,
                 )
                 break
 
-            selected_in_batch = 0
             for choice in choices:
                 try:
                     scene_index = int(choice.get("scene"))
@@ -877,6 +994,19 @@ def _v2_select_roll_batch(
                 if pair is None:
                     continue
                 candidate, search = pair
+
+                # Preserve uniqueness across the roll. Replacing the local pick
+                # is allowed, but never with a URL already used by another scene.
+                current = results.get(scene_index)
+                current_url = current[0].download_url if current else None
+                other_urls = {
+                    value[0].download_url
+                    for idx, value in results.items()
+                    if idx != scene_index
+                }
+                if candidate.download_url in other_urls:
+                    continue
+
                 candidate.score = float(fit)
                 candidate.semantic_score = fit / 100.0
                 info = {
@@ -886,7 +1016,7 @@ def _v2_select_roll_batch(
                     "mismatch": "",
                     "tone_match": 100,
                     "quality_score": 0,
-                    "match_level": "v2_roll",
+                    "match_level": "v2_gemini_refined",
                 }
                 results[scene_index] = (
                     candidate,
@@ -895,17 +1025,17 @@ def _v2_select_roll_batch(
                     queries_by_scene.get(scene_index, []),
                     preview_counts.get(scene_index, 0),
                 )
-                selected_in_batch += 1
+                gemini_selected += 1
 
             print(
-                f"{prefix} batch {batch_no}/{total_batches} selected "
-                f"{selected_in_batch}/{len(chunk)} scene(s)",
+                f"{prefix} batch {batch_no}/{total_batches}: Gemini refined "
+                f"{gemini_selected} scene(s) so far",
                 flush=True,
             )
 
         print(
-            f"{prefix} Gemini selected {len(results)}/{len(groups)} scene(s); "
-            "missing scenes will use local rescue",
+            f"{prefix} final roll choices {len(results)}/{len(groups)} "
+            f"(Gemini refinements={gemini_selected})",
             flush=True,
         )
         return results
