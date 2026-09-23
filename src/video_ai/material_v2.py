@@ -43,6 +43,14 @@ _RULES: list[tuple[tuple[str, ...], list[str]]] = [
         ],
     ),
     (
+        ("нагл", "обман", "скрыва", "хитр", "deceptive", "trick", "shrinkflation"),
+        [
+            "customer comparing two product packages",
+            "person reading package suspiciously",
+            "hands comparing product sizes grocery store",
+        ],
+    ),
+    (
         ("деньг", "монет", "налич", "money", "cash", "coins"),
         [
             "hand counting cash close up",
@@ -191,6 +199,7 @@ def _already_action_query(value: str) -> bool:
     verbs = (
         "taking", "holding", "checking", "pushing", "putting", "moving",
         "reading", "using", "paying", "counting", "walking", "running",
+        "interacting", "comparing",
         "driving", "opening", "packing", "reacting", "looking", "working",
         "eating", "drinking", "writing", "talking", "playing",
     )
@@ -201,7 +210,7 @@ def _clean_query(value: str) -> str:
     value = re.sub(r"\s+", " ", str(value or "")).strip(" ,.;:-")
     # Remove retrieval boilerplate that often returns generic/static stock.
     value = re.sub(
-        r"\b(real footage|documentary footage|vertical b roll|b roll|stock footage|photo illustration)\b",
+        r"\b(real footage|documentary footage|vertical b roll|b roll|stock footage|photo illustration|visual metaphor|visual concept|metaphor)\b",
         " ",
         value,
         flags=re.IGNORECASE,
