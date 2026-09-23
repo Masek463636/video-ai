@@ -39,6 +39,9 @@ def _add_audio_args(parser: argparse.ArgumentParser) -> None:
 def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[int]]:
     registry = MaterialRegistry()
     donor_mode = plan.director_source == "donor_gemini"
+    use_gemini_material = not getattr(args, "material_v2_local", False)
+    if not use_gemini_material:
+        print("[material-v2] local material selection: Gemini skipped", flush=True)
     manifest = materialize_assets(
         plan,
         work / "assets",
@@ -48,6 +51,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
         meme_dir=args.meme_dir,
         registry=registry,
         allow_coverage_reuse=not donor_mode,
+        judge_with_gemini=use_gemini_material,
     )
 
     all_diversity_repairs: set[int] = set()
@@ -70,6 +74,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             meme_dir=args.meme_dir,
             registry=registry,
             allow_coverage_reuse=not donor_mode,
+            judge_with_gemini=use_gemini_material,
         )
 
     # v1.3.1 Material Brain works on the actual decoded visuals rather than URLs.
@@ -101,6 +106,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             meme_dir=args.meme_dir,
             registry=registry,
             allow_coverage_reuse=not donor_mode,
+            judge_with_gemini=use_gemini_material,
         )
 
     qc_results = inspect_plan(plan)
@@ -119,6 +125,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             meme_dir=args.meme_dir,
             registry=registry,
             allow_coverage_reuse=not donor_mode,
+            judge_with_gemini=use_gemini_material,
         )
         qc_results = inspect_plan(plan)
 
@@ -160,6 +167,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
             meme_dir=args.meme_dir,
             registry=registry,
             allow_coverage_reuse=not donor_mode,
+            judge_with_gemini=use_gemini_material,
         )
         qc_results = inspect_plan(plan)
 
@@ -192,7 +200,7 @@ def _resolve_and_repair(plan, work: Path, args) -> tuple[list[dict], list, list[
                 meme_dir=args.meme_dir,
                 registry=registry,
                 allow_coverage_reuse=False,
-                judge_with_gemini=True,
+                judge_with_gemini=use_gemini_material,
             )
             qc_results = inspect_plan(plan)
 
@@ -398,6 +406,7 @@ def main() -> None:
     _add_quality_args(p_make)
     _add_audio_args(p_make)
     p_make.add_argument("--material-v2", action="store_true", help="Action-first Material Brain 2: prefer live stock video and visible actions")
+    p_make.add_argument("--material-v2-local", action="store_true", help="Run Material Brain 2 without Gemini judgements; use stock providers + local ranking")
     p_make.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
     p_create = sub.add_parser("create", help="voiceover -> Editing Brain -> sources -> judge -> render")
     p_create.add_argument("audio")
@@ -412,6 +421,7 @@ def main() -> None:
     _add_quality_args(p_create)
     _add_audio_args(p_create)
     p_create.add_argument("--material-v2", action="store_true", help="Action-first Material Brain 2: prefer live stock video and visible actions")
+    p_create.add_argument("--material-v2-local", action="store_true", help="Run Material Brain 2 without Gemini judgements; use stock providers + local ranking")
     p_create.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
     args = parser.parse_args()
 
