@@ -376,13 +376,17 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         ov = f"[ov{index}]"
         nxt = f"[v{index}]"
         input_index = input_index_by_effect[index]
+        # Give foreground cutouts a loose meme-sticker feel instead of a
+        # perfectly upright catalogue-PNG look.
+        tilt = -0.055 if index % 2 == 0 else 0.045
         filters.append(
             f"[{input_index}:v]"
             f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,"
             # Deliberately allow upscaling. The old min(iw/ih) clamp left many
             # Commons PNGs tiny even when the editor requested a hero insert.
             f"scale=w={width}:h={max_h}:force_original_aspect_ratio=decrease,"
-            f"format=rgba{ov}"
+            f"format=rgba,"
+            f"rotate={tilt}:fillcolor=none:ow=rotw(iw):oh=roth(ih){ov}"
         )
 
         if side == "left":
@@ -394,20 +398,30 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
 
         y_expr = str(target_y)
         if animation == "fly":
-            settle = start + 0.16
+            # Meme-style entrance: starts VERY fast and eases into the stop.
+            # p is clamped 0..1, ease=1-(1-p)^3 gives strong cubic ease-out.
+            travel = 0.34
+            p = f"max(0,min(1,(t-{start:.3f})/{travel:.3f}))"
+            ease = f"(1-pow(1-({p}),3))"
             if side == "left":
+                settled = 70
                 x = (
-                    f"if(lt(t,{settle:.3f}),"
-                    f"-overlay_w+(t-{start:.3f})/0.16*(overlay_w+70),70)"
+                    f"-overlay_w+({ease})*"
+                    f"(overlay_w+{settled})"
                 )
             elif side == "right":
+                settled = 70
                 x = (
-                    f"if(lt(t,{settle:.3f}),"
-                    f"main_w-(t-{start:.3f})/0.16*(overlay_w+70),"
-                    f"main_w-overlay_w-70)"
+                    f"main_w+({ease})*"
+                    f"(-overlay_w-{settled})"
                 )
             else:
+                # Center inserts rise in quickly and decelerate near the target.
                 x = settled_x
+                y_expr = (
+                    f"main_h+({ease})*"
+                    f"({target_y}-main_h)"
+                )
         elif animation == "drop":
             x = settled_x
             settle = start + 0.15
