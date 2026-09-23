@@ -224,7 +224,7 @@ def materialize_assets(
     # Whole-roll Visual Director: one Gemini request for all unresolved donor
     # stock-video scenes. This replaces the old one-request-per-scene v2 path.
     v2_batch: dict[int, tuple[AssetCandidate, str, dict, list[str], int]] = {}
-    if plan.director_source == "donor_gemini" and gemini is not None:
+    if plan.director_source == "donor_gemini":
         batch_indexes = [
             index for index, scene in enumerate(plan.scenes)
             if (
@@ -265,7 +265,6 @@ def materialize_assets(
 
         use_v2_stock = (
             plan.director_source == "donor_gemini"
-            and gemini is not None
             and scene.visual_mode == "video"
             and scene.source_mode == "stock_video"
             and not scene.semantic_lock
@@ -749,20 +748,21 @@ def _v2_select_roll_batch(
     used_urls: set[str],
     prefix: str,
 ) -> dict[int, tuple[AssetCandidate, str, dict, list[str], int]]:
-    """Search locally, rank every preview with local CLIP, then let Gemini refine.
+    """Local-first Material Brain 2 visual selector.
 
-    Local CLIP is the reliable baseline: it scores the actual preview frame for
-    every candidate and produces a complete unique roll even if Gemini is rate
-    limited or unavailable. Gemini is optional and only overrides the CLIP pick
-    for scenes where a valid batch choice is returned.
+    Search up to nine balanced stock candidates per scene and score their ACTUAL
+    preview frames with local CLIP. Gemini is optional refinement only. This path
+    also runs when --material-v2-local is used, so local mode does not silently
+    fall back to weak metadata-only selection.
     """
     candidate_maps: dict[int, dict[int, tuple[AssetCandidate, str]]] = {}
+    rows_by_scene: dict[int, list[dict[str, Any]]] = {}
     queries_by_scene: dict[int, list[str]] = {}
-    groups: list[dict[str, Any]] = []
     preview_counts: dict[int, int] = {}
 
     with tempfile.TemporaryDirectory(prefix="video-ai-v2-roll-") as d:
         root = Path(d)
+
         for scene_index in indexes:
             scene = plan.scenes[scene_index]
             base = [q for q in (scene.search_queries or []) if q.strip()]
@@ -786,14 +786,14 @@ def _v2_select_roll_batch(
             pairs = _v2_stock_candidates(
                 queries,
                 used_urls=used_urls,
-                max_candidates=12,
-                per_query=4,
+                max_candidates=18,
+                per_query=6,
             )
             if not pairs:
                 continue
 
-            # Balance previews across query variants. Taking pairs[:N] used to
-            # show several near-identical results from the first search only.
+            # Round-robin across query variants so each scene gets genuinely
+            # different visual ideas instead of 4 nearly identical provider hits.
             buckets: dict[str, list[tuple[AssetCandidate, str]]] = {}
             order: list[str] = []
             for candidate, search in pairs:
@@ -804,14 +804,14 @@ def _v2_select_roll_batch(
 
             balanced: list[tuple[AssetCandidate, str]] = []
             cursor = 0
-            while len(balanced) < 4 and order:
+            while len(balanced) < 9 and order:
                 progressed = False
                 for search in order:
                     bucket = buckets.get(search) or []
                     if cursor < len(bucket):
                         balanced.append(bucket[cursor])
                         progressed = True
-                        if len(balanced) >= 4:
+                        if len(balanced) >= 9:
                             break
                 if not progressed:
                     break
@@ -821,7 +821,7 @@ def _v2_select_roll_batch(
             by_candidate: dict[int, tuple[AssetCandidate, str]] = {}
             local_id = 1
             for candidate, search in balanced:
-                frame = _v2_extract_preview(candidate, root, scene_index * 10 + local_id)
+                frame = _v2_extract_preview(candidate, root, scene_index * 100 + local_id)
                 if frame is None:
                     continue
                 rows.append({
@@ -836,20 +836,21 @@ def _v2_select_roll_batch(
 
             if rows:
                 candidate_maps[scene_index] = by_candidate
+                rows_by_scene[scene_index] = rows
                 preview_counts[scene_index] = len(rows)
-                groups.append({"scene": scene_index, "candidates": rows})
 
-        if not groups:
+        if not rows_by_scene:
             return {}
 
-        # Reliable baseline: local CLIP looks at the exact same preview frames
-        # that Gemini would see. No API quota is required.
+        # CLIP is the baseline visual judge. Keep the prompt short and English:
+        # long visual_description boilerplate made CLIP latch onto unrelated
+        # aesthetics (bags, animals, forests, etc.).
         clip_ranker = None
         try:
             from .multimodal import get_clip_ranker
             clip_ranker = get_clip_ranker()
             print(
-                f"{prefix} local CLIP baseline: {len(groups)} scene(s), "
+                f"{prefix} local CLIP baseline: {len(rows_by_scene)} scene(s), "
                 f"{sum(preview_counts.values())} preview(s)",
                 flush=True,
             )
@@ -862,41 +863,75 @@ def _v2_select_roll_batch(
 
         local_rankings: dict[int, list[tuple[float, int]]] = {}
         if clip_ranker is not None:
-            for group in groups:
-                scene_index = int(group["scene"])
+            for scene_index in indexes:
+                rows = rows_by_scene.get(scene_index) or []
+                if not rows:
+                    continue
                 scene = plan.scenes[scene_index]
-                rows = group.get("candidates") or []
-                prompt = " ".join(
-                    x for x in [
-                        scene.query or "",
-                        *(scene.search_queries or [])[:3],
-                        scene.visual_description or "",
-                    ] if x
-                ).strip()
-                paths = [Path(str(row.get("preview_path") or "")) for row in rows]
+                primary_prompt = (
+                    scene.query
+                    or (scene.search_queries[0] if scene.search_queries else "")
+                    or "person interacting with product"
+                )
+                paths = [Path(str(row["preview_path"])) for row in rows]
+
                 try:
-                    scores = clip_ranker.score_images(prompt, paths)
+                    primary_scores = clip_ranker.score_images(primary_prompt, paths)
                 except Exception as exc:
                     print(f"{prefix} CLIP scene {scene_index + 1} failed: {exc}", flush=True)
                     continue
+
+                specific_scores: dict[int, float] = {}
+                searches = list(dict.fromkeys(str(row.get("search") or "") for row in rows))
+                for search in searches:
+                    indexes_for_search = [
+                        i for i, row in enumerate(rows)
+                        if str(row.get("search") or "") == search
+                    ]
+                    if not indexes_for_search:
+                        continue
+                    try:
+                        values = clip_ranker.score_images(
+                            search,
+                            [paths[i] for i in indexes_for_search],
+                        )
+                    except Exception:
+                        continue
+                    for i, value in zip(indexes_for_search, values):
+                        specific_scores[i] = float(value)
+
                 ranked_rows: list[tuple[float, int]] = []
-                for row, score in zip(rows, scores):
+                wanted_tokens = _tokens(
+                    " ".join([primary_prompt, *(scene.search_queries or [])[:3]])
+                )
+                for i, row in enumerate(rows):
                     try:
                         candidate_id = int(row.get("candidate"))
                     except (TypeError, ValueError):
                         continue
-                    ranked_rows.append((float(score), candidate_id))
+                    primary = float(primary_scores[i]) if i < len(primary_scores) else 0.0
+                    specific = specific_scores.get(i, primary)
+                    title_tokens = _tokens(str(row.get("title") or ""))
+                    lexical = (
+                        len(wanted_tokens & title_tokens) / max(1, len(wanted_tokens))
+                        if wanted_tokens else 0.0
+                    )
+                    # Specific query match dominates; primary intent prevents a
+                    # provider result from winning just because it matches one
+                    # generic word. Title overlap is only a small tie-breaker.
+                    score = specific * 0.62 + primary * 0.34 + lexical * 0.04
+                    ranked_rows.append((score, candidate_id))
+
                 ranked_rows.sort(reverse=True)
                 if ranked_rows:
                     local_rankings[scene_index] = ranked_rows
                     compact = ", ".join(
                         f"#{candidate_id}:{score:.3f}"
-                        for score, candidate_id in ranked_rows[:3]
+                        for score, candidate_id in ranked_rows[:4]
                     )
                     print(f"{prefix} CLIP scene {scene_index + 1}: {compact}", flush=True)
 
-        # Build a unique local roll greedily. If two scenes want the same stock
-        # URL, the later scene takes its next-best CLIP candidate.
+        # Complete unique local baseline.
         results: dict[int, tuple[AssetCandidate, str, dict, list[str], int]] = {}
         selected_urls: set[str] = set(used_urls)
         for scene_index in indexes:
@@ -915,27 +950,29 @@ def _v2_select_roll_batch(
                 choice_score = score
                 choice_id = candidate_id
                 break
-            # If CLIP is not installed, retain a deterministic provider-ranked
-            # fallback so Gemini remains optional instead of mandatory.
+
             if choice_pair is None:
                 for candidate_id, pair in candidate_maps.get(scene_index, {}).items():
                     candidate, _ = pair
                     if candidate.download_url not in selected_urls:
                         choice_pair = pair
-                        choice_score = None
                         choice_id = candidate_id
                         break
+
             if choice_pair is None:
                 continue
 
             candidate, search = choice_pair
-            fit = int(max(0.0, min(100.0, ((choice_score or 0.0) + 0.15) * 180.0))) if choice_score is not None else 45
+            fit = (
+                int(max(0.0, min(100.0, ((choice_score or 0.0) + 0.10) * 190.0)))
+                if choice_score is not None else 42
+            )
             candidate.score = float(fit)
             candidate.semantic_score = float(choice_score) if choice_score is not None else None
             info = {
                 "score": fit,
                 "accept": True,
-                "reason": "local CLIP preview ranking" if choice_score is not None else "provider-ranked local fallback",
+                "reason": "local CLIP multi-query preview ranking" if choice_score is not None else "provider fallback",
                 "mismatch": "",
                 "tone_match": 100,
                 "quality_score": 0,
@@ -951,32 +988,50 @@ def _v2_select_roll_batch(
             )
             selected_urls.add(candidate.download_url)
 
-        if clip_ranker is not None:
-            print(
-                f"{prefix} local CLIP selected {len(results)}/{len(groups)} scene(s) baseline",
-                flush=True,
-            )
+        print(
+            f"{prefix} local baseline selected {len(results)}/{len(rows_by_scene)} scene(s)",
+            flush=True,
+        )
 
-        # Gemini is an optional refinement layer. If it is overloaded/rate
-        # limited, keep the complete CLIP baseline instead of dropping to a weak
-        # metadata-only rescue pass.
+        # --material-v2-local or unavailable Gemini: stop here. No degradation to
+        # metadata-only rescue just because the cloud model is down.
+        if gemini is None:
+            print(f"{prefix} Gemini skipped; using local CLIP roll", flush=True)
+            return results
+
+        # Gemini only sees the top 3 CLIP candidates per scene, which is smaller,
+        # cheaper and semantically stronger than dumping every provider preview.
+        gemini_groups: list[dict[str, Any]] = []
+        for scene_index in indexes:
+            rows = rows_by_scene.get(scene_index) or []
+            if not rows:
+                continue
+            ranking = local_rankings.get(scene_index) or []
+            preferred_ids = [candidate_id for _, candidate_id in ranking[:3]]
+            if not preferred_ids:
+                preferred_ids = [int(row["candidate"]) for row in rows[:3]]
+            top_rows = [
+                row for row in rows
+                if int(row.get("candidate", -1)) in set(preferred_ids)
+            ]
+            if top_rows:
+                gemini_groups.append({"scene": scene_index, "candidates": top_rows})
+
         batch_size = 4
-        total_batches = (len(groups) + batch_size - 1) // batch_size
+        total_batches = (len(gemini_groups) + batch_size - 1) // batch_size
         gemini_selected = 0
-
-        for batch_no, offset in enumerate(range(0, len(groups), batch_size), start=1):
-            chunk = groups[offset:offset + batch_size]
+        for batch_no, offset in enumerate(range(0, len(gemini_groups), batch_size), start=1):
+            chunk = gemini_groups[offset:offset + batch_size]
             image_count = sum(len(group.get("candidates") or []) for group in chunk)
             print(
                 f"{prefix} Gemini batch {batch_no}/{total_batches}: "
-                f"{len(chunk)} scene(s), {image_count} preview(s)",
+                f"{len(chunk)} scene(s), {image_count} CLIP-shortlisted preview(s)",
                 flush=True,
             )
             choices = gemini.choose_roll_visuals(plan.scenes, chunk)
             if not choices and getattr(gemini, "last_error", None):
                 print(
-                    f"{prefix} Gemini unavailable; keeping local CLIP baseline "
-                    "for this and remaining batches",
+                    f"{prefix} Gemini unavailable; keeping local CLIP baseline",
                     flush=True,
                 )
                 break
@@ -994,11 +1049,6 @@ def _v2_select_roll_batch(
                 if pair is None:
                     continue
                 candidate, search = pair
-
-                # Preserve uniqueness across the roll. Replacing the local pick
-                # is allowed, but never with a URL already used by another scene.
-                current = results.get(scene_index)
-                current_url = current[0].download_url if current else None
                 other_urls = {
                     value[0].download_url
                     for idx, value in results.items()
@@ -1027,14 +1077,8 @@ def _v2_select_roll_batch(
                 )
                 gemini_selected += 1
 
-            print(
-                f"{prefix} batch {batch_no}/{total_batches}: Gemini refined "
-                f"{gemini_selected} scene(s) so far",
-                flush=True,
-            )
-
         print(
-            f"{prefix} final roll choices {len(results)}/{len(groups)} "
+            f"{prefix} final roll choices {len(results)}/{len(rows_by_scene)} "
             f"(Gemini refinements={gemini_selected})",
             flush=True,
         )
