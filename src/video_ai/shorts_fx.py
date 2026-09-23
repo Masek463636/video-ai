@@ -113,7 +113,9 @@ Return ONLY JSON:
             data = client._generate_json([{"text": prompt}], temperature=0.18)
         except Exception as exc:
             print(f"[fx] overlay planning unavailable: {exc}", flush=True)
+            print("[fx] disabling Gemini for the rest of this render; switching to local fallback", flush=True)
             data = {}
+            client = None
 
     raw = (data.get("effects") or data.get("overlays") or []) if isinstance(data, dict) else []
     if not isinstance(raw, list):
