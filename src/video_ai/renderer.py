@@ -344,7 +344,14 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         next_input += 1
 
     filters: list[str] = [
-        f"[0:v]trim=duration={base_duration:.3f},setpts=PTS-STARTPTS[basev]"
+        # Concat-copy MP4s can report the correct container duration while their
+        # decoded video frames end a little earlier because of source time-base
+        # gaps. Overlay would then stop at the last decoded frame even with
+        # shortest=0. Pad with the final frame first, then trim to the intended
+        # base duration so the FX pass can never shorten the edit.
+        f"[0:v]setpts=PTS-STARTPTS,"
+        f"tpad=stop_mode=clone:stop_duration={base_duration:.3f},"
+        f"trim=duration={base_duration:.3f}[basev]"
     ]
     current = "[basev]"
 
