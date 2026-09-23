@@ -273,6 +273,151 @@ Always return the 5 best candidates available, even if some are weak. Score them
                 break
         return out
 
+    def choose_roll_visuals(
+        self,
+        scenes: list[Scene],
+        groups: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Choose B-roll for the whole Short in one multimodal Gemini request.
+
+        Each group contains one scene index plus a few locally searched preview
+        frames. Gemini sees the entire sequence at once, so one request can
+        optimize semantic fit and visual variety without spending one request
+        per scene.
+        """
+        if not self.available or not groups:
+            return []
+
+        scene_map = {i: scene for i, scene in enumerate(scenes)}
+        timeline = [
+            {
+                "scene": i,
+                "caption": scene.caption or "",
+                "intent": _judge_description(scene),
+                "tone": scene.tone,
+            }
+            for i, scene in enumerate(scenes)
+        ]
+
+        parts: list[dict[str, Any]] = [{
+            "text": f"""
+You are the Visual Director for an ENTIRE fast-paced vertical YouTube Short.
+
+You will see the full narration timeline and a small candidate set for several
+scenes. Choose the best B-roll candidate for EACH scene while also making the
+whole sequence visually varied and easy to understand.
+
+FULL TIMELINE:
+{json.dumps(timeline, ensure_ascii=False)}
+
+GLOBAL RULES:
+- Judge each scene against its own caption and director intent.
+- Prefer a clear human/animal/object ACTION over a static object when possible.
+- Keep the core subject honest: milk is not coffee, receipt is not landscape,
+  shopping cart is not random street footage.
+- Prefer shots that remain readable in a vertical Short.
+- Avoid repeating the same subject/composition/action in neighboring scenes
+  when another honest candidate exists.
+- It is better to select a close contextual shot than leave a generic unlocked
+  scene empty.
+- Return ONE choice per supplied scene whenever at least one candidate is
+  reasonably relevant. Use candidate 0 only when every option is clearly wrong.
+- Candidate numbers are LOCAL to each scene.
+""".strip()
+        }]
+
+        valid: dict[int, set[int]] = {}
+        for group in groups:
+            try:
+                scene_index = int(group.get("scene"))
+            except (TypeError, ValueError):
+                continue
+            scene = scene_map.get(scene_index)
+            if scene is None:
+                continue
+            rows = group.get("candidates") or []
+            valid[scene_index] = set()
+            parts.append({
+                "text": (
+                    f"\nSCENE {scene_index}\n"
+                    f"NARRATION: {scene.caption or ''}\n"
+                    f"INTENT: {_judge_description(scene)}\n"
+                    f"TONE: {scene.tone}\n"
+                    "CANDIDATES:"
+                )
+            })
+            for row in rows:
+                try:
+                    candidate_index = int(row.get("candidate"))
+                except (TypeError, ValueError):
+                    continue
+                path = Path(str(row.get("preview_path") or ""))
+                if not path.exists():
+                    continue
+                valid[scene_index].add(candidate_index)
+                parts.append({
+                    "text": (
+                        f"SCENE {scene_index} CANDIDATE {candidate_index} | "
+                        f"source={row.get('source','')} | search={row.get('search','')} | "
+                        f"title={str(row.get('title',''))[:100]}"
+                    )
+                })
+                try:
+                    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                except OSError:
+                    continue
+                parts.append({"inline_data": {"mime_type": "image/jpeg", "data": encoded}})
+
+        parts.append({"text": """
+Return ONLY JSON:
+{
+  "choices": [
+    {"scene": 0, "candidate": 2, "fit": 91, "reason": "short reason"},
+    {"scene": 1, "candidate": 1, "fit": 78, "reason": "short reason"}
+  ]
+}
+
+FIT GUIDE:
+90-100 = strong semantic/action match
+70-89 = good honest B-roll
+50-69 = usable contextual fallback
+30-49 = weak emergency fallback
+0 = none of the supplied candidates should be used
+
+Return at most one row per scene. Cover every supplied scene.
+""".strip()})
+
+        try:
+            data = self._generate_json(parts, temperature=0.01)
+        except Exception:
+            return []
+
+        raw = data.get("choices", []) if isinstance(data, dict) else []
+        out: list[dict[str, Any]] = []
+        seen_scenes: set[int] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                scene_index = int(item.get("scene"))
+                candidate_index = int(item.get("candidate"))
+                fit = max(0, min(100, int(float(item.get("fit", 0)))))
+            except (TypeError, ValueError):
+                continue
+            if scene_index in seen_scenes or scene_index not in valid:
+                continue
+            if candidate_index != 0 and candidate_index not in valid[scene_index]:
+                continue
+            seen_scenes.add(scene_index)
+            out.append({
+                "scene": scene_index,
+                "candidate": candidate_index,
+                "fit": fit,
+                "reason": str(item.get("reason") or "")[:220],
+            })
+        return out
+
+
     def rewrite_search_queries(
         self,
         scene: Scene,
