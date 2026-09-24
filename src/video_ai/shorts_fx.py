@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ def build_shorts_overlays(
     *,
     max_overlays: int = 4,
     use_gemini: bool = True,
+    sticker_dir: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Plan a few concrete TikTok/Shorts-style PNG pop-ins.
 
@@ -164,9 +167,22 @@ Schema:
                 print(f"[fx] fill pass unavailable: {exc}", flush=True)
 
     if not raw:
-        raw = _local_effect_candidates(plan, budget)
+        object_raw = _local_effect_candidates(plan, budget)
+        sticker_raw = _local_sticker_effect_candidates(
+            plan,
+            sticker_dir,
+            out / "sticker_cache",
+            budget=min(3, max(0, budget - 1)),
+        )
+        # Prefer a blend: reactions from the user's sticker pack + literal
+        # object/value inserts. Sorting happens below by scene index.
+        raw = [*sticker_raw, *object_raw]
         if raw:
-            print(f"[fx] local fallback planned {len(raw)} candidate effects", flush=True)
+            print(
+                f"[fx] local fallback planned {len(raw)} candidate effects "
+                f"({len(sticker_raw)} local stickers)",
+                flush=True,
+            )
 
     # Gemini may nominate the same object several times (e.g. milk, 930 ml,
     # packaging). Keep one strong insert per concrete concept, preferring the
@@ -221,7 +237,7 @@ Schema:
 
         scene = plan.scenes[scene_index]
         effect_type = str(item.get("type") or "png").lower().strip()
-        if effect_type not in {"png", "png_text", "text"}:
+        if effect_type not in {"png", "png_text", "text", "sticker"}:
             continue
 
         anchor = " ".join(str(item.get("anchor") or "").split())[:80]
@@ -281,7 +297,7 @@ Schema:
             animation = {"fly":"pop","pop":"drop","drop":"fly"}[animation]
         # Foreground visual inserts use one consistent meme motion language:
         # fast fly-in + slow cubic ease-out stop. Text-only emphasis may pop.
-        if effect_type in {"png", "png_text"}:
+        if effect_type in {"png", "png_text", "sticker"}:
             animation = "fly"
 
         size = str(item.get("size") or "").lower()
@@ -290,7 +306,13 @@ Schema:
 
         target: Path | None = None
         candidate = None
-        if effect_type in {"png", "png_text"}:
+        if effect_type == "sticker":
+            raw_asset = str(item.get("asset") or "")
+            candidate_path = Path(raw_asset) if raw_asset else None
+            if candidate_path is None or not candidate_path.exists():
+                continue
+            target = candidate_path
+        elif effect_type in {"png", "png_text"}:
             target = out / f"overlay_{len(overlays):02d}.png"
             candidate = _find_png(query, target, client)
             if candidate is None:
@@ -321,8 +343,18 @@ Schema:
             "size": size,
             "start": round(start, 3),
             "end": round(end, 3),
-            "source": candidate.source if candidate is not None else "generated_text",
-            "title": candidate.title if candidate is not None else label,
+            "source": (
+                "local_sticker"
+                if effect_type == "sticker"
+                else candidate.source if candidate is not None
+                else "generated_text"
+            ),
+            "title": (
+                Path(str(target)).stem
+                if effect_type == "sticker" and target is not None
+                else candidate.title if candidate is not None
+                else label
+            ),
             "page_url": candidate.page_url if candidate is not None else "",
             "license": candidate.license if candidate is not None else "",
         }
@@ -1183,6 +1215,196 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
     chosen.sort(key=lambda item: int(item["scene"]))
     return chosen
 
+
+
+
+_STICKER_EXTS = {".gif", ".png", ".webp", ".jpg", ".jpeg"}
+
+
+def _local_sticker_effect_candidates(
+    plan: ShotPlan,
+    sticker_dir: str | Path | None,
+    cache_dir: Path,
+    *,
+    budget: int,
+) -> list[dict[str, Any]]:
+    """Pick reaction stickers by actually looking at the user's sticker pack.
+
+    Filenames may be meaningless (e.g. AnimatedEmojis-512px-83.gif), so local
+    CLIP scores preview frames against reaction prompts inferred from narration.
+    """
+    if not sticker_dir or budget <= 0:
+        return []
+    root = Path(sticker_dir)
+    if not root.exists() or not root.is_dir():
+        print(f"[fx] sticker pack not found: {root}", flush=True)
+        return []
+
+    assets = [
+        path for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix.lower() in _STICKER_EXTS
+    ][:500]
+    if not assets:
+        print(f"[fx] sticker pack is empty: {root}", flush=True)
+        return []
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    preview_assets: list[tuple[Path, Path]] = []
+    for asset in assets:
+        preview = _sticker_preview(asset, cache_dir)
+        if preview is not None:
+            preview_assets.append((asset, preview))
+
+    if not preview_assets:
+        print("[fx] sticker pack previews unavailable", flush=True)
+        return []
+
+    try:
+        from .multimodal import get_clip_ranker
+        ranker = get_clip_ranker()
+    except Exception as exc:
+        print(f"[fx] sticker CLIP unavailable: {exc}", flush=True)
+        return []
+
+    scene_rows: list[tuple[int, int, str]] = []
+    for index, scene in enumerate(plan.scenes):
+        strength, prompt = _reaction_prompt(scene)
+        if strength > 0:
+            scene_rows.append((strength, index, prompt))
+
+    if not scene_rows:
+        return []
+
+    # Strongest hooks first, but avoid packing all reactions into adjacent beats.
+    scene_rows.sort(key=lambda item: (-item[0], item[1]))
+    selected: list[dict[str, Any]] = []
+    used_assets: set[Path] = set()
+    used_scenes: list[int] = []
+
+    for strength, scene_index, prompt in scene_rows:
+        if len(selected) >= budget:
+            break
+        if any(abs(scene_index - other) < 2 for other in used_scenes):
+            continue
+
+        paths = [preview for asset, preview in preview_assets if asset not in used_assets]
+        candidates = [asset for asset, preview in preview_assets if asset not in used_assets]
+        if not paths:
+            break
+        try:
+            scores = ranker.score_images(prompt, paths)
+        except Exception:
+            continue
+        if not scores:
+            continue
+
+        ranking = sorted(
+            zip(scores, candidates),
+            key=lambda pair: float(pair[0]),
+            reverse=True,
+        )
+        best_score, best_asset = ranking[0]
+        if float(best_score) <= 0:
+            continue
+
+        scene = plan.scenes[scene_index]
+        selected.append({
+            "scene": scene_index,
+            "type": "sticker",
+            "asset": str(best_asset),
+            "query": prompt,
+            "anchor": "",
+            "label": "",
+            "position": "left" if len(selected) % 2 else "right",
+            "animation": "fly",
+            "size": "hero",
+            "duration": 1.85,
+            "_local": True,
+            "_strength": strength + 2,
+        })
+        used_assets.add(best_asset)
+        used_scenes.append(scene_index)
+        print(
+            f"[fx] sticker pick: scene={scene_index + 1} "
+            f"prompt={prompt!r} file={best_asset.name!r} score={float(best_score):.3f}",
+            flush=True,
+        )
+
+    return selected
+
+
+def _reaction_prompt(scene: Scene) -> tuple[int, str]:
+    text = " ".join([
+        str(getattr(scene, "caption", "") or ""),
+        str(getattr(scene, "query", "") or ""),
+    ]).casefold()
+
+    rules = [
+        (4, ("обман", "хитр", "трюк", "скрыва", "не замеч", "secret", "trick", "deceiv"),
+         "suspicious side eye skeptical reaction emoji sticker"),
+        (4, ("шок", "неожидан", "оказалось", "вдруг", "wtf", "shock", "sudden"),
+         "shocked surprised wide eyes reaction emoji sticker"),
+        (4, ("цена", "дороже", "деньг", "стоим", "грн", "доллар", "price", "money", "expensive"),
+         "shocked money skeptical reaction emoji sticker"),
+        (3, ("меньше", "уменьш", "930", "объем", "объём", "упаков", "shrink", "smaller", "package"),
+         "confused disappointed suspicious reaction emoji sticker"),
+        (3, ("почему", "стран", "непонят", "сомне", "confus", "weird", "why"),
+         "confused thinking skeptical reaction emoji sticker"),
+        (3, ("смеш", "ахах", "лол", "прикол", "funny", "lol", "joke"),
+         "laughing crying funny reaction emoji sticker"),
+        (3, ("плохо", "груст", "обид", "потер", "sad", "bad", "loss"),
+         "sad crying disappointed reaction emoji sticker"),
+        (2, ("люб", "круто", "кайф", "рад", "heart", "love", "happy"),
+         "happy heart eyes smiling reaction emoji sticker"),
+    ]
+    for strength, needles, prompt in rules:
+        if any(needle in text for needle in needles):
+            return strength, prompt
+
+    if _explicit_quantity(str(getattr(scene, "caption", "") or "")):
+        return 2, "surprised thinking reaction emoji sticker"
+    return 0, ""
+
+
+def _sticker_preview(asset: Path, cache_dir: Path) -> Path | None:
+    digest = hashlib.sha1(str(asset.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:16]
+    target = cache_dir / f"{digest}.png"
+    if target.exists() and target.stat().st_size > 1024:
+        return target
+
+    suffix = asset.suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        try:
+            from PIL import Image
+            with Image.open(asset) as opened:
+                image = opened.convert("RGBA")
+                image.thumbnail((384, 384))
+                image.save(target)
+            return target
+        except Exception:
+            return None
+
+    if suffix == ".gif":
+        try:
+            completed = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", "0.35", "-i", str(asset),
+                    "-frames:v", "1",
+                    "-vf", "scale=384:384:force_original_aspect_ratio=decrease",
+                    str(target),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=20,
+                check=False,
+            )
+            if completed.returncode == 0 and target.exists() and target.stat().st_size > 1024:
+                return target
+        except Exception:
+            pass
+    target.unlink(missing_ok=True)
+    return None
 
 
 def _fallback_scene_keyword(caption: str) -> str:
