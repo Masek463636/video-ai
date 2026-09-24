@@ -428,7 +428,7 @@ def main() -> None:
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
     p_render.add_argument("--shorts-fx-local", action="store_true", help="Use Shorts FX without Gemini; skip API calls and use local storyboard fallback")
     p_render.add_argument("--sticker-dir", default=None, help="Local sticker/GIF pack; CLIP picks context-appropriate reaction stickers")
-    p_render.add_argument("--max-overlays", type=int, default=8, help="Maximum Shorts foreground accents when --shorts-fx is enabled")
+    p_render.add_argument("--max-overlays", type=int, default=0, help="Optional hard cap for Shorts foreground accents; 0 uses adaptive density with no fixed 6/8 limit")
     p_render.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
