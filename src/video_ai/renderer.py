@@ -393,6 +393,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         # Give foreground cutouts a loose meme-sticker feel instead of a
         # perfectly upright catalogue-PNG look.
         tilt = -0.055 if index % 2 == 0 else 0.045
+        fade_start = max(start + 0.20, end - 0.10)
         filters.append(
             f"[{input_index}:v]"
             f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,fps={fx_fps},"
@@ -400,7 +401,9 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
             # Commons PNGs tiny even when the editor requested a hero insert.
             f"scale=w={width}:h={max_h}:force_original_aspect_ratio=decrease,"
             f"format=rgba,"
-            f"rotate={tilt}:fillcolor=none:ow=rotw(iw):oh=roth(ih){ov}"
+            f"rotate={tilt}:fillcolor=none:ow=rotw(iw):oh=roth(ih),"
+            # Hold fully visible, then disappear quickly instead of lingering.
+            f"fade=t=out:st={fade_start:.3f}:d=0.10:alpha=1{ov}"
         )
 
         if side == "left":
@@ -412,13 +415,11 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
 
         y_expr = str(target_y)
         if animation == "fly":
-            # Fast launch, then a LONG visible coast into the final position.
-            # Exponential deceleration keeps much more motion in the second
-            # half than the old quintic curve, which visually "arrived" too
-            # early and then looked snapped in place.
-            travel = 1.15
+            # New Shorts rhythm: enter FAST, finish the movement quickly, then
+            # stay completely still for 1-2 seconds. No long floating/coasting.
+            travel = 0.22
             p = f"max(0,min(1,(t-{start:.3f})/{travel:.3f}))"
-            ease = f"((1-exp(-1.7*({p})))/(1-exp(-1.7)))"
+            ease = f"(1-pow(1-({p}),3))"
             if side == "left":
                 settled = 70
                 x = (
