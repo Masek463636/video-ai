@@ -53,12 +53,11 @@ def build_shorts_overlays(
         })
 
     duration = max((float(scene.end) for scene in plan.scenes), default=0.0)
-    # No fixed "6 overlays" ceiling. By default use an adaptive Shorts rhythm:
-    # roughly one foreground beat every 2.6-3.0 seconds. An explicit
-    # --max-overlays still acts as a user override.
-    auto_budget = max(3, min(14, int(round(duration / 2.7))))
+    # Sparse by default: foreground accents are punctuation, not decoration.
+    # A ~24s Short gets about 4 total accents unless --max-overlays overrides it.
+    auto_budget = max(2, min(8, int(round(duration / 5.5))))
     budget = max_overlays if max_overlays > 0 else auto_budget
-    min_target = min(budget, max(3, int(round(duration / 3.5))))
+    min_target = min(budget, max(2, int(round(duration / 7.0))))
 
     prompt = f"""You are the effects editor for a fast TikTok/YouTube Short.
 
@@ -84,16 +83,18 @@ SELECTION RULES:
 - Strong text examples: "930 мл", "$100", "50%", "3 года", "1998".
 - If narration says a concrete object AND quantity together, prefer png_text. Example: "930 мл молока" -> milk carton + label "930 мл".
 - Never visualize abstract ideas as literal PNG objects just because they sound dramatic.
-- Reaction/emotion moments SHOULD use type "sticker" when the local sticker pack is available.
-- For sticker effects, query must describe the REACTION in English, e.g. "skeptical suspicious reaction", "shocked money reaction", "confused thinking reaction", "laughing reaction".
-- On a 20–30 second Short with a sticker pack, aim for roughly 2–4 sticker reactions when there are genuine emotional hooks; do not make every scene a sticker.
-- Prefer stickers for surprise, skepticism, confusion, money/price shock, irony, frustration, excitement or humor.
-- Avoid repeating the same reaction emotion twice unless the later beat is clearly stronger.
+- Reaction stickers are RARE punctuation, not decoration. On a 20–30 second Short, use 0–2 stickers total.
+- Use type "sticker" ONLY when the spoken line itself contains a real reaction/punchline: explicit surprise, disbelief, sarcasm, obvious deception, frustration, humor or a strong reveal.
+- Do NOT add a sticker merely because a scene mentions price, packaging, quantity, milk, a cart, or another factual noun.
+- For sticker effects, query must describe the exact REACTION in English, e.g. "skeptical side-eye reaction", "shocked disbelief reaction", "laughing reaction".
+- For png/png_text, stay LITERAL. Never replace "price" with "money bag", "package" with a random box, or a factual noun with a metaphor.
+- If an insert does not make the sentence clearer or funnier immediately, choose none.
+- Avoid repeating the same reaction emotion twice.
 - Avoid repeating the same object or same effect style.
 - Spread effects across the timeline. Do not stack them every scene.
-- A good 20–30 second Short should usually have 6–8 foreground accents if the narration gives enough concrete hooks.
-- It is fine to use effects in neighboring scenes when they are triggered by different spoken ideas and use different visual styles.
-- Prefer rhythm: roughly one meaningful accent every 2.5–4 seconds, with occasional quick clusters around strong factual phrases.
+- A good 20–30 second Short usually needs only about 3–5 foreground accents total.
+- Leave clean sections with NO insert. Silence in the overlay layer is good.
+- Prefer rhythm: roughly one genuinely useful accent every 4–7 seconds.
 - Do NOT force an effect into a weak/abstract scene just to hit the target count.
 
 TIMING:
@@ -191,7 +192,7 @@ Schema:
         plan,
         sticker_dir,
         out / "sticker_cache",
-        budget=min(max(2, budget // 2), 5),
+        budget=min(2, max(0, budget // 2)),
     )
 
     if not raw:
@@ -282,6 +283,14 @@ Schema:
 
         query = _clean_query(str(item.get("query") or ""))
         label = " ".join(str(item.get("label") or "").split())[:28]
+
+        # Gemini decides whether the beat deserves an insert. For factual
+        # PNGs, ground the visible object back to the storyboard so loose
+        # metaphors such as price -> money bag do not slip through.
+        if effect_type in {"png", "png_text"}:
+            grounded_query = _best_local_png_query(scene)
+            if grounded_query:
+                query = grounded_query
 
         if effect_type in {"png_text", "text"}:
             if label and not _label_is_spoken(caption, label):
@@ -1412,7 +1421,7 @@ def _local_sticker_effect_candidates(
     scene_rows: list[tuple[int, int, str]] = []
     for index, scene in enumerate(plan.scenes):
         strength, prompt = _reaction_prompt(scene)
-        if strength > 0:
+        if strength >= 4:
             scene_rows.append((strength, index, prompt))
 
     if not scene_rows:
@@ -1486,36 +1495,38 @@ def _local_sticker_effect_candidates(
 
 
 def _reaction_prompt(scene: Scene) -> tuple[int, str]:
+    """Only nominate high-confidence reaction beats.
+
+    Factual nouns alone are not emotional hooks. This prevents stickers from
+    appearing just because a line mentions price, packaging or a quantity.
+    """
     text = " ".join([
         str(getattr(scene, "caption", "") or ""),
         str(getattr(scene, "query", "") or ""),
     ]).casefold()
 
     rules = [
-        (4, ("обман", "хитр", "трюк", "скрыва", "не замеч", "secret", "trick", "deceiv"),
-         "suspicious side eye skeptical reaction emoji sticker"),
-        (4, ("шок", "неожидан", "оказалось", "вдруг", "wtf", "shock", "sudden"),
-         "shocked surprised wide eyes reaction emoji sticker"),
-        (4, ("цена", "дороже", "деньг", "стоим", "грн", "доллар", "price", "money", "expensive"),
-         "shocked money skeptical reaction emoji sticker"),
-        (3, ("меньше", "уменьш", "930", "объем", "объём", "упаков", "shrink", "smaller", "package"),
-         "confused disappointed suspicious reaction emoji sticker"),
-        (3, ("почему", "стран", "непонят", "сомне", "confus", "weird", "why"),
-         "confused thinking skeptical reaction emoji sticker"),
-        (3, ("смеш", "ахах", "лол", "прикол", "funny", "lol", "joke"),
+        (5, ("обман", "хитр", "трюк", "скрыва", "не замет", "специально", "нагло",
+             "secret trick", "deceiv", "sneaky"),
+         "skeptical suspicious side-eye reaction emoji sticker"),
+        (5, ("шок", "неожидан", "оказалось", "вдруг", "офиг", "охуел", "жесть",
+             "shock", "suddenly", "unbelievable"),
+         "shocked disbelief wide-eyes reaction emoji sticker"),
+        (5, ("смеш", "ахах", "лол", "прикол", "угар", "funny", "lol", "joke"),
          "laughing crying funny reaction emoji sticker"),
-        (3, ("плохо", "груст", "обид", "потер", "sad", "bad", "loss"),
-         "sad crying disappointed reaction emoji sticker"),
-        (2, ("люб", "круто", "кайф", "рад", "heart", "love", "happy"),
-         "happy heart eyes smiling reaction emoji sticker"),
+        (4, ("почему", "странно", "непонят", "сомнева", "серьезно", "серьёзно",
+             "confus", "weird", "why", "seriously"),
+         "confused skeptical thinking reaction emoji sticker"),
+        (4, ("бесит", "злит", "достал", "наглость", "angry", "annoy", "furious"),
+         "angry annoyed reaction emoji sticker"),
+        (4, ("груст", "обид", "печаль", "sad", "disappointed"),
+         "sad disappointed reaction emoji sticker"),
     ]
     for strength, needles, prompt in rules:
         if any(needle in text for needle in needles):
             return strength, prompt
-
-    if _explicit_quantity(str(getattr(scene, "caption", "") or "")):
-        return 2, "surprised thinking reaction emoji sticker"
     return 0, ""
+
 
 
 def _sticker_preview(asset: Path, cache_dir: Path) -> Path | None:
