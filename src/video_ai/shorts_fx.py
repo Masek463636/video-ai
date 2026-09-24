@@ -69,19 +69,26 @@ Scenes:
 
 Return JSON with key effects. Aim for {min_target}-{budget} useful effects total when the narration gives enough concrete hooks. Do not stop at one or two effects unless the script truly has no more concrete or numeric moments.
 
+LOCAL STICKER PACK AVAILABLE: {bool(sticker_dir)}
+
 ALLOWED EFFECT TYPES:
 1. "png" — a concrete object/person cutout only.
 2. "png_text" — concrete cutout + an explicit spoken value/name/quantity.
 3. "text" — big text-only emphasis when the spoken number/value itself is the important visual.
-4. "none" — do nothing. Prefer none over a weak effect.
+4. "sticker" — a reaction/emotion GIF from the user's LOCAL sticker pack. Use only when LOCAL STICKER PACK AVAILABLE is True.
+5. "none" — do nothing. Prefer none over a weak effect.
 
 SELECTION RULES:
 - Every effect must be justified by something EXPLICITLY said in that exact scene.
 - Strong PNG examples: milk -> milk carton/glass of milk; grandfather -> old man; phone -> smartphone; crown -> crown; money -> cash.
 - Strong text examples: "930 мл", "$100", "50%", "3 года", "1998".
 - If narration says a concrete object AND quantity together, prefer png_text. Example: "930 мл молока" -> milk carton + label "930 мл".
-- Never visualize abstract ideas just because they sound dramatic.
-- Do not add generic reaction PNGs unless the narration explicitly mentions that person/object.
+- Never visualize abstract ideas as literal PNG objects just because they sound dramatic.
+- Reaction/emotion moments SHOULD use type "sticker" when the local sticker pack is available.
+- For sticker effects, query must describe the REACTION in English, e.g. "skeptical suspicious reaction", "shocked money reaction", "confused thinking reaction", "laughing reaction".
+- On a 20–30 second Short with a sticker pack, aim for roughly 2–4 sticker reactions when there are genuine emotional hooks; do not make every scene a sticker.
+- Prefer stickers for surprise, skepticism, confusion, money/price shock, irony, frustration, excitement or humor.
+- Avoid repeating the same reaction emotion twice unless the later beat is clearly stronger.
 - Avoid repeating the same object or same effect style.
 - Spread effects across the timeline. Do not stack them every scene.
 - A good 20–30 second Short should usually have 6–8 foreground accents if the narration gives enough concrete hooks.
@@ -103,12 +110,14 @@ VISUAL STYLE:
 - size: "large" or "hero".
 - For text effects use center unless there is a reason not to.
 - label MUST preserve the exact narration language and units.
-- query is required only for png/png_text and must be a short ENGLISH Wikimedia search phrase describing the visible object/person.
+- query for png/png_text must be a short ENGLISH Wikimedia search phrase describing the visible object/person.
+- query for sticker must be a short ENGLISH reaction description; the renderer will choose the actual GIF from the local sticker pack.
 
 Return ONLY JSON:
 {{"effects":[
-  {{"scene":2,"type":"png_text","query":"milk carton","anchor":"молока","label":"930 мл","position":"right","animation":"fly","size":"hero","duration":1.05}},
-  {{"scene":6,"type":"text","query":"","anchor":"50 процентов","label":"50%","position":"center","animation":"pop","size":"hero","duration":0.85}}
+  {{"scene":2,"type":"png_text","query":"milk carton","anchor":"молока","label":"930 мл","position":"right","animation":"fly","size":"hero","duration":1.75}},
+  {{"scene":4,"type":"sticker","query":"skeptical money reaction","anchor":"цену","label":"","position":"left","animation":"fly","size":"hero","duration":1.85}},
+  {{"scene":6,"type":"text","query":"","anchor":"50 процентов","label":"50%","position":"center","animation":"pop","size":"hero","duration":1.60}}
 ]}}
 """
 
@@ -149,8 +158,10 @@ Unused scenes:
 
 Return ONLY JSON with key effects. Add up to {needed + 2} NEW effects from UNUSED scenes, aiming to fill at least {needed} when the words genuinely support it.
 
-Use the same effect types: png, png_text, text.
-- Prefer explicit concrete nouns, people, physical objects, food, money, devices, quantities, dates and percentages.
+Use the same effect types: png, png_text, text, sticker.
+- If the local sticker pack is available, sticker is encouraged for strong reaction beats (surprise, skepticism, confusion, money shock, irony, humor).
+- For sticker, query is a short ENGLISH reaction description such as "confused skeptical reaction".
+- Prefer explicit concrete nouns, people, physical objects, food, money, devices, quantities, dates and percentages for png/png_text.
 - text must quote a short value/word that is actually spoken.
 - png/png_text query must be a short ENGLISH search phrase.
 - Do not repeat an already proposed concept.
@@ -278,7 +289,7 @@ Schema:
                     continue
                 effect_type = "png"
 
-        if effect_type in {"png", "png_text"} and not query:
+        if effect_type in {"png", "png_text", "sticker"} and not query:
             continue
 
         concept = (query or label).casefold().strip()
@@ -324,6 +335,22 @@ Schema:
             raw_asset = str(item.get("asset") or "")
             candidate_path = Path(raw_asset) if raw_asset else None
             if candidate_path is None or not candidate_path.exists():
+                candidate_path = _find_local_sticker_by_prompt(
+                    sticker_dir,
+                    out / "sticker_cache",
+                    query,
+                )
+                if candidate_path is not None:
+                    print(
+                        f"[fx] Gemini sticker resolved: scene={scene_index + 1} "
+                        f"query={query!r} file={candidate_path.name!r}",
+                        flush=True,
+                    )
+            if candidate_path is None or not candidate_path.exists():
+                print(
+                    f"[fx] Gemini requested sticker but no local match was found: {query}",
+                    flush=True,
+                )
                 continue
             target = candidate_path
         elif effect_type in {"png", "png_text"}:
@@ -1235,6 +1262,55 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
 _STICKER_EXTS = {".gif", ".png", ".webp", ".jpg", ".jpeg"}
 
 
+def _find_local_sticker_by_prompt(
+    sticker_dir: str | Path | None,
+    cache_dir: Path,
+    prompt: str,
+) -> Path | None:
+    """Resolve a Gemini reaction description to the best local sticker/GIF."""
+    if not sticker_dir or not prompt.strip():
+        return None
+    root = Path(sticker_dir)
+    if not root.exists() or not root.is_dir():
+        return None
+
+    assets = [
+        path for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix.lower() in _STICKER_EXTS
+    ][:500]
+    if not assets:
+        return None
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    pairs: list[tuple[Path, Path]] = []
+    for asset in assets:
+        preview = _sticker_preview(asset, cache_dir)
+        if preview is not None:
+            pairs.append((asset, preview))
+    if not pairs:
+        return None
+
+    try:
+        from .multimodal import get_clip_ranker
+        ranker = get_clip_ranker()
+        scores = ranker.score_images(
+            f"{prompt.strip()} emoji sticker reaction",
+            [preview for _, preview in pairs],
+        )
+    except Exception:
+        return None
+
+    if not scores:
+        return None
+    ranking = sorted(
+        zip(scores, [asset for asset, _ in pairs]),
+        key=lambda pair: float(pair[0]),
+        reverse=True,
+    )
+    best_score, best_asset = ranking[0]
+    return best_asset if float(best_score) > 0 else None
+
+
 def _local_sticker_effect_candidates(
     plan: ShotPlan,
     sticker_dir: str | Path | None,
@@ -1247,7 +1323,10 @@ def _local_sticker_effect_candidates(
     Filenames may be meaningless (e.g. AnimatedEmojis-512px-83.gif), so local
     CLIP scores preview frames against reaction prompts inferred from narration.
     """
-    if not sticker_dir or budget <= 0:
+    if budget <= 0:
+        return []
+    if not sticker_dir:
+        print("[fx] no --sticker-dir supplied; local sticker pack disabled", flush=True)
         return []
     root = Path(sticker_dir)
     if not root.exists() or not root.is_dir():
