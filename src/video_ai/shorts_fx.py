@@ -15,7 +15,7 @@ def build_shorts_overlays(
     plan: ShotPlan,
     out_dir: str | Path,
     *,
-    max_overlays: int = 4,
+    max_overlays: int = 0,
     use_gemini: bool = True,
     sticker_dir: str | Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -28,7 +28,7 @@ def build_shorts_overlays(
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    if not plan.scenes or max_overlays <= 0:
+    if not plan.scenes:
         return []
 
     client = None
@@ -53,9 +53,12 @@ def build_shorts_overlays(
         })
 
     duration = max((float(scene.end) for scene in plan.scenes), default=0.0)
-    auto_budget = 3 if duration <= 12 else 5 if duration <= 20 else 8 if duration <= 35 else 10
-    budget = min(max_overlays, auto_budget) if max_overlays > 0 else auto_budget
-    min_target = min(budget, 3 if duration <= 12 else 4 if duration <= 20 else 6 if duration <= 35 else 8)
+    # No fixed "6 overlays" ceiling. By default use an adaptive Shorts rhythm:
+    # roughly one foreground beat every 2.6-3.0 seconds. An explicit
+    # --max-overlays still acts as a user override.
+    auto_budget = max(3, min(14, int(round(duration / 2.7))))
+    budget = max_overlays if max_overlays > 0 else auto_budget
+    min_target = min(budget, max(3, int(round(duration / 3.5))))
 
     prompt = f"""You are the effects editor for a fast TikTok/YouTube Short.
 
@@ -166,16 +169,18 @@ Schema:
             except Exception as exc:
                 print(f"[fx] fill pass unavailable: {exc}", flush=True)
 
+    # The user's local sticker pack is NOT merely a fallback. Always blend a
+    # few context-aware reaction stickers into the plan, even when Gemini
+    # successfully planned PNG/text accents.
+    sticker_raw = _local_sticker_effect_candidates(
+        plan,
+        sticker_dir,
+        out / "sticker_cache",
+        budget=min(max(2, budget // 2), 5),
+    )
+
     if not raw:
         object_raw = _local_effect_candidates(plan, budget)
-        sticker_raw = _local_sticker_effect_candidates(
-            plan,
-            sticker_dir,
-            out / "sticker_cache",
-            budget=min(3, max(0, budget - 1)),
-        )
-        # Prefer a blend: reactions from the user's sticker pack + literal
-        # object/value inserts. Sorting happens below by scene index.
         raw = [*sticker_raw, *object_raw]
         if raw:
             print(
@@ -183,6 +188,15 @@ Schema:
                 f"({len(sticker_raw)} local stickers)",
                 flush=True,
             )
+    elif sticker_raw:
+        # Put sticker reactions first so if Gemini and the sticker pack target
+        # the exact same scene, the reaction wins that beat instead of being
+        # silently discarded by the one-overlay-per-scene guard.
+        raw = [*sticker_raw, *raw]
+        print(
+            f"[fx] Gemini plan blended with {len(sticker_raw)} local sticker reaction(s)",
+            flush=True,
+        )
 
     # Gemini may nominate the same object several times (e.g. milk, 930 ml,
     # packaging). Keep one strong insert per concrete concept, preferring the
