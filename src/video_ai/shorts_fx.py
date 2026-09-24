@@ -248,6 +248,7 @@ Schema:
     used_scenes: set[int] = set()
     used_concepts: set[str] = set()
     used_times: list[float] = []
+    used_sticker_assets: set[str] = set()
     overlays: list[dict[str, Any]] = []
 
     for item in raw:
@@ -292,7 +293,11 @@ Schema:
         if effect_type in {"png", "png_text", "sticker"} and not query:
             continue
 
-        concept = (query or label).casefold().strip()
+        concept = (
+            "sticker:" + _reaction_family(query)
+            if effect_type == "sticker"
+            else (query or label).casefold().strip()
+        )
         if concept and concept in used_concepts:
             continue
 
@@ -334,11 +339,21 @@ Schema:
         if effect_type == "sticker":
             raw_asset = str(item.get("asset") or "")
             candidate_path = Path(raw_asset) if raw_asset else None
-            if candidate_path is None or not candidate_path.exists():
+            resolved_key = (
+                str(candidate_path.resolve()).casefold()
+                if candidate_path is not None and candidate_path.exists()
+                else ""
+            )
+            if (
+                candidate_path is None
+                or not candidate_path.exists()
+                or resolved_key in used_sticker_assets
+            ):
                 candidate_path = _find_local_sticker_by_prompt(
                     sticker_dir,
                     out / "sticker_cache",
                     query,
+                    exclude_assets=used_sticker_assets,
                 )
                 if candidate_path is not None:
                     print(
@@ -348,7 +363,7 @@ Schema:
                     )
             if candidate_path is None or not candidate_path.exists():
                 print(
-                    f"[fx] Gemini requested sticker but no local match was found: {query}",
+                    f"[fx] Gemini requested sticker but no unique local match was found: {query}",
                     flush=True,
                 )
                 continue
@@ -404,6 +419,11 @@ Schema:
         used_times.append(start)
         if concept:
             used_concepts.add(concept)
+        if effect_type == "sticker" and target is not None:
+            try:
+                used_sticker_assets.add(str(Path(target).resolve()).casefold())
+            except OSError:
+                used_sticker_assets.add(str(target).casefold())
         print(
             f"[fx] {effect_type} {len(overlays)}/{budget}: scene={scene_index + 1} "
             f"anchor={anchor!r} query={query!r} label={label!r} animation={animation}",
@@ -1262,10 +1282,30 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
 _STICKER_EXTS = {".gif", ".png", ".webp", ".jpg", ".jpeg"}
 
 
+def _reaction_family(value: str) -> str:
+    text = value.casefold()
+    families = [
+        ("money", ("money", "price", "cash", "expensive", "dollar", "coin")),
+        ("skeptical", ("skeptical", "suspicious", "side eye", "doubt")),
+        ("confused", ("confused", "thinking", "puzzled", "why")),
+        ("shocked", ("shocked", "surprised", "wide eyes", "wtf")),
+        ("laugh", ("laugh", "funny", "lol", "crying laughing")),
+        ("sad", ("sad", "crying", "disappointed")),
+        ("angry", ("angry", "mad", "furious")),
+        ("happy", ("happy", "heart eyes", "love", "smiling")),
+    ]
+    for name, needles in families:
+        if any(needle in text for needle in needles):
+            return name
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")[:40] or "reaction"
+
+
 def _find_local_sticker_by_prompt(
     sticker_dir: str | Path | None,
     cache_dir: Path,
     prompt: str,
+    *,
+    exclude_assets: set[str] | None = None,
 ) -> Path | None:
     """Resolve a Gemini reaction description to the best local sticker/GIF."""
     if not sticker_dir or not prompt.strip():
@@ -1274,9 +1314,14 @@ def _find_local_sticker_by_prompt(
     if not root.exists() or not root.is_dir():
         return None
 
+    excluded = {str(Path(p).resolve()).casefold() for p in (exclude_assets or set())}
     assets = [
         path for path in sorted(root.rglob("*"))
-        if path.is_file() and path.suffix.lower() in _STICKER_EXTS
+        if (
+            path.is_file()
+            and path.suffix.lower() in _STICKER_EXTS
+            and str(path.resolve()).casefold() not in excluded
+        )
     ][:500]
     if not assets:
         return None
@@ -1373,10 +1418,14 @@ def _local_sticker_effect_candidates(
     selected: list[dict[str, Any]] = []
     used_assets: set[Path] = set()
     used_scenes: list[int] = []
+    used_families: set[str] = set()
 
     for strength, scene_index, prompt in scene_rows:
         if len(selected) >= budget:
             break
+        family = _reaction_family(prompt)
+        if family in used_families:
+            continue
         if any(abs(scene_index - other) < 2 for other in used_scenes):
             continue
 
@@ -1417,6 +1466,7 @@ def _local_sticker_effect_candidates(
         })
         used_assets.add(best_asset)
         used_scenes.append(scene_index)
+        used_families.add(family)
         print(
             f"[fx] sticker pick: scene={scene_index + 1} "
             f"prompt={prompt!r} file={best_asset.name!r} score={float(best_score):.3f}",
