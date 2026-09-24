@@ -400,11 +400,12 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
 
         y_expr = str(target_y)
         if animation == "fly":
-            # Meme-style entrance: starts VERY fast and eases into the stop.
-            # p is clamped 0..1, ease=1-(1-p)^3 gives strong cubic ease-out.
-            travel = 0.34
+            # Fast launch + very long, soft deceleration. Quintic ease-out keeps
+            # most of the movement at the start, then spends the rest of the
+            # entrance gently bleeding off speed instead of snapping to a stop.
+            travel = 0.68
             p = f"max(0,min(1,(t-{start:.3f})/{travel:.3f}))"
-            ease = f"(1-pow(1-({p}),3))"
+            ease = f"(1-pow(1-({p}),5))"
             if side == "left":
                 settled = 70
                 x = (
