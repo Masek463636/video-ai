@@ -316,6 +316,11 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
     truncated to a few seconds or extended by a looped PNG stream.
     """
     base_duration = max(0.05, _probe_duration(base))
+    # Foreground sticker motion is rendered at 60 fps even when the base edit
+    # is 30 fps. The B-roll simply duplicates frames, while the overlay
+    # position/easing is evaluated twice as often and therefore looks much
+    # smoother on fast fly-ins.
+    fx_fps = max(60, int(plan.fps))
     valid = [
         item for item in overlays
         if float(item.get("end", 0)) > float(item.get("start", 0))
@@ -358,7 +363,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         # base duration so the FX pass can never shorten the edit.
         f"[0:v]setpts=PTS-STARTPTS,"
         f"tpad=stop_mode=clone:stop_duration={base_duration:.3f},"
-        f"trim=duration={base_duration:.3f}[basev]"
+        f"trim=duration={base_duration:.3f},fps={fx_fps}[basev]"
     ]
     current = "[basev]"
 
@@ -390,7 +395,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         tilt = -0.055 if index % 2 == 0 else 0.045
         filters.append(
             f"[{input_index}:v]"
-            f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,"
+            f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,fps={fx_fps},"
             # Deliberately allow upscaling. The old min(iw/ih) clamp left many
             # Commons PNGs tiny even when the editor requested a hero insert.
             f"scale=w={width}:h={max_h}:force_original_aspect_ratio=decrease,"
@@ -407,12 +412,13 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
 
         y_expr = str(target_y)
         if animation == "fly":
-            # Fast launch + very long, soft deceleration. Quintic ease-out keeps
-            # most of the movement at the start, then spends the rest of the
-            # entrance gently bleeding off speed instead of snapping to a stop.
-            travel = 0.68
+            # Fast launch, then a LONG visible coast into the final position.
+            # Exponential deceleration keeps much more motion in the second
+            # half than the old quintic curve, which visually "arrived" too
+            # early and then looked snapped in place.
+            travel = 1.15
             p = f"max(0,min(1,(t-{start:.3f})/{travel:.3f}))"
-            ease = f"(1-pow(1-({p}),5))"
+            ease = f"((1-exp(-1.7*({p})))/(1-exp(-1.7)))"
             if side == "left":
                 settled = 70
                 x = (
@@ -456,7 +462,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         "-filter_complex", ";".join(filters),
         "-map", "[vout]", "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-        "-pix_fmt", "yuv420p", "-r", str(plan.fps),
+        "-pix_fmt", "yuv420p", "-r", str(fx_fps),
         "-t", f"{base_duration:.3f}",
         str(output),
     ]
