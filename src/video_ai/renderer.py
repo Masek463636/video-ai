@@ -85,7 +85,7 @@ def render_plan(
 
         final_cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(picture), "-i", str(plan.audio),
+            "-reinit_filter", "0", "-i", str(picture), "-i", str(plan.audio),
         ]
         if sfx_track is not None and sfx_track.exists():
             final_cmd += ["-i", str(sfx_track)]
@@ -338,7 +338,13 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         shutil.copyfile(base, output)
         return
 
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(base)]
+    # All rendered spans already have identical dimensions/pixel format. Stock
+    # clips may still carry different color metadata. Recent FFmpeg versions
+    # reinitialize the filter graph at those boundaries, resetting setpts/fps
+    # and making the remaining footage play early followed by cloned frames.
+    # Preserve the graph's timeline across metadata-only changes.
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-reinit_filter", "0", "-i", str(base)]
     input_index_by_effect: dict[int, int] = {}
     next_input = 1
     for effect_index, item in enumerate(valid):
