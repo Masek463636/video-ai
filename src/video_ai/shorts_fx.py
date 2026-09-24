@@ -255,15 +255,13 @@ Schema:
         if concept and concept in used_concepts:
             continue
 
-        duration = _clamp_float(item.get("duration"), 0.70, 1.40, 1.00)
-        display_end = (
-            float(plan.scenes[scene_index + 1].start)
-            if scene_index + 1 < len(plan.scenes)
-            else float(scene.end)
-        )
+        duration = _clamp_float(item.get("duration"), 1.35, 2.20, 1.75)
+        timeline_end = max(float(s.end) for s in plan.scenes)
         anchor_start = _anchor_start(scene, anchor) if anchor else None
         start = max(float(scene.start), (anchor_start - 0.025) if anchor_start is not None else float(scene.start) + 0.10)
-        end = min(display_end, start + duration)
+        # Let foreground inserts survive across a storyboard cut. The old code
+        # clipped them at the next scene boundary, which often left <1 second.
+        end = min(timeline_end, start + duration)
         if end - start < 0.45:
             continue
 
@@ -449,14 +447,10 @@ Schema:
                 if concept in used_concepts:
                     continue
 
-                display_end = (
-                    float(plan.scenes[scene_index + 1].start)
-                    if scene_index + 1 < len(plan.scenes)
-                    else float(scene.end)
-                )
-                effect_duration = _clamp_float(item.get("duration"), 0.72, 1.20, 0.92)
+                timeline_end = max(float(s.end) for s in plan.scenes)
+                effect_duration = _clamp_float(item.get("duration"), 1.35, 2.10, 1.70)
                 start = max(float(scene.start), anchor_start - 0.02)
-                end = min(display_end, start + effect_duration)
+                end = min(timeline_end, start + effect_duration)
                 if end - start < 0.42:
                     continue
 
@@ -1139,7 +1133,7 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
                     "position": "right" if index % 2 == 0 else "left",
                     "animation": "fly",
                     "size": "hero",
-                    "duration": 0.95,
+                    "duration": 1.75,
                     "_local": True,
                     "_strength": 3,
                 })
@@ -1158,7 +1152,7 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
                     "position": "left" if index % 2 else "right",
                     "animation": "fly",
                     "size": "hero" if index % 4 == 0 else "large",
-                    "duration": 0.90,
+                    "duration": 1.70,
                     "_local": True,
                     "_strength": 2,
                 })
