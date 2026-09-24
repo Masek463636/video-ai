@@ -367,11 +367,13 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         size = str(item.get("size") or "large")
         # Foreground inserts should read immediately on a phone. Keep them
         # large and inside the upper third so they never compete with captions.
-        scale_ratio = 0.72 if size == "hero" else 0.60
-        max_h_ratio = 0.38 if size == "hero" else 0.31
+        # Foreground inserts should be unmistakably readable on a phone.
+        # The previous 60-72% width looked tiny against a 9:16 canvas.
+        scale_ratio = 0.90 if size == "hero" else 0.80
+        max_h_ratio = 0.48 if size == "hero" else 0.42
         width = int(plan.width * scale_ratio)
         max_h = int(plan.height * max_h_ratio)
-        target_y = int(plan.height * (0.055 if size == "hero" else 0.075))
+        target_y = int(plan.height * (0.10 if size == "hero" else 0.12))
 
         ov = f"[ov{index}]"
         nxt = f"[v{index}]"
