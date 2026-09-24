@@ -335,12 +335,19 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         if str(item.get("type") or "png") == "text":
             continue
         input_index_by_effect[effect_index] = next_input
-        cmd += [
-            "-loop", "1",
-            "-framerate", str(plan.fps),
-            "-t", f"{base_duration:.3f}",
-            "-i", str(item["asset"]),
-        ]
+        asset_path = Path(str(item["asset"]))
+        if asset_path.suffix.lower() == ".gif":
+            cmd += [
+                "-stream_loop", "-1",
+                "-i", str(asset_path),
+            ]
+        else:
+            cmd += [
+                "-loop", "1",
+                "-framerate", str(plan.fps),
+                "-t", f"{base_duration:.3f}",
+                "-i", str(asset_path),
+            ]
         next_input += 1
 
     filters: list[str] = [
