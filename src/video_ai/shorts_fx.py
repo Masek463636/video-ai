@@ -99,13 +99,17 @@ SELECTION RULES:
 TIMING:
 - anchor = the exact spoken word/short phrase that should trigger the effect.
 - The renderer aligns to the word timestamp when possible.
-- duration 0.70–1.40 seconds.
+- duration 1.50–2.10 seconds.
 
 VISUAL STYLE:
 - animation: "fly", "pop", or "drop".
-  - fly = very fast side entry, then smooth ease-out stop.
-  - pop = appears instantly.
-  - drop = comes quickly from above and eases into place.
+  - fly = VERY fast side entry (~0.2s), then stay completely still for the rest of the insert.
+  - pop = appear instantly IN PLACE exactly on the sound/anchor beat. Use this often for reaction stickers and punchlines.
+  - drop = quick top entry for occasional variety.
+- Mix fly and pop. Do NOT make every sticker fly from an edge.
+- Strong surprise / money shock / funny reaction moments usually work best as pop.
+- Skeptical / confused / explanatory moments can use fly.
+- After appearing, the insert should remain readable for about 1-2 seconds, then disappear.
 - position: left, right, or center.
 - size: "large" or "hero".
 - For text effects use center unless there is a reason not to.
@@ -325,10 +329,11 @@ Schema:
             animation = ("pop" if effect_type == "text" else ("fly" if len(overlays) % 2 == 0 else "drop"))
         if overlays and animation == overlays[-1].get("animation"):
             animation = {"fly":"pop","pop":"drop","drop":"fly"}[animation]
-        # Foreground visual inserts use one consistent meme motion language:
-        # fast fly-in + slow cubic ease-out stop. Text-only emphasis may pop.
-        if effect_type in {"png", "png_text", "sticker"}:
-            animation = "fly"
+        # Keep the planned motion. Reaction stickers may POP directly in
+        # place on the sound beat; object inserts may FLY in quickly.
+        if effect_type in {"png", "png_text", "sticker"} and animation == "drop":
+            # Drop is kept only as occasional variety; never force it.
+            pass
 
         size = str(item.get("size") or "").lower()
         if size not in {"large", "hero"}:
@@ -1458,7 +1463,11 @@ def _local_sticker_effect_candidates(
             "anchor": "",
             "label": "",
             "position": "left" if len(selected) % 2 else "right",
-            "animation": "fly",
+            "animation": (
+                "pop"
+                if family in {"money", "shocked", "laugh", "happy", "angry"}
+                else "fly"
+            ),
             "size": "hero",
             "duration": 1.85,
             "_local": True,
