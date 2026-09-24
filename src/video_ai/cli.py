@@ -13,6 +13,7 @@ from .editing_grammar import apply_pre_asset_grammar, diversity_repair_indexes
 from .io import load_shot_plan, save_shot_plan
 from .material_brain import diversity_summary, find_duplicate_scenes, prepare_diversity_repair
 from .material_v2 import apply_material_brain_v2
+from .moments import select_moments
 from .probe import probe
 from .qc import failed_scene_indexes, inspect_plan, save_qc
 from .renderer import render_plan
@@ -22,6 +23,7 @@ from .transcript import attach_caption_timings, load_transcript, save_transcript
 
 
 def _add_quality_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--select-moments", action="store_true", help="Use extra Gemini requests to select action windows inside downloaded videos")
     parser.add_argument("--limit", type=int, default=20, help="Candidates per search provider")
     parser.add_argument("--semantic", action="store_true", help="Use optional local CLIP text-image reranking")
     parser.add_argument("--semantic-top-k", type=int, default=6)
@@ -419,6 +421,7 @@ def main() -> None:
     p_qc.add_argument("-o", "--output", required=True)
     p_render = sub.add_parser("render", help="Render a materialized ShotPlan to MP4")
     p_render.add_argument("plan")
+    p_render.add_argument("--select-moments", action="store_true", help="Select action windows with Gemini; saves a new plan in the render work directory")
     p_render.add_argument("-o", "--output", required=True)
     p_render.add_argument("--work-dir", default=None)
     p_render.add_argument("--no-captions", action="store_true")
@@ -509,6 +512,9 @@ def main() -> None:
         if args.transcript:
             attach_caption_timings(plan, load_transcript(args.transcript))
         render_work = Path(args.work_dir) if args.work_dir else Path(args.output).with_suffix("").with_name(Path(args.output).stem + "-work")
+        if args.select_moments:
+            select_moments(plan, render_work / "moments")
+            save_shot_plan(plan, render_work / "shot_plan.moments.json")
         overlays = (
             build_shorts_overlays(
                 plan,
@@ -588,6 +594,8 @@ def main() -> None:
                 print(f"[material-v2] action-first scenes: {material_v2_scenes}", flush=True)
 
         manifest, qc_results, diversity_repairs = _resolve_and_repair(plan, work, args)
+        if args.select_moments:
+            select_moments(plan, work / "moments")
         materialized = save_shot_plan(plan, work / "shot_plan.materialized.json")
         audio_plan = build_audio_plan(plan)
         audio_plan_path = save_audio_plan(audio_plan, work / "audio_plan.json")

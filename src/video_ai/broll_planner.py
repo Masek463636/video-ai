@@ -74,11 +74,17 @@ EDITING RULES:
 - Use MEME rarely: maximum 1 meme per ~15-20s, never repeat the same meme.
 - Search queries must describe VISIBLE ACTION/SUBJECT, not abstract narration.
 - Show what is HAPPENING, not merely the noun that was spoken.
-- Do not repeat the same visual idea, person, object, location, meme, composition,
-  search query or stock archetype in nearby beats.
-- If the narration returns to the same concept later, choose a DIFFERENT visual
-  metaphor/action/context rather than repeating the earlier shot.
-- Think globally: each beat must contrast with the preceding and following beat.
+- Preserve the same subject/object/location when consecutive beats explain it.
+  A product comparison needs the same product; a reaction needs its cause.
+  Vary the action or framing, not the subject merely for variety.
+- Avoid duplicate footage and redundant shots. Reusing the subject with a new
+  informative action is useful continuity, not repetition.
+- Plan visible evidence: what does this shot teach beyond the subtitle?
+  For a comparison show both states; for a quantity show its label/measurement;
+  for an action show the event, not just an unrelated shot of the same animal.
+- Specify this observable evidence in visual_description and carry the concrete
+  subject into queries even when the current words only say 'it' or 'the same'.
+- Do not invent a different subject or a visual metaphor to fill a difficult beat.
 - Never use abstract sky/clouds/light/glow in two adjacent beats. After one atmospheric abstract shot, the next beat must use a grounded human action, object, place, document, or event.
 - Spiritual/religious narration does NOT automatically mean clouds or light rays; prefer concrete visible actions such as praying hands, a church/temple interior, candles, a historical religious image, or a person reacting when context allows.
 - For a price/money beat, do not repeatedly use a rich-man reaction meme.
@@ -174,7 +180,8 @@ EDITING RULES:
             )
         )
 
-    _dedupe_neighbor_queries(scenes)
+    # Retrieval deduplicates actual footage. Repeated subject queries can be
+    # intentional continuity; do not rotate them into generic alternatives.
 
     return ShotPlan(
         audio=Path(audio),

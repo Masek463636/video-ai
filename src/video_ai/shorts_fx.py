@@ -54,10 +54,10 @@ def build_shorts_overlays(
 
     duration = max((float(scene.end) for scene in plan.scenes), default=0.0)
     # Sparse by default: foreground accents are punctuation, not decoration.
-    # A ~24s Short gets about 4 total accents unless --max-overlays overrides it.
-    auto_budget = max(2, min(8, int(round(duration / 5.5))))
+    # No minimum density: an explanatory edit may need no foreground accents.
+    auto_budget = max(1, min(4, int(round(duration / 12.0))))
     budget = max_overlays if max_overlays > 0 else auto_budget
-    min_target = min(budget, max(2, int(round(duration / 7.0))))
+    min_target = 0
 
     prompt = f"""You are the effects editor for a fast TikTok/YouTube Short.
 
@@ -66,7 +66,9 @@ The primary B-roll is already selected. DO NOT replace it. Your job is to add on
 Scenes:
 {json.dumps(scene_rows, ensure_ascii=False)}
 
-Return JSON with key effects. Aim for {min_target}-{budget} useful effects total when the narration gives enough concrete hooks. Do not stop at one or two effects unless the script truly has no more concrete or numeric moments.
+Return JSON with key effects. Use 0 to {budget} effects. There is no minimum.
+Only add an effect that explains a concrete detail or delivers a clear joke.
+Do not fill empty scenes with emotion stickers merely to meet a quota.
 
 LOCAL STICKER PACK AVAILABLE: {bool(sticker_dir)}
 
@@ -185,19 +187,18 @@ Schema:
             except Exception as exc:
                 print(f"[fx] fill pass unavailable: {exc}", flush=True)
 
-    # The user's local sticker pack is NOT merely a fallback. Always blend a
-    # few context-aware reaction stickers into the plan, even when Gemini
-    # successfully planned PNG/text accents.
+    # A successful empty director plan is intentional. Local reactions only
+    # serve as fallback; they must not displace an explanatory number/object.
     sticker_raw = _local_sticker_effect_candidates(
         plan,
         sticker_dir,
         out / "sticker_cache",
         budget=min(2, max(0, budget // 2)),
-    )
+    ) if client is None else []
 
-    if not raw:
+    if not raw and client is None:
         object_raw = _local_effect_candidates(plan, budget)
-        raw = [*sticker_raw, *object_raw]
+        raw = [*object_raw, *sticker_raw]
         if raw:
             print(
                 f"[fx] local fallback planned {len(raw)} candidate effects "
@@ -205,10 +206,8 @@ Schema:
                 flush=True,
             )
     elif sticker_raw:
-        # Put sticker reactions first so if Gemini and the sticker pack target
-        # the exact same scene, the reaction wins that beat instead of being
-        # silently discarded by the one-overlay-per-scene guard.
-        raw = [*sticker_raw, *raw]
+        # Explanatory accents keep priority over fallback reactions.
+        raw = [*raw, *sticker_raw]
         print(
             f"[fx] Gemini plan blended with {len(sticker_raw)} local sticker reaction(s)",
             flush=True,
