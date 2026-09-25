@@ -177,3 +177,9 @@ V0.4 is still an MVP engine, not a finished consumer editor.
 ## License / upstream
 
 The product architecture is independent. We are studying compatible open-source approaches such as `browser-use/video-use`; any substantial third-party code reused later must retain the notices required by its license.
+
+## Local browser studio
+
+Run `python -m video_ai.web` from the project folder to upload a voiceover,
+create a Shorts video and download the result through a local browser UI.
+See [Local Studio setup and limitations](docs/local-studio.md).

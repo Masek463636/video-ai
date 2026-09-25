@@ -18,6 +18,10 @@ full = ["faster-whisper>=1.1.0", "opencv-python-headless>=4.10", "numpy>=1.26", 
 
 [project.scripts]
 video-ai = "video_ai.cli:main"
+video-ai-web = "video_ai.web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+video_ai = ["web_static/*"]
