@@ -66,3 +66,25 @@ def test_real_overlay_is_inside_reviewed_box(tmp_path):
     assert red
     assert min(x for x,y in red)>=9 and max(x for x,y in red)<=41
     assert min(y for x,y in red)>=125 and max(y for x,y in red)<=163
+
+
+def test_bad_response_gets_one_format_retry(tmp_path):
+    client=Client([[{'choice':0},{'choice':1}], {'choice':1,'usable':True}])
+    review=CompositionReviewer(tmp_path,client)
+    assert review.ask([{'text':'choose'}])['choice']==1
+    assert not review.disabled and client.calls==2
+
+
+def test_persistent_bad_format_does_not_disable_following_scene(tmp_path):
+    client=Client([[],ValueError('invalid JSON'),{'usable':True}])
+    review=CompositionReviewer(tmp_path,client)
+    with pytest.raises(ValueError): review.ask([])
+    assert not review.disabled
+    assert review.ask([])=={'usable':True}
+
+
+def test_programming_error_is_not_provider_outage(tmp_path):
+    client=Client([TypeError('unexpected value'),{'usable':True}])
+    review=CompositionReviewer(tmp_path,client)
+    with pytest.raises(TypeError): review.ask([])
+    assert review.ask([])=={'usable':True}

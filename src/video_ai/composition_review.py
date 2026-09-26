@@ -68,16 +68,25 @@ class CompositionReviewer:
     def ask(self, parts):
         if self.disabled:
             raise RuntimeError('review unavailable')
-        try:
-            data = self.client._generate_json(parts,temperature=0.01)
-            if isinstance(data,list) and len(data)==1:
-                data=data[0]
-            if not isinstance(data,dict):
-                raise ValueError('expected object')
-            return data
-        except Exception:
-            self.disabled=True
-            raise
+        # A malformed model response is local to this item, not an outage.
+        # Retry its format once; never pick an arbitrary element from a list.
+        for attempt in range(2):
+            try:
+                request = parts if attempt == 0 else parts + [{'text':
+                    'FORMAT CORRECTION: return exactly ONE JSON object matching the requested schema. '
+                    'Do not return an array of separate frame or candidate judgements.'}]
+                data = self.client._generate_json(request,temperature=0.01)
+                if isinstance(data,list) and len(data)==1:
+                    data=data[0]
+                if not isinstance(data,dict):
+                    raise ValueError('expected one review object')
+                return data
+            except ValueError:
+                if attempt == 1:
+                    raise ValueError('review response format invalid after one correction') from None
+            except (RuntimeError, OSError, TimeoutError):
+                self.disabled=True
+                raise
 
     def scene(self, scene, plan, duration, clip, index, *, reference_framing, editing_polish):
         from .renderer import _render_scene, _safe_probe_duration
@@ -126,7 +135,9 @@ class CompositionReviewer:
                 row.update(status='repaired',source_start=proposal.source_start,focus_x=proposal.focus_x)
             print(f'[composition] scene {index+1}: {row["status"]}',flush=True)
         except Exception as exc:
-            row.update(status='review_failed',error=type(exc).__name__)
+            row.update(status='review_failed',error=type(exc).__name__,
+                       error_kind='invalid_review_response' if isinstance(exc, ValueError) else 'processing_or_provider_failure',
+                       remaining_review_disabled=self.disabled)
         self.save()
 
     def overlays(self, base, overlays, plan):
@@ -168,7 +179,9 @@ class CompositionReviewer:
                 result.append(placed)
                 row.update(status='placed',layout_box=slot)
             except Exception as exc:
-                row.update(status='review_failed',error=type(exc).__name__)
+                row.update(status='review_failed',error=type(exc).__name__,
+                       error_kind='invalid_review_response' if isinstance(exc, ValueError) else 'processing_or_provider_failure',
+                       remaining_review_disabled=self.disabled)
         self.save()
         (self.root/'overlays.reviewed.json').write_text(json.dumps({'overlays':result},ensure_ascii=False,indent=2),encoding='utf-8')
         return result
