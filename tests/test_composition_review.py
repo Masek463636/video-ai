@@ -134,8 +134,8 @@ def test_insert_accepts_1000_scale_coordinates(tmp_path):
     assert {'text':'IMAGE:background'} not in requests[0]
     assert {'text':'IMAGE:insert'} in requests[0]
     assert {'text':'IMAGE:insert'} not in requests[1]
-assert len(review.report['overlays'][0]['placement_reviews'])==1
-assert review.report['overlays'][0]['protected_boxes']==[[.01,.02,.03,.04]]
+    assert len(review.report['overlays'][0]['placement_reviews'])==1
+    assert review.report['overlays'][0]['protected_boxes']==[[.01,.02,.03,.04]]
 
 def test_final_verification_can_veto_repair(tmp_path):
     approved={'usable':True,'choice':0,'preserves_visible_subjects':True,
