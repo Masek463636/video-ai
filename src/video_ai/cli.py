@@ -428,6 +428,7 @@ def main() -> None:
     p_render.add_argument("--crf", type=int, default=20)
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
+    p_render.add_argument("--composition-review", action="store_true", help="Review cropped scenes and safely place optional inserts with Gemini")
     p_render.add_argument("--overlays-file", default=None, help="Reuse saved overlays.json without new API requests")
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
     p_render.add_argument("--shorts-fx-local", action="store_true", help="Use Shorts FX without Gemini; skip API calls and use local storyboard fallback")
@@ -574,6 +575,7 @@ def main() -> None:
             editing_polish=args.editing_polish,
             overlays=overlays,
             reference_framing=args.reference_framing,
+            composition_review=args.composition_review,
         )
         print(json.dumps({
             "ok": True,

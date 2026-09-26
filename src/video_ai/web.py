@@ -58,7 +58,7 @@ class Studio:
         common = [sys.executable, '-u', '-m', 'video_ai.cli']
         steps = [
             ('Подбор кадров и сборка основы', common + ['create', str(folder / 'voice.mp3'), '-o', str(folder / 'base.mp4'), '--work-dir', str(work), '--language', 'ru', '--material-v2', '--reference-framing', '--select-moments', '--no-sfx']),
-            ('Оформление и финальный рендер', common + ['render', str(work / 'shot_plan.materialized.json'), '--transcript', str(work / 'transcript.json'), '--editing-polish', '--reference-framing', '-o', str(folder / 'final.mp4'), '--work-dir', str(folder / 'final-work')]),
+            ('Оформление и финальный рендер', common + ['render', str(work / 'shot_plan.materialized.json'), '--transcript', str(work / 'transcript.json'), '--editing-polish', '--reference-framing', '--composition-review', '-o', str(folder / 'final.mp4'), '--work-dir', str(folder / 'final-work')]),
         ]
         if job['effects']:
             steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', '2'])

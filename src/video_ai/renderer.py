@@ -24,6 +24,7 @@ def render_plan(
     editing_polish: bool = False,
     overlays: list[dict] | None = None,
     reference_framing: bool = False,
+    composition_review: bool = False,
 ) -> Path:
     _require("ffmpeg")
     _require("ffprobe")
@@ -46,6 +47,10 @@ def render_plan(
         print(f"[render] {len(plan.scenes)} subtitle scenes -> {len(spans)} continuous visual spans", flush=True)
         if editing_polish:
             print("[render] editing polish enabled: same assets and cut points, smoother motion + caption pop", flush=True)
+        reviewer = None
+        if composition_review:
+            from .composition_review import CompositionReviewer
+            reviewer = CompositionReviewer(root / "composition")
         clips: list[Path] = []
         for index, (scene, start, end) in enumerate(spans):
             clip = clips_dir / f"span_{index:03d}.mp4"
@@ -58,6 +63,9 @@ def render_plan(
                 editing_polish=editing_polish,
                 reference_framing=reference_framing,
             )
+            if reviewer is not None:
+                reviewer.scene(scene, plan, end-start, clip, index,
+                               reference_framing=reference_framing, editing_polish=editing_polish)
             clips.append(clip)
 
         concat_file = root / "concat.txt"
@@ -68,6 +76,8 @@ def render_plan(
         base = root / "base.mp4"
         _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(base)])
 
+        if reviewer is not None:
+            overlays = reviewer.overlays(base, overlays or [], plan)
         picture = base
         if overlays:
             overlayed = root / "overlayed.mp4"
@@ -403,12 +413,22 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         max_h = int(plan.height * max_h_ratio)
         target_y = int(plan.height * (0.10 if size == "hero" else 0.12))
 
+        layout = item.get("layout_box")
+        if layout is not None:
+            from .composition_review import boxes
+            layout = boxes([layout])[0]
+            width = max(2, int(plan.width * layout[2]))
+            max_h = max(2, int(plan.height * layout[3]))
+            target_y = round(plan.height * layout[1])
+            animation = "pop"
+
         ov = f"[ov{index}]"
         nxt = f"[v{index}]"
         input_index = input_index_by_effect[index]
         # Give foreground cutouts a loose meme-sticker feel instead of a
         # perfectly upright catalogue-PNG look.
-        tilt = -0.055 if index % 2 == 0 else 0.045
+        tilt = 0.0 if layout is not None else (-0.055 if index % 2 == 0 else 0.045)
+        rotation_filter = "" if layout is not None else f"rotate={tilt}:fillcolor=none:ow=rotw(iw):oh=roth(ih),"
         fade_start = max(start + 0.20, end - 0.10)
         filters.append(
             f"[{input_index}:v]"
@@ -417,7 +437,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
             # Commons PNGs tiny even when the editor requested a hero insert.
             f"scale=w={width}:h={max_h}:force_original_aspect_ratio=decrease,"
             f"format=rgba,"
-            f"rotate={tilt}:fillcolor=none:ow=rotw(iw):oh=roth(ih),"
+            f"{rotation_filter}"
             # Hold fully visible, then disappear quickly instead of lingering.
             f"fade=t=out:st={fade_start:.3f}:d=0.10:alpha=1{ov}"
         )
@@ -429,6 +449,8 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         else:
             settled_x = "main_w-overlay_w-46"
 
+        if layout is not None:
+            settled_x = str(int(plan.width * layout[0]))
         y_expr = str(target_y)
         if animation == "fly":
             # New Shorts rhythm: enter FAST, finish the movement quickly, then
