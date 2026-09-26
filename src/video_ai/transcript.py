@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .models import ShotPlan, Transcript, Word
+
+
+def _caption_text(words: list[Word]) -> str:
+    """Rebuild caption text exactly like the planners do."""
+    return re.sub(r"\\s+([,.!?;:…])", r"\\1", " ".join(word.text for word in words)).strip()
 
 
 def _plan_already_has_transcript_timings(plan: ShotPlan, transcript: Transcript) -> bool:
@@ -20,7 +26,7 @@ def _plan_already_has_transcript_timings(plan: ShotPlan, transcript: Transcript)
             continue
         if not scene.caption_words:
             return False
-        if " ".join(w.text for w in scene.caption_words).split() != scene.caption.split():
+        if _caption_text(scene.caption_words) != scene.caption.strip():
             return False
         embedded.extend(scene.caption_words)
 
@@ -54,7 +60,7 @@ def attach_caption_timings(plan: ShotPlan, transcript: Transcript) -> None:
             continue
         words = [w for w in transcript.words
                  if w.start >= scene.start - 0.001 and w.end <= scene.end + 0.001]
-        if " ".join(w.text for w in words).split() != scene.caption.split():
+        if _caption_text(words) != scene.caption.strip():
             raise ValueError(f"scene {index}: transcript does not match caption; use the original transcript.json")
         matched.append(words)
     for scene, words in zip(plan.scenes, matched):
