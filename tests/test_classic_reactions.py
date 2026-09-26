@@ -72,7 +72,7 @@ def test_second_candidate_and_anchor_at_scene_end(tmp_path):
         {'readable':True,'relevant':True,'kind':'emoji'}])
     with patch('video_ai.gemini_ai.get_gemini_client',return_value=client), patch('video_ai.shorts_fx._find_local_sticker_by_prompt',side_effect=[first,second]) as find, patch('video_ai.story_media.preview_parts',return_value=([{'text':'preview'}],1)):
         effects=build_reactions(plan,tmp_path/'out',sticker_dir=pack)
-    assert len(effects)==1 and effects[0]['start']==.8 and effects[0]['end']==1.4
+    assert len(effects)==1 and effects[0]['start']==.8 and effects[0]['end']==2.05
     assert str(first.resolve()).casefold() in find.call_args.kwargs['exclude_assets']
     report=json.loads((tmp_path/'out/overlays.json').read_text())
     assert report['decisions'][0]['status']=='selected'

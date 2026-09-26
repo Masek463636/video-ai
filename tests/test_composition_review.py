@@ -14,8 +14,8 @@ def test_invalid_boxes_rejected(value):
 def test_centered_slot_ignores_protected_boxes_in_experiment():
     emoji = choose_slot([[0,0,1,1]], "emoji")
     meme = choose_slot([[0,0,1,1]], "meme")
-    assert emoji == pytest.approx([.225, .22125, .55, .3575])
-    assert meme == pytest.approx([.075, .12375, .85, .765])
+    assert emoji == pytest.approx([.225, .10, .55, .3575])
+    assert meme == pytest.approx([.075, .08, .85, .765])
 
 class Client:
     def __init__(self, replies): self.replies=iter(replies); self.calls=0
@@ -33,7 +33,7 @@ def test_irrelevant_insert_removed_and_relevant_placed(tmp_path):
     with patch('video_ai.composition_review.frames',return_value=[]):
         result=review.overlays('base',effects,plan)
     assert len(result)==1 and result[0]['animation']=='pop'
-    assert result[0]['layout_box'] == pytest.approx([.225, .22125, .55, .3575])
+    assert result[0]['layout_box'] == pytest.approx([.225, .10, .55, .3575])
     assert review.report['overlays'][0]['status']=='unsupported_accent'
     assert json.loads((tmp_path/'overlays.reviewed.json').read_text())['overlays']==result
 

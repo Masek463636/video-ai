@@ -78,12 +78,16 @@ def failure(row, exc, disabled):
 
 
 def choose_slot(protected, kind="emoji"):
-    # EXPERIMENT: intentionally ignore protected boxes and center reactions.
+    # EXPERIMENT: reactions stay horizontally centered but live above captions.
     size = 0.85 if kind == "meme" else 0.55
+    height = size * 0.9 if kind == "meme" else size * 0.65
     x = 0.5 - size / 2.0
-    y = 0.40 - (size * 0.65) / 2.0
 
-    return [x, y, size, size * 0.65 if kind != "meme" else size * 0.9]
+    # Memes are usually wider; emoji/Giphy reactions can safely sit a little
+    # lower while still remaining clearly above the subtitle zone.
+    y = 0.08 if kind == "meme" else 0.10
+
+    return [x, y, size, height]
 
 
 def frames(path, times, root, prefix):
