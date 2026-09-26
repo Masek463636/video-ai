@@ -21,7 +21,7 @@ def boxes(value):
             raise ValueError('invalid box')
         if any(type(v) not in (int, float) or not math.isfinite(v) for v in box):
             raise ValueError('invalid coordinate')
-         x, y, w, h = map(float, box)
+        x, y, w, h = map(float, box)
 
         # Gemini иногда возвращает координаты в системе 0..1000
         # вместо запрошенных нормализованных 0..1.
