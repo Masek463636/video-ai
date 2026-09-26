@@ -23,22 +23,26 @@ def boxes(value):
             raise ValueError('invalid coordinate')
         x, y, w, h = map(float, box)
 
-        # Gemini иногда возвращает координаты в системе 0..1000
-        # вместо запрошенных нормализованных 0..1.
+        if x < 0 or y < 0 or w <= 0 or h <= 0:
+            raise ValueError('box outside frame')
+
+        # Gemini иногда возвращает координаты в системе 0..1000.
+        # Считаем это такой шкалой только при явно больших значениях.
         if any(v > 1.001 for v in (x, y, w, h)):
-            if all(0 <= v <= 1000 for v in (x, y, w, h)):
+            if max(x, y, w, h) > 2 and all(v <= 1000 for v in (x, y, w, h)):
                 x, y, w, h = [v / 1000.0 for v in (x, y, w, h)]
             else:
-                raise ValueError('box coordinate scale invalid')
+                raise ValueError('box outside frame')
 
-        # Небольшие погрешности модели безопасно обрезаем по кадру.
-        x = max(0.0, min(x, 1.0))
-        y = max(0.0, min(y, 1.0))
-        w = max(0.0, min(w, 1.0 - x))
-        h = max(0.0, min(h, 1.0 - y))
+        if not (0 <= x < 1 and 0 <= y < 1):
+            raise ValueError('box outside frame')
+
+        # Разрешаем лишь небольшое переполнение правого/нижнего края.
+        w = min(w, 1.0 - x)
+        h = min(h, 1.0 - y)
 
         if w <= 0 or h <= 0:
-            continue
+            raise ValueError('box outside frame')
 
         result.append([x, y, w, h])
     return result
