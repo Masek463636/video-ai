@@ -421,6 +421,7 @@ def main() -> None:
     p_qc.add_argument("-o", "--output", required=True)
     p_render = sub.add_parser("render", help="Render a materialized ShotPlan to MP4")
     p_render.add_argument("plan")
+    p_render.add_argument("--base-video", default=None, help="Reuse a caption-free saved base.mp4; only rebuild reactions, captions and audio")
     p_render.add_argument("--select-moments", action="store_true", help="Select action windows with Gemini; saves a new plan in the render work directory")
     p_render.add_argument("-o", "--output", required=True)
     p_render.add_argument("--work-dir", default=None)
@@ -546,6 +547,8 @@ def main() -> None:
         if args.transcript:
             attach_caption_timings(plan, load_transcript(args.transcript))
         render_work = Path(args.work_dir) if args.work_dir else Path(args.output).with_suffix("").with_name(Path(args.output).stem + "-work")
+        if args.base_video and args.select_moments:
+            raise ValueError("--base-video cannot be combined with --select-moments")
         if args.select_moments:
             select_moments(plan, render_work / "moments")
             save_shot_plan(plan, render_work / "shot_plan.moments.json")
@@ -576,6 +579,7 @@ def main() -> None:
             overlays=overlays,
             reference_framing=args.reference_framing,
             composition_review=args.composition_review,
+            base_video=args.base_video,
         )
         print(json.dumps({
             "ok": True,

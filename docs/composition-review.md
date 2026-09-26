@@ -47,3 +47,17 @@ identity, timeline, range and UI job tests. Live Gemini, stock availability and
 subjective resemblance to references require real user footage/API runs; synthetic
 integration success does not certify those. Three sampled frames are not tracking
 or frame-by-frame QC. Provider rate limits can still delay requests.
+
+## Reactions-only rerender
+
+`render PLAN --base-video SAVED_WORK/base.mp4 --shorts-fx --composition-review`
+reuses the approved caption-free base without scene review, recropping or source
+search. Dimensions and duration must match. Narration, subtitles and verified
+reactions are rebuilt; use a fresh work directory. Do not pass a finished video
+with already burned-in captions. `--select-moments` is incompatible.
+
+Reaction selection tries up to three distinct local candidates per proposed beat.
+An accent can continue beyond the narration scene boundary for readability, but
+never beyond the complete narration. Placement checks span the whole accent.
+The report includes planner output, proposed anchors, candidate verdicts, skip
+reasons and provider error classes (without exception strings/secrets).

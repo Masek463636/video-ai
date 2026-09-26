@@ -60,3 +60,33 @@ def test_full_render_replacement_and_video_reaction_preserve_audio(tmp_path):
     # New blue source actually appears, not only a changed report.
     pixel=subprocess.check_output(['ffmpeg','-v','error','-ss','1','-i',str(output),'-frames:v','1','-vf','crop=20:20:0:0,scale=1:1','-f','rawvideo','-pix_fmt','rgb24','-'])
     assert pixel[2]>pixel[0]+80
+
+
+def test_second_candidate_and_anchor_at_scene_end(tmp_path):
+    from video_ai.models import Word
+    pack=tmp_path/'stickers'; pack.mkdir()
+    first=pack/'bad.gif'; second=pack/'good.gif'; first.touch(); second.touch()
+    plan=ShotPlan(Path('a'),[Scene(0,1,'phone',caption='Ну, звонил?',caption_words=[Word(.1,.3,'Ну,'),Word(.8,1,'звонил?')]),Scene(1,3,'phone',caption='Дальше')])
+    client=Client([{'effects':[{'scene':0,'anchor':'звонил','query':'confused'}]},
+        {'readable':False,'relevant':True,'kind':'emoji'},
+        {'readable':True,'relevant':True,'kind':'emoji'}])
+    with patch('video_ai.gemini_ai.get_gemini_client',return_value=client), patch('video_ai.shorts_fx._find_local_sticker_by_prompt',side_effect=[first,second]) as find, patch('video_ai.story_media.preview_parts',return_value=([{'text':'preview'}],1)):
+        effects=build_reactions(plan,tmp_path/'out',sticker_dir=pack)
+    assert len(effects)==1 and effects[0]['start']==.8 and effects[0]['end']==2.5
+    assert str(first.resolve()) in find.call_args.kwargs['exclude_assets']
+    report=json.loads((tmp_path/'out/overlays.json').read_text())
+    assert report['decisions'][0]['status']=='selected'
+    assert len(report['decisions'][0]['candidates'])==2
+
+
+def test_saved_base_skips_scene_render_and_search(tmp_path):
+    import subprocess
+    from video_ai.renderer import render_plan
+    base=tmp_path/'base.mp4'; audio=tmp_path/'audio.wav'
+    for source,target in [('color=blue:s=180x320:r=12:d=1',base),('sine=frequency=440:duration=1',audio)]:
+        subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i',source,str(target)],check=True)
+    plan=ShotPlan(audio,[Scene(0,1,'unused',asset='missing.mp4',caption='Привет')],width=180,height=320,fps=12)
+    with patch('video_ai.renderer._render_scene',side_effect=AssertionError('changed approved base')), patch('video_ai.gemini_ai.get_gemini_client',return_value=Client([])):
+        output=render_plan(plan,tmp_path/'result.mp4',work_dir=tmp_path/'work',base_video=base,composition_review=True)
+    assert output.is_file()
+    assert json.loads((tmp_path/'work/composition/review.json').read_text())['scenes']==[]

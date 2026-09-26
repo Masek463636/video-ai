@@ -25,6 +25,7 @@ def render_plan(
     overlays: list[dict] | None = None,
     reference_framing: bool = False,
     composition_review: bool = False,
+    base_video: str | Path | None = None,
 ) -> Path:
     _require("ffmpeg")
     _require("ffprobe")
@@ -51,30 +52,38 @@ def render_plan(
         if composition_review:
             from .composition_review import CompositionReviewer
             reviewer = CompositionReviewer(root / "composition")
-        clips: list[Path] = []
-        for index, (scene, start, end) in enumerate(spans):
-            clip = clips_dir / f"span_{index:03d}.mp4"
-            _render_scene(
-                scene,
-                end - start,
-                plan,
-                clip,
-                crf=crf,
-                editing_polish=editing_polish,
-                reference_framing=reference_framing,
-            )
-            if reviewer is not None:
-                reviewer.scene(scene, plan, end-start, clip, index,
-                               reference_framing=reference_framing, editing_polish=editing_polish)
-            clips.append(clip)
+        if base_video is not None:
+            base = Path(base_video)
+            if not base.is_file(): raise ValueError('Saved base video not found')
+            if _probe_video_size(base) != (plan.width, plan.height):
+                raise ValueError('Saved base dimensions must match plan')
+            _assert_duration(base, audio_duration, label='saved base')
+            print('[render] saved base reused; no scene search or crop changes',flush=True)
+        else:
+            clips: list[Path] = []
+            for index, (scene, start, end) in enumerate(spans):
+                clip = clips_dir / f"span_{index:03d}.mp4"
+                _render_scene(
+                    scene,
+                    end - start,
+                    plan,
+                    clip,
+                    crf=crf,
+                    editing_polish=editing_polish,
+                    reference_framing=reference_framing,
+                )
+                if reviewer is not None:
+                    reviewer.scene(scene, plan, end-start, clip, index,
+                                   reference_framing=reference_framing, editing_polish=editing_polish)
+                clips.append(clip)
 
-        concat_file = root / "concat.txt"
-        concat_file.write_text(
-            "\n".join("file '" + str(p.resolve()).replace("'", "'\\''") + "'" for p in clips) + "\n",
-            encoding="utf-8",
-        )
-        base = root / "base.mp4"
-        _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(base)])
+            concat_file = root / "concat.txt"
+            concat_file.write_text(
+                "\n".join("file '" + str(p.resolve()).replace("'", "'\\''") + "'" for p in clips) + "\n",
+                encoding="utf-8",
+            )
+            base = root / "base.mp4"
+            _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(base)])
 
         if reviewer is not None:
             overlays = reviewer.overlays(base, overlays or [], plan)
