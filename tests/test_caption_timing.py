@@ -94,3 +94,19 @@ def test_both_planners_preserve_original_timestamps():
             pages = _caption_pages(scene.caption, scene.start, scene.end, timed_words=scene.caption_words)
             assert all(1 <= len(text.split()) <= 2 for _, _, text in pages)
             assert pages[0][0] == scene.caption_words[0].start
+
+
+def test_saved_word_boundaries_and_separate_punctuation_survive_rerender():
+    words = [Word(0, .6, "Привет"), Word(.6, 1.02, ".")]
+    scene = Scene(0, 1, "greeting", caption="Привет.", caption_words=list(words))
+    plan = ShotPlan(Path("voice.wav"), [scene])
+    attach_caption_timings(plan, Transcript(words))
+    assert scene.caption_words == words
+    assert scene.end == 1  # Keep the saved cut, even when the last word ends later.
+
+
+def test_legacy_transcript_attachment_normalizes_separate_punctuation():
+    words = [Word(0, .6, "Привет"), Word(.6, 1, ".")]
+    scene = Scene(0, 1, "greeting", caption="Привет.")
+    attach_caption_timings(ShotPlan(Path("voice.wav"), [scene]), Transcript(words))
+    assert scene.caption_words == words

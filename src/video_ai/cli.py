@@ -471,7 +471,18 @@ def main() -> None:
     p_story.add_argument("--model", default="small")
     p_story.add_argument("--cutouts", action="store_true", help="Use optional rembg for comparison objects; falls back to image cards")
     p_story.add_argument("--no-effects", action="store_true", help="Disable local reactions, elements, and effect sounds")
+    p_story_render = sub.add_parser("story-render", help="Recompose a complete saved story locally, without new API requests")
+    p_story_render.add_argument("story_work", help="Directory containing story.materialized.json and transcript.json")
+    p_story_render.add_argument("-o", "--output", required=True)
+    p_story_render.add_argument("--work-dir", default=None, help="Optional separate directory for render intermediates")
+    p_story_render.add_argument("--no-effects", action="store_true", help="Disable generated effect sounds on this render")
     args = parser.parse_args()
+
+    if args.command == "story-render":
+        from .story_render import rerender_story
+        rerender_story(args.story_work,args.output,render_work=args.work_dir,
+                       effects=False if args.no_effects else None)
+        return
 
     if args.command == "story":
         from .story import create_story

@@ -9,7 +9,7 @@ from .models import ShotPlan, Transcript, Word
 
 def _caption_text(words: list[Word]) -> str:
     """Rebuild caption text exactly like the planners do."""
-    return re.sub(r"\\s+([,.!?;:…])", r"\\1", " ".join(word.text for word in words)).strip()
+    return re.sub(r"\s+([,.!?;:…])", r"\1", " ".join(word.text for word in words)).strip()
 
 
 def _plan_already_has_transcript_timings(plan: ShotPlan, transcript: Transcript) -> bool:

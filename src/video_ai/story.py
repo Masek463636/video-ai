@@ -162,7 +162,7 @@ def create_story(audio, output, work, *, meme_dir=None, elements_dir=None, trans
         if beat['element_id']:
             element = prepare_cutout(pack_by_id[beat['element_id']],folder,enabled=cutouts)
         materialized.append(dict(beat,assets=assets,element=element))
-        write_json(work/'story.materialized.json', {'version':1,'audio':str(audio),'beats':materialized})
+        write_json(work/'story.materialized.json', {'version':1,'audio':str(audio),'effects':effects,'beats':materialized})
     # Source metadata is kept separately from the source media.
     write_json(work/'sources.json', [{k:a.get(k,'') for k in ('source','title','page_url','download_url','license','license_url','artist','identity_basis','query')} for beat in materialized for a in beat['assets'] if a.get('source') != 'local_meme'])
     print('[story] rendering compositions',flush=True)

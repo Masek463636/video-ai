@@ -76,6 +76,14 @@ allows explanatory comparison arrows.
   guard, not proof of historical authenticity; inspect factual videos before use.
 - Builds two-object comparisons, photo/video panels, local meme reactions and
   collages with a local element. Adds short captions, labels and optional sounds.
+- Fits solo portraits to the full canvas; 9:16 sources fill a 9:16 frame instead
+  of being reduced to a small upper panel. Other aspect ratios keep their shape,
+  with a blurred background filling unused space. Wide solo visuals are centered
+  above the captions. Captions sit near 84% of the frame height.
+- Chooses side-by-side or stacked comparisons by the visible area of the local
+  sources. Ordinary comparison panels may use a central enlargement up to 1.25x
+  (at most 20% cropped on an axis). Transparent cutouts remain fully contained.
+  Labels and arrows follow the chosen arrangement.
 - Keeps images with genuine transparency as cutouts. Other images appear as
   cards; a picture with a painted checkerboard is not treated as transparent.
 - Samples longer clips for an action window. Short clips loop instead of holding
@@ -133,13 +141,29 @@ rerun with `--story-plan <that-file>` and the same transcript/work directory.
 Planning can be reused this way, but there is no automatic resume of completed
 materialized scenes yet. Existing downloads and pack descriptions are cached.
 
+After a successful story, update its layout using the saved sources and timings:
+
+```powershell
+video-ai story-render ".\work-voice5-story-v1" -o ".\voice5-story-large.mp4"
+```
+
+For a studio job, pass `work-web/<job-id>/story-work` instead. This command needs
+the complete `story.materialized.json`, `transcript.json`, original audio and
+downloaded/local assets. It makes no new API calls, preserves the selected
+materials and source offsets, and rejects an incomplete checkpoint. Optional
+`--work-dir` changes its intermediate folder; `--no-effects` disables generated
+effect sounds. New stories remember the effect-sound setting; older saved stories
+default to enabled. The output is a separate file, not a new studio-history job.
+
 ## Verification
 
-`python -m pytest tests/test_story.py tests/test_story_retrieval.py tests/test_stock_images.py tests/test_web.py`
+`python -m pytest tests/test_story.py tests/test_story_layout.py tests/test_story_retrieval.py tests/test_stock_images.py tests/test_web.py`
 covers invalid plans, named-entity filtering, pack caching, interrupted downloads,
 photo API contracts/caching, recovery through video or rewritten queries, HTTP
 job routing, and a complete controlled-provider story pipeline with real FFmpeg rendering.
 Pixel checks cover both comparison objects, the final scene, animated reactions
 and transparent overlays; frame counts check accumulated timing drift.
+Layout checks cover full-height portrait images/videos, large portrait/wide
+comparisons, and local rerendering without provider keys.
 These tests do not validate real API availability or the creative quality of
 Gemini's decisions.

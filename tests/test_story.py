@@ -149,7 +149,7 @@ def test_animated_meme_loops_and_transparent_element(tmp_path):
         return subprocess.check_output(['ffmpeg','-v','error','-ss',str(t),'-i',str(output),'-frames:v','1','-vf',f'crop=6:6:{x}:{y},scale=1:1','-f','rawvideo','-pix_fmt','rgb24','-'])
     first=pixel(.1,30,40);later=pixel(.7,30,40)
     assert first[0]>first[2]+80 and later[2]>later[0]+80
-    assert min(pixel(.7,130,125))>210
+    assert min(pixel(.7,145,175))>210
 
 
 def test_pack_bare_array_keeps_cache_and_respects_new_file_budget(tmp_path,monkeypatch):
