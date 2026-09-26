@@ -1617,3 +1617,113 @@ def _clamp_float(value: object, low: float, high: float, default: float) -> floa
     except (TypeError, ValueError):
         return default
     return max(low, min(high, number))
+
+def _find_giphy_candidates(
+    query: str,
+    work_dir: Path,
+    exclude_assets: set[str],
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Download Giphy MP4 candidates for later Gemini visual review."""
+    import os
+    import urllib.parse
+    import urllib.request
+
+    api_key = os.getenv("GIPHY_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    q = re.sub(
+        r"\b(reaction|sticker|gif|meme|funny)\b",
+        "",
+        query,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if not q:
+        return []
+
+    limit = max(1, min(10, int(limit)))
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    excluded = {
+        str(Path(value).resolve()).casefold()
+        for value in (exclude_assets or set())
+    }
+
+    url = (
+        "https://api.giphy.com/v1/gifs/search"
+        f"?api_key={urllib.parse.quote(api_key)}"
+        f"&q={urllib.parse.quote(q)}"
+        f"&limit={limit + 2}"
+        "&rating=pg-13"
+    )
+
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "video-ai/2.0"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except Exception as exc:
+        print(
+            f"[fx] Giphy API error: {type(exc).__name__}",
+            flush=True,
+        )
+        return []
+
+    candidates: list[dict[str, Any]] = []
+
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+
+        item_id = re.sub(
+            r"[^A-Za-z0-9_-]+",
+            "",
+            str(item.get("id") or ""),
+        )
+
+        mp4_url = (
+            item.get("images", {})
+            .get("fixed_height", {})
+            .get("mp4")
+        )
+
+        if not item_id or not mp4_url:
+            continue
+
+        target = work_dir / f"giphy_{item_id}.mp4"
+        key = str(target.resolve()).casefold()
+
+        if key in excluded:
+            continue
+
+        if not target.exists():
+            try:
+                _download(str(mp4_url), target)
+            except Exception:
+                target.unlink(missing_ok=True)
+                continue
+
+        if not target.exists() or target.stat().st_size <= 1024:
+            target.unlink(missing_ok=True)
+            continue
+
+        candidates.append({
+            "path": target,
+            "id": item_id,
+            "url": str(item.get("url") or ""),
+            "mp4_url": str(mp4_url),
+        })
+
+        excluded.add(key)
+
+        if len(candidates) >= limit:
+            break
+
+    return candidates
+
