@@ -122,7 +122,11 @@ def apply_material_brain_v2(plan: ShotPlan) -> list[int]:
         scene.motion_preset = "none"
 
         action_queries = _action_queries(scene)
-        merged = _merge_queries(action_queries, scene.search_queries or [], [scene.query])
+        # Preserve the whole-story director's concrete action. Keyword rules
+        # are rescue queries, not a replacement for its scene-specific intent.
+        planned = [q for q in [scene.query, *(scene.search_queries or [])]
+                   if _already_action_query(q)]
+        merged = _merge_queries(planned, action_queries, scene.search_queries or [], [scene.query])
         scene.search_queries = merged[:9]
         if scene.search_queries:
             scene.query = scene.search_queries[0]
@@ -218,6 +222,8 @@ def _already_action_query(value: str) -> bool:
         "interacting", "comparing",
         "driving", "opening", "packing", "reacting", "looking", "working",
         "eating", "drinking", "writing", "talking", "playing",
+        "falling", "collapsing", "sleeping", "waking", "greeting",
+        "measuring", "pouring", "weighing", "shrinking", "removing",
     )
     return any(verb in tokens for verb in verbs)
 

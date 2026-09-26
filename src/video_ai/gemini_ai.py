@@ -205,7 +205,9 @@ SELECTION MODE: {mode.upper()}
 
 IMPORTANT:
 - Pick visuals that actually contain the core subject/topic. Do not reward a pretty unrelated frame.
-- A different exact gesture is okay if the same object/topic/place is clearly visible.
+- Matching only the noun is not an action match. A walking dog does not show
+  collapse; a shopping cart does not show reduced package volume. Score such
+  contextual footage below a candidate showing the requested event/comparison.
 - Reject obvious topic substitutions: milk is not beer/coffee; supermarket is not library; receipt is not landscape; measuring cup is not ocean.
 - Prefer a clear human/object subject and footage usable in a 9:16 Short.
 - Candidate URLs are already unique and unused; do not worry about repetition.
@@ -240,7 +242,7 @@ Return ONLY JSON:
 }
 
 Rules for fit:
-90-100 = clearly right subject/topic and useful shot
+90-100 = visible evidence of the requested action/comparison and right subject
 70-89 = close/contextual but honestly supports narration
 50-69 = weak fallback
 below 50 = weak/emergency-only
@@ -317,8 +319,10 @@ GLOBAL RULES:
 - Keep the core subject honest: milk is not coffee, receipt is not landscape,
   shopping cart is not random street footage.
 - Prefer shots that remain readable in a vertical Short.
-- Avoid repeating the same subject/composition/action in neighboring scenes
-  when another honest candidate exists.
+- Preserve the subject across related beats; vary action/framing when useful.
+  Do not substitute a different subject merely to create visual variety.
+- A matching noun without the requested event/comparison is contextual fallback,
+  not a strong action match. Judge what the frames visibly demonstrate.
 - It is better to select a close contextual shot than leave a generic unlocked
   scene empty.
 - Return ONE choice per supplied scene whenever at least one candidate is

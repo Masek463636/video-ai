@@ -85,7 +85,7 @@ def render_plan(
 
         final_cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(picture), "-i", str(plan.audio),
+            "-reinit_filter", "0", "-i", str(picture), "-i", str(plan.audio),
         ]
         if sfx_track is not None and sfx_track.exists():
             final_cmd += ["-i", str(sfx_track)]
@@ -155,6 +155,8 @@ def _same_visual(a: Scene, b: Scene) -> bool:
     except OSError:
         same_asset = str(a.asset) == str(b.asset)
     if not same_asset:
+        return False
+    if a.asset_kind == "video" and (a.source_start or b.source_start):
         return False
     if _resolved_preset(a) != _resolved_preset(b):
         return False
@@ -240,6 +242,9 @@ def _render_reference_video(
     size = _probe_video_size(asset)
     ratio = (size[0] / size[1]) if size and size[1] else None
     use_blur_fit = bool(reference_framing and ratio is not None and ratio > 0.82)
+    source_duration = _safe_probe_duration(asset)
+    source_start = min(max(0.0, scene.source_start), max(0.0, source_duration - duration))
+    seek = ["-ss", f"{source_start:.3f}"] if source_start else []
 
     if use_blur_fit:
         # Keep a readable foreground subject while using the same source as a
@@ -261,7 +266,7 @@ def _render_reference_video(
         )
         _run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-stream_loop", "-1", "-i", str(asset),
+            "-stream_loop", "-1", *seek, "-i", str(asset),
             "-filter_complex", filter_complex,
             "-map", "[v]",
             "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
@@ -278,7 +283,7 @@ def _render_reference_video(
         )
     _run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-stream_loop", "-1", "-i", str(asset),
+        "-stream_loop", "-1", *seek, "-i", str(asset),
         "-vf", vf,
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
         "-pix_fmt", "yuv420p", "-r", str(fps), "-t", f"{duration:.3f}", str(output),
@@ -333,7 +338,13 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         shutil.copyfile(base, output)
         return
 
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(base)]
+    # All rendered spans already have identical dimensions/pixel format. Stock
+    # clips may still carry different color metadata. Recent FFmpeg versions
+    # reinitialize the filter graph at those boundaries, resetting setpts/fps
+    # and making the remaining footage play early followed by cloned frames.
+    # Preserve the graph's timeline across metadata-only changes.
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-reinit_filter", "0", "-i", str(base)]
     input_index_by_effect: dict[int, int] = {}
     next_input = 1
     for effect_index, item in enumerate(valid):

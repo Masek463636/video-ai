@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from .models import Scene, ShotPlan, Word
@@ -30,6 +31,7 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
             asset_kind=raw.get("asset_kind", "blank"),
             motion=raw.get("motion", "none"),
             caption=raw.get("caption"),
+            source_start=float(raw.get("source_start", 0.0)),
             caption_words=[Word(float(w["start"]), float(w["end"]), str(w["text"])) for w in (raw.get("caption_words") or [])],
             visual_description=raw.get("visual_description"),
             search_queries=list(raw.get("search_queries") or []),
@@ -93,6 +95,7 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "asset_kind": scene.asset_kind,
                 "motion": scene.motion,
                 "caption": scene.caption,
+                "source_start": scene.source_start,
                 "caption_words": [
                     {"start": w.start, "end": w.end, "text": w.text}
                     for w in scene.caption_words
@@ -130,6 +133,8 @@ def validate_shot_plan(plan: ShotPlan) -> None:
     valid_tones = {"neutral","informational","positive","negative","tragic","tense","shocking","absurd","funny","victorious","mysterious","religious","violent","emotional"}
     previous_end = 0.0
     for index, scene in enumerate(plan.scenes):
+        if not math.isfinite(scene.source_start) or scene.source_start < 0:
+            raise ValueError(f"scene {index}: invalid source_start")
         if scene.start < 0 or scene.end <= scene.start:
             raise ValueError(f"scene {index}: invalid time range")
         if index and scene.start < previous_end - 1e-6:

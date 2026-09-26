@@ -346,6 +346,7 @@ def materialize_assets(
             used_urls = registry.used_urls()
             used_titles = registry.used_titles()
             scene.asset = str(final_target.resolve())
+            scene.source_start = 0.0
             scene.asset_kind = "video"
             scene.asset_score = round(chosen_v2.score, 4)
             scene.semantic_score = round(chosen_v2.semantic_score or 0.0, 4)
@@ -555,6 +556,7 @@ def materialize_assets(
         used_urls = registry.used_urls()
         used_titles = registry.used_titles()
         scene.asset = str(final_target.resolve())
+        scene.source_start = 0.0
         scene.asset_kind = chosen.kind  # type: ignore[assignment]
         scene.asset_score = round(chosen.score, 4)
         scene.semantic_score = round(chosen.semantic_score, 4) if chosen.semantic_score is not None else None
@@ -869,7 +871,7 @@ def _v2_select_roll_batch(
                     continue
                 scene = plan.scenes[scene_index]
                 primary_prompt = (
-                    scene.query
+                    scene.visual_description or scene.query
                     or (scene.search_queries[0] if scene.search_queries else "")
                     or "person interacting with product"
                 )
@@ -916,10 +918,9 @@ def _v2_select_roll_batch(
                         len(wanted_tokens & title_tokens) / max(1, len(wanted_tokens))
                         if wanted_tokens else 0.0
                     )
-                    # Specific query match dominates; primary intent prevents a
-                    # provider result from winning just because it matches one
-                    # generic word. Title overlap is only a small tie-breaker.
-                    score = specific * 0.62 + primary * 0.34 + lexical * 0.04
+                    # Director intent dominates; matching a broad rescue query
+                    # alone must not outrank the actual requested visual.
+                    score = primary * 0.72 + specific * 0.24 + lexical * 0.04
                     ranked_rows.append((score, candidate_id))
 
                 ranked_rows.sort(reverse=True)

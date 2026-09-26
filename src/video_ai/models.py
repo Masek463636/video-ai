@@ -96,6 +96,8 @@ class Scene:
     semantic_score: float | None = None
     # Original absolute speech timings; optional for older saved ShotPlans.
     caption_words: list[Word] = field(default_factory=list)
+    # Start within source footage, independent of the narration timeline.
+    source_start: float = 0.0
 
     @property
     def duration(self) -> float:
