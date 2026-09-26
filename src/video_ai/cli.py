@@ -428,6 +428,7 @@ def main() -> None:
     p_render.add_argument("--crf", type=int, default=20)
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
+    p_render.add_argument("--overlays-file", default=None, help="Reuse saved overlays.json without new API requests")
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
     p_render.add_argument("--shorts-fx-local", action="store_true", help="Use Shorts FX without Gemini; skip API calls and use local storyboard fallback")
     p_render.add_argument("--sticker-dir", default=None, help="Local sticker/GIF pack; CLIP picks context-appropriate reaction stickers")
@@ -555,8 +556,15 @@ def main() -> None:
                 use_gemini=not args.shorts_fx_local,
                 sticker_dir=args.sticker_dir,
             )
-            if args.shorts_fx else []
+            if args.shorts_fx and not args.overlays_file else []
         )
+        if args.overlays_file:
+            if args.shorts_fx:
+                raise ValueError("Use --overlays-file without --shorts-fx")
+            saved = json.loads(Path(args.overlays_file).read_text(encoding="utf-8"))
+            overlays = saved.get("overlays", saved.get("effects", [])) if isinstance(saved, dict) else saved
+            if not isinstance(overlays, list) or any(not isinstance(item, dict) for item in overlays):
+                raise ValueError("Invalid saved overlays")
         output = render_plan(
             plan,
             args.output,

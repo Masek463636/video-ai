@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from dataclasses import replace
 
 from .models import Scene, ShotPlan, Word
 
@@ -232,37 +233,34 @@ def _render_reference_video(
     editing_polish: bool = False,
     reference_framing: bool = False,
 ) -> None:
-    """Render live B-roll with reference-style framing when requested.
-
-    Wide/square sources are not brutally cropped into 9:16. Instead the source
-    stays readable over a blurred full-frame copy, matching common Shorts/TikTok
-    editing and the supplied reference. Portrait sources still fill the frame.
-    """
+    """Fill portraits; crop wide sources into a large top panel over blur."""
     w, h, fps = plan.width, plan.height, plan.fps
     size = _probe_video_size(asset)
     ratio = (size[0] / size[1]) if size and size[1] else None
-    use_blur_fit = bool(reference_framing and ratio is not None and ratio > 0.82)
+    use_blur_fit = bool(reference_framing and ratio is not None and ratio >= 1.0)
     source_duration = _safe_probe_duration(asset)
     source_start = min(max(0.0, scene.source_start), max(0.0, source_duration - duration))
     seek = ["-ss", f"{source_start:.3f}"] if source_start else []
 
     if use_blur_fit:
-        # Keep a readable foreground subject while using the same source as a
-        # soft full-frame background. No fake side bars, no destructive crop.
-        # Put the real B-roll in a proper TOP PANEL that occupies about
-        # half of the 9:16 frame. A normal 16:9 clip fitted by width is only
-        # ~31% of a vertical canvas, which looked like a tiny strip at the top.
-        # Here we fill a ~48%-high panel and crop the left/right edges as needed.
-        fg_h = int(h * 0.48)
-        fg_y = int(h * 0.025)
+        # A fixed large panel is intentional: ultrawide sources must not become
+        # a thin strip. Crop edges around the supplied focus (center by default).
+        fg_h = max(2, int(h * 0.52) // 2 * 2)
+        panel_plan = replace(plan, height=fg_h)
+        if editing_polish:
+            foreground = _editorial_video_filter(scene, panel_plan, duration)
+        else:
+            foreground = (
+                f"scale={w}:{fg_h}:force_original_aspect_ratio=increase,"
+                f"crop={w}:{fg_h}:x='{_focus_expr('iw','ow',_clamp_focus(scene.focus_x))}':"
+                f"y='{_focus_expr('ih','oh',_clamp_focus(scene.focus_y))}'"
+            )
         filter_complex = (
-            f"[0:v]split=2[bg][fg];"
+            f"[0:v]scale=trunc(iw*sar/2)*2:ih,setsar=1,split=2[bg][fg];"
             f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
             f"crop={w}:{h},gblur=sigma=28:steps=2[bg2];"
-            f"[fg]scale={w}:{fg_h}:force_original_aspect_ratio=increase,"
-            f"crop={w}:{fg_h}[fg2];"
-            f"[bg2][fg2]overlay=0:{fg_y}:shortest=1,"
-            f"fps={fps}[v]"
+            f"[fg]{foreground}[fg2];"
+            f"[bg2][fg2]overlay=0:0:shortest=1,setsar=1,fps={fps}[v]"
         )
         _run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -281,6 +279,7 @@ def _render_reference_video(
             f"scale={w}:{h}:force_original_aspect_ratio=increase,"
             f"crop={w}:{h},fps={fps}"
         )
+    vf = "scale=trunc(iw*sar/2)*2:ih,setsar=1," + vf
     _run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-stream_loop", "-1", *seek, "-i", str(asset),
@@ -296,7 +295,7 @@ def _probe_video_size(path: str | Path) -> tuple[int, int] | None:
             [
                 "ffprobe", "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
+                "-show_entries", "stream=width,height,sample_aspect_ratio:stream_side_data=rotation",
                 "-of", "json",
                 str(path),
             ],
@@ -309,6 +308,12 @@ def _probe_video_size(path: str | Path) -> tuple[int, int] | None:
             return None
         width = int(streams[0].get("width") or 0)
         height = int(streams[0].get("height") or 0)
+        sar = str(streams[0].get("sample_aspect_ratio") or "1:1").split(":")
+        if len(sar) == 2 and all(part.isdigit() for part in sar) and int(sar[1]) > 0:
+            width = round(width * int(sar[0]) / int(sar[1]))
+        rotation = next((item.get("rotation", 0) for item in streams[0].get("side_data_list", []) if "rotation" in item), 0)
+        if abs(round(float(rotation))) % 180 == 90:
+            width, height = height, width
         return (width, height) if width > 0 and height > 0 else None
     except Exception:
         return None
