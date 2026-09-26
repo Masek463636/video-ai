@@ -118,8 +118,8 @@ def test_full_render_failure_keeps_original(tmp_path):
     assert not list(tmp_path.glob('*pending.mp4'))
 
 
-def test_insert_is_judged_without_background_and_coordinates_retried(tmp_path):
-    client=Client([{'relevant':True,'readable':True,'kind':'emoji'}, {'protected_boxes':[[10,20,30,40]]}, {'protected_boxes':[[0,0,1,.5]]}])
+def test_insert_accepts_1000_scale_coordinates(tmp_path):
+    client=Client([{'relevant':True,'readable':True,'kind':'emoji'}, {'protected_boxes':[[10,20,30,40]]}])
     review=CompositionReviewer(tmp_path,client)
     requests=[]
     original=client._generate_json
@@ -134,8 +134,8 @@ def test_insert_is_judged_without_background_and_coordinates_retried(tmp_path):
     assert {'text':'IMAGE:background'} not in requests[0]
     assert {'text':'IMAGE:insert'} in requests[0]
     assert {'text':'IMAGE:insert'} not in requests[1]
-    assert len(review.report['overlays'][0]['placement_reviews'])==2
-
+assert len(review.report['overlays'][0]['placement_reviews'])==1
+assert review.report['overlays'][0]['protected_boxes']==[[.01,.02,.03,.04]]
 
 def test_final_verification_can_veto_repair(tmp_path):
     approved={'usable':True,'choice':0,'preserves_visible_subjects':True,
