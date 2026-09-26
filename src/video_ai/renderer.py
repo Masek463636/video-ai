@@ -46,7 +46,7 @@ def render_plan(
         spans = _visual_spans(plan, audio_duration)
         print(f"[render] {len(plan.scenes)} subtitle scenes -> {len(spans)} continuous visual spans", flush=True)
         if editing_polish:
-            print("[render] editing polish enabled: same assets and cut points, smoother motion + caption pop", flush=True)
+            print("[render] editing polish enabled: smoother motion + caption pop", flush=True)
         reviewer = None
         if composition_review:
             from .composition_review import CompositionReviewer
@@ -78,6 +78,10 @@ def render_plan(
 
         if reviewer is not None:
             overlays = reviewer.overlays(base, overlays or [], plan)
+            counts = {}
+            for row in reviewer.report['scenes']:
+                counts[row['status']] = counts.get(row['status'], 0) + 1
+            print('[composition] result: '+json.dumps(counts)+f'; visible reactions={len(overlays)}',flush=True)
         picture = base
         if overlays:
             overlayed = root / "overlayed.mp4"
@@ -367,7 +371,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
             continue
         input_index_by_effect[effect_index] = next_input
         asset_path = Path(str(item["asset"]))
-        if asset_path.suffix.lower() == ".gif":
+        if asset_path.suffix.lower() in {".gif", ".mp4", ".webm", ".mov"}:
             cmd += [
                 "-stream_loop", "-1",
                 "-i", str(asset_path),

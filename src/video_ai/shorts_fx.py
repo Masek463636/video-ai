@@ -11,7 +11,13 @@ from .assets import _download, search_commons
 from .models import Scene, ShotPlan
 
 
-def build_shorts_overlays(
+def build_shorts_overlays(plan, out_dir, *, max_overlays=0, use_gemini=True, sticker_dir=None):
+    from .classic_reactions import build_reactions
+    return build_reactions(plan, out_dir, max_overlays=max_overlays,
+                           use_gemini=use_gemini, sticker_dir=sticker_dir)
+
+
+def _build_legacy_shorts_overlays(
     plan: ShotPlan,
     out_dir: str | Path,
     *,
@@ -1274,7 +1280,7 @@ def _local_effect_candidates(plan: ShotPlan, budget: int) -> list[dict[str, Any]
 
 
 
-_STICKER_EXTS = {".gif", ".png", ".webp", ".jpg", ".jpeg"}
+_STICKER_EXTS = {".gif", ".png", ".webp", ".jpg", ".jpeg", ".mp4", ".webm", ".mov"}
 
 
 def _reaction_family(value: str) -> str:
@@ -1528,7 +1534,7 @@ def _sticker_preview(asset: Path, cache_dir: Path) -> Path | None:
         except Exception:
             return None
 
-    if suffix == ".gif":
+    if suffix in {".gif", ".mp4", ".webm", ".mov"}:
         try:
             completed = subprocess.run(
                 [

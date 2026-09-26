@@ -57,14 +57,16 @@ def failure(row, exc, disabled):
         row['validation_error'] = str(exc)[:300]
 
 
-def choose_slot(protected):
+def choose_slot(protected, kind="emoji"):
     # Reserve captions and outer UI margins. A single fixed box bounds even
     # unusually tall/wide stickers. No fly-in path through protected content.
     blocked = protected + [[0, .50, 1, .14]]
-    for size in (.28, .22):
+    for size in ((.80, .70) if kind == "meme" else (.40, .34)):
         for y in (.68, .12, .32):
             for x in (.06, .94-size):
-                rect = [x, y, size, size*.65]
+                rect = [x, y, size, .26 if kind == "meme" else size*.65]
+                if y+rect[3] > .95:
+                    continue
                 if all(not (x < b[0]+b[2]+.02 and x+rect[2] > b[0]-.02 and y < b[1]+b[3]+.02 and y+rect[3] > b[1]-.02) for b in blocked):
                     return rect
     return None
@@ -75,7 +77,7 @@ def frames(path, times, root, prefix):
     for i, time in enumerate(times):
         target = root / f'{prefix}_{i}.jpg'
         subprocess.run(['ffmpeg','-y','-v','error','-ss',str(max(0,time)),'-i',str(path),
-                        '-frames:v','1','-vf','scale=270:-2',str(target)],check=True,capture_output=True,timeout=25)
+                        '-frames:v','1','-vf','scale=270:-2:out_range=full,format=yuvj420p',str(target)],check=True,capture_output=True,timeout=25)
         parts.append({'inline_data':{'mime_type':'image/jpeg','data':base64.b64encode(target.read_bytes()).decode('ascii')}})
     return parts
 
@@ -90,6 +92,8 @@ class CompositionReviewer:
         self.client = client
         self.disabled = client is None
         self.report = {'scenes':[], 'overlays':[]}
+        self.replacement_attempts = 0
+        self.used_replacement_urls = set()
 
     def save(self):
         (self.root/'review.json').write_text(json.dumps(self.report,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -117,6 +121,50 @@ class CompositionReviewer:
                 self.disabled=True
                 raise
 
+    def replace_source(self, scene, plan, duration, clip, index, row, data, *, reference_framing, editing_polish):
+        """Bounded new-source search; actual cropped replacement must pass action review."""
+        from .story_media import _resolve_query
+        from .renderer import _render_scene
+        queries=data.get('replacement_queries',[])
+        # Never replace an identified person/event with anonymous stock footage.
+        if scene.semantic_lock or scene.required_entities or scene.source_mode not in ('stock_video','auto'):
+            row['replacement_status']='identity_or_source_locked'; return
+        if self.disabled or self.replacement_attempts >= 6:
+            row['replacement_status']='budget_or_provider_unavailable'; return
+        if not isinstance(queries,list): return
+        queries=[q.strip() for q in queries if isinstance(q,str) and 0<len(q.strip())<=100 and len(q.split())<=7][:2]
+        if not queries: return
+        self.replacement_attempts+=1
+        root=self.root/f'replacement_{index}'; root.mkdir(exist_ok=True)
+        subject={'intent':scene.visual_description or scene.query,'queries':queries,'aliases':[]}
+        row['retrieval']=[]; seen=set()
+        print(f'[composition] scene {index+1}: searching replacement footage',flush=True)
+        for query in queries:
+            attempt={'query':query}; row['retrieval'].append(attempt)
+            chosen=_resolve_query(subject,root,self.client,query=query,video=True,narration=scene.caption or '',
+                used=self.used_replacement_urls,exclude_urls=self.used_replacement_urls.copy(),seen=seen,attempt=attempt)
+            if not chosen: continue
+            proposal=replace(scene,asset=chosen['path'],asset_kind='video',source_start=0,focus_x=.5,focus_y=.5)
+            pending=Path(clip).with_name(Path(clip).stem+'.replacement-pending.mp4')
+            try:
+                _render_scene(proposal,duration,plan,pending,crf=20,editing_polish=editing_polish,reference_framing=reference_framing)
+                verified=self.ask([{'text':
+                    'Verify this actual cropped replacement. Narration: '+(scene.caption or '')+
+                    '. Core visual intent: '+subject['intent']+
+                    '. Require the main visible object AND action. Scrolling is not rejecting a call; '
+                    'holding is not typing. Mood/actor/room may differ for anonymous illustrative footage. '
+                    'Do not demand literal on-screen words from stock footage; require a relevant visible action instead. '
+                    'Reject hidden essential objects. Return {"usable":true/false,"reason":"visible evidence"}.'}]+
+                    frames(pending,[duration*f for f in (.08,.5,.9)],root,'final'))
+                attempt['final_review']=verified
+                if verified.get('usable') is True:
+                    pending.replace(clip)
+                    row.update(status='replaced',replacement_status='verified',replacement=chosen)
+                    return
+            finally:
+                pending.unlink(missing_ok=True)
+        row['replacement_status']='no_verified_match'
+
     def scene(self, scene, plan, duration, clip, index, *, reference_framing, editing_polish):
         from .renderer import _render_scene, _safe_probe_duration
         row={'span':index,'status':'unchecked','asset':scene.asset,'source_start':scene.source_start}
@@ -129,7 +177,11 @@ class CompositionReviewer:
                     'Blurred background is decoration. Judge the sharp foreground only. '
                     'Reject if the required subject/action is obscured, outside crop, or only the noun matches. '
                     'Do not require a face for hand/object closeups. Do not infer unseen actions. '
-                    'Extract a fixed checklist from the required action and narration, including required objects and interactions. Do not invent extra requirements. Return JSON {"usable":true/false,"reason":"specific visible evidence","requirements":["one concrete visible requirement",...]}.')
+                    'For anonymous stock footage, exact mood, actor or room need not match. Judge core action. '
+                    'Do not demand written dialogue from stock footage. '
+                    'If action is missing set failure_kind=action; if obscured by crop set failure_kind=framing. '
+                    'For unusable footage provide replacement_queries: 1-2 short English stock search phrases for the core action. '
+                    'Extract a fixed checklist from the required action and narration, including required objects and interactions. Do not invent extra requirements. Return JSON {"usable":true/false,"reason":"specific visible evidence","requirements":["one concrete visible requirement",...],"failure_kind":"action or framing", "replacement_queries":["short search"]}.')
             times=[duration*f for f in (.08,.5,.90)]
             data=self.ask([{'text':prompt}]+frames(clip,times,self.root,f'scene{index}'))
             row['reason']=str(data.get('reason',''))[:500]
@@ -141,6 +193,9 @@ class CompositionReviewer:
             row['requirements']=fixed
             row['status']='unresolved'
             if scene.asset_kind!='video':
+                self.save(); return
+            if data.get('failure_kind') == 'action':
+                self.replace_source(scene,plan,duration,clip,index,row,data,reference_framing=reference_framing,editing_polish=editing_polish)
                 self.save(); return
             last=max(0,_safe_probe_duration(Path(scene.asset))-duration)
             options=[]
@@ -181,6 +236,8 @@ class CompositionReviewer:
                         row.update(status='repaired',source_start=proposal.source_start,focus_x=proposal.focus_x)
                 finally:
                     pending.unlink(missing_ok=True)
+            if row['status']=='unresolved':
+                self.replace_source(scene,plan,duration,clip,index,row,data,reference_framing=reference_framing,editing_polish=editing_polish)
             print(f'[composition] scene {index+1}: {row["status"]}',flush=True)
         except Exception as exc:
             failure(row,exc,self.disabled)
@@ -191,8 +248,8 @@ class CompositionReviewer:
         for index,item in enumerate(overlays):
             row={'overlay':index,'asset':item.get('asset'),'query':item.get('query'),'status':'skipped'}
             self.report['overlays'].append(row)
-            if item.get('type')=='text':
-                result.append(item); row['status']='text_preserved'; continue
+            if item.get('type') != 'sticker':
+                row['status']='unsupported_accent'; row['reason']='Classic style uses reactions only, no text or photo cards'; continue
             if self.disabled:
                 row['reason']='Review unavailable; optional insert omitted'; continue
             try:
@@ -203,11 +260,12 @@ class CompositionReviewer:
                     'Describe what is actually visible in this insert. Approve only a clear illustration of the narrated '
                     'object or a fitting reaction. Do not imagine a phone merely because narration mentions one. '
                     'Unrelated restaurant people are not a smartphone. Reject uncertain matches. '
-                    'Return JSON {"relevant":true/false,"reason":"visible evidence"}.')
+                    'Reject text-dependent, crowded or ambiguous inserts. It must read instantly at phone size. '
+                    'Return JSON {"relevant":true/false,"readable":true/false,"kind":"emoji or meme","reason":"visible evidence"}.')
                 data=self.ask([{'text':prompt}]+frames(Path(item['asset']),[0],self.root,f'insert{index}'))
                 row['insert_review']=data
                 row['reason']=str(data.get('reason',''))[:500]
-                if data.get('relevant') is not True:
+                if data.get('relevant') is not True or data.get('readable') is not True or data.get('kind') not in ('emoji','meme'):
                     row['status']='irrelevant'; continue
                 placement_parts=[{'text':
                     'These are ONLY background frames, NOT the insert. Find boxes protecting all important sharp '
@@ -229,7 +287,7 @@ class CompositionReviewer:
                 # Existing quantity callouts occupy the upper center.
                 if any(other.get('type')=='text' and float(other['start'])<end and float(other['end'])>start for other in overlays):
                     protected.append([.1,.08,.8,.20])
-                slot=choose_slot(protected)
+                slot=choose_slot(protected,data['kind'])
                 row['protected_boxes']=protected
                 if slot is None:
                     row['status']='no_free_space'; continue

@@ -61,7 +61,7 @@ class Studio:
             ('Оформление и финальный рендер', common + ['render', str(work / 'shot_plan.materialized.json'), '--transcript', str(work / 'transcript.json'), '--editing-polish', '--reference-framing', '--composition-review', '-o', str(folder / 'final.mp4'), '--work-dir', str(folder / 'final-work')]),
         ]
         if job['effects']:
-            steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', '2'])
+            steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', '0'])
         if job.get('style') == 'story':
             command = common + ['story', str(folder / 'voice.mp3'), '-o', str(folder / 'final.mp4'),
                                 '--work-dir', str(folder / 'story-work'), '--language', 'ru',

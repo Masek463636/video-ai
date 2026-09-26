@@ -65,7 +65,7 @@ def preview_parts(path: Path, root: Path, *, video=False):
         command = ['ffmpeg','-y','-v','error']
         if video:
             command += ['-ss', str(max(0, duration * fraction))]
-        command += ['-i', str(path), '-frames:v','1','-vf','scale=384:384:force_original_aspect_ratio=decrease','-q:v','5',str(frame)]
+        command += ['-i', str(path), '-frames:v','1','-vf','scale=384:384:force_original_aspect_ratio=decrease:out_range=full,format=yuvj420p','-q:v','5',str(frame)]
         result = subprocess.run(command, capture_output=True, timeout=25)
         if result.returncode == 0 and frame.exists():
             parts.append({'inline_data': {'mime_type':'image/jpeg', 'data':base64.b64encode(frame.read_bytes()).decode('ascii')}})

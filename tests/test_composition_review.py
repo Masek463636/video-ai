@@ -25,7 +25,7 @@ class Client:
         return reply
 
 def test_irrelevant_insert_removed_and_relevant_placed(tmp_path):
-    client=Client([{'relevant':False,'reason':'unrelated restaurant'}, {'relevant':True,'reason':'surprised reaction'}, {'protected_boxes':[[0,0,1,.5]]}])
+    client=Client([{'relevant':True,'readable':True,'kind':'emoji','reason':'surprised reaction'}, {'protected_boxes':[[0,0,1,.5]]}])
     review=CompositionReviewer(tmp_path,client)
     effects=[{'type':'png','asset':'card.png','query':'phone','start':0,'end':1}, {'type':'sticker','asset':'emoji.gif','start':1,'end':2}]
     plan=ShotPlan(Path('audio'),[Scene(0,2,'phone',caption='Ты звонишь')])
@@ -33,15 +33,15 @@ def test_irrelevant_insert_removed_and_relevant_placed(tmp_path):
         result=review.overlays('base',effects,plan)
     assert len(result)==1 and result[0]['animation']=='pop'
     assert result[0]['layout_box'][1]>.64
-    assert review.report['overlays'][0]['reason']=='unrelated restaurant'
+    assert review.report['overlays'][0]['status']=='unsupported_accent'
     assert json.loads((tmp_path/'overlays.reviewed.json').read_text())['overlays']==result
 
-def test_failure_stops_further_calls_and_preserves_text(tmp_path):
+def test_failure_stops_further_calls_and_omits_text(tmp_path):
     client=Client([RuntimeError('quota')]); review=CompositionReviewer(tmp_path,client)
-    effects=[{'type':'png','asset':'x','start':0,'end':1}]*3+[{'type':'text','label':'20','start':0,'end':1}]
+    effects=[{'type':'sticker','asset':'x','start':0,'end':1}]*3+[{'type':'text','label':'20','start':0,'end':1}]
     with patch('video_ai.composition_review.frames',return_value=[]):
         result=review.overlays('base',effects,ShotPlan(Path('audio'),[]))
-    assert len(result)==1 and result[0]['type']=='text'
+    assert result==[]
     assert client.calls==1
 
 def test_repair_applies_only_selected_valid_alternative(tmp_path):
@@ -119,7 +119,7 @@ def test_full_render_failure_keeps_original(tmp_path):
 
 
 def test_insert_is_judged_without_background_and_coordinates_retried(tmp_path):
-    client=Client([{'relevant':True}, {'protected_boxes':[[10,20,30,40]]}, {'protected_boxes':[[0,0,1,.5]]}])
+    client=Client([{'relevant':True,'readable':True,'kind':'emoji'}, {'protected_boxes':[[10,20,30,40]]}, {'protected_boxes':[[0,0,1,.5]]}])
     review=CompositionReviewer(tmp_path,client)
     requests=[]
     original=client._generate_json
@@ -129,7 +129,7 @@ def test_insert_is_judged_without_background_and_coordinates_retried(tmp_path):
     client._generate_json=generate
     def sample(path,*args): return [{'text':'IMAGE:'+str(path)}]
     with patch('video_ai.composition_review.frames',side_effect=sample):
-        result=review.overlays('background',[{'type':'png','asset':'insert','start':0,'end':1}],ShotPlan(Path('audio'),[]))
+        result=review.overlays('background',[{'type':'sticker','asset':'insert','start':0,'end':1}],ShotPlan(Path('audio'),[]))
     assert len(result)==1
     assert {'text':'IMAGE:background'} not in requests[0]
     assert {'text':'IMAGE:insert'} in requests[0]
@@ -148,3 +148,35 @@ def test_final_verification_can_veto_repair(tmp_path):
         review.scene(scene,ShotPlan(Path('audio'),[scene]),1,clip,0,reference_framing=True,editing_polish=True)
     assert clip.read_bytes()==b'original'
     assert review.report['scenes'][0]['status']=='unresolved'
+
+
+@pytest.mark.parametrize('usable',[True,False])
+def test_missing_action_searches_new_source_and_verifies(tmp_path,usable):
+    review=CompositionReviewer(tmp_path,Client([
+        {'usable':False,'failure_kind':'action','requirements':['incoming call'],
+         'replacement_queries':['incoming call phone']}, {'usable':usable,'reason':'actual crop'}]))
+    scene=Scene(0,1,'incoming call',asset='scrolling.mp4',asset_kind='video')
+    clip=tmp_path/'clip.mp4'; clip.write_bytes(b'original')
+    with patch('video_ai.composition_review.frames',return_value=[]), patch('video_ai.story_media._resolve_query',return_value={'path':'new.mp4','download_url':'https://media/new.mp4'}) as search, patch('video_ai.renderer._render_scene',side_effect=lambda *a,**k: Path(a[3]).write_bytes(b'new')) as render:
+        review.scene(scene,ShotPlan(Path('audio'),[scene]),1,clip,0,reference_framing=True,editing_polish=True)
+    assert search.call_count==1 and render.call_count==1
+    assert clip.read_bytes()==(b'new' if usable else b'original')
+    assert review.report['scenes'][0]['status']==('replaced' if usable else 'unresolved')
+
+
+def test_named_entity_never_replaced_by_generic_stock(tmp_path):
+    review=CompositionReviewer(tmp_path,Client([]))
+    scene=Scene(0,1,'person',required_entities=['Named person'])
+    row={}
+    with patch('video_ai.story_media._resolve_query',side_effect=AssertionError('generic replacement')):
+        review.replace_source(scene,ShotPlan(Path('a'),[scene]),1,tmp_path/'clip',0,row,
+            {'replacement_queries':['person']},reference_framing=True,editing_polish=True)
+    assert row['replacement_status']=='identity_or_source_locked'
+
+
+def test_jpeg_frames_convert_limited_range_video(tmp_path):
+    from video_ai.composition_review import frames
+    source=tmp_path/'limited.mp4'
+    subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i','color=blue:s=100x180:d=1',
+                    '-pix_fmt','yuv420p','-color_range','tv',str(source)],check=True)
+    assert len(frames(source,[.2,.5,.8],tmp_path,'limited'))==3
