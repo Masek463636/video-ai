@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 
 from .renderer import _assert_duration, _ass_text_plain, _ass_time, _caption_pages, _filter_path, _run, _safe_probe_duration, _build_overlay_sfx
+from .story_json import generate_validated, selection_response
 
 
 def select_window(asset, length, intent, root, client):
@@ -31,7 +32,8 @@ def select_window(asset, length, intent, root, client):
     if not valid:
         return 0.0
     try:
-        result=client._generate_json(parts,temperature=.01)
+        result=generate_validated(client,parts,temperature=.01,
+                                  validate=lambda raw: selection_response(raw,'window',valid),stage='window selection')
         index=result.get('window')
         fit=float(result.get('fit',0))
         if type(index) is int and index in valid and math.isfinite(fit) and fit>=70:

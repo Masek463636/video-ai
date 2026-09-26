@@ -38,13 +38,22 @@ Subfolders and Cyrillic filenames work. Descriptive filenames help when you
 inspect the pack, but Gemini also describes the actual image or three sampled
 video frames. It does not identify a person by their face.
 
-Start with 20–40 useful files per folder. A run indexes at most the first 120
-files in sorted order per folder. First indexing uses extra Gemini requests;
+Start with 20–40 useful files per folder. The catalog considers the first 120
+files in sorted order per folder. A run describes at most **24 new files per
+folder**; it also loads all verified descriptions already cached within that
+catalog. Subsequent runs pick up the remaining undescribed files in order.
+First indexing uses extra Gemini requests;
 successful descriptions are cached in `.video-ai-index` within the pack and
 reused until a file's path, size or modification time changes. Preview images
 are sent to Gemini for indexing and selection. Unverified files are skipped if
 indexing fails. Empty or missing folders are allowed: there will simply be no
 local memes/elements. The existing `stickers/` folder belongs to classic mode.
+
+The CLI option `--pack-new-limit N` changes the new-file budget. Set it to `0`
+to use only cached descriptions while testing a voiceover; the browser uses 24.
+Gemini object/list reply variants are validated before use. A malformed or
+ambiguous reply gets one format correction request. API quota failures do not
+get another retry loop on top of the Gemini client's existing retry handling.
 
 Turning off reactions skips the packs and generated effect sounds. It still
 allows explanatory comparison arrows.

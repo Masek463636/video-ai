@@ -13,6 +13,7 @@ import subprocess
 from .assets import search_commons, _download
 from .openverse import search_openverse
 from .stock_video import search_stock_videos
+from .story_json import StoryResponseError, collection_response, generate_validated, selection_response
 
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
 VIDEO_EXTS = {'.mp4', '.webm', '.mov', '.mkv', '.gif'}
@@ -70,7 +71,22 @@ def preview_parts(path: Path, root: Path, *, video=False):
     return parts, duration
 
 
-def index_pack(directory: Path, cache: Path, client, *, limit=120):
+def _pack_response(raw, valid_ids):
+    rows = collection_response(raw, 'assets')['assets']
+    seen = set()
+    for row in rows:
+        asset_id = row.get('id')
+        if not isinstance(asset_id, str) or asset_id not in valid_ids or asset_id in seen:
+            raise StoryResponseError('Каждый id должен соответствовать одному файлу текущей группы')
+        if type(row.get('safe')) is not bool:
+            raise StoryResponseError('Поле safe должно быть true или false')
+        if row['safe'] and (not isinstance(row.get('description'), str) or not row['description'].strip()):
+            raise StoryResponseError('Проверенному файлу нужно текстовое описание')
+        seen.add(asset_id)
+    return rows
+
+
+def index_pack(directory: Path, cache: Path, client, *, limit=120, new_file_limit=24):
     """Describe images/three sampled video frames once; cache keyed by content metadata."""
     if not directory.is_dir():
         return []
@@ -80,7 +96,7 @@ def index_pack(directory: Path, cache: Path, client, *, limit=120):
     pending = []
     files = [p for p in sorted(root.rglob('*')) if p.is_file() and p.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS and p.resolve().is_relative_to(root) and not any(part.startswith(".") for part in p.relative_to(root).parts)]
     if len(files) > limit:
-        print(f'[story] pack {root.name}: indexing first {limit}/{len(files)} files', flush=True)
+        print(f'[story] pack {root.name}: considering first {limit}/{len(files)} files', flush=True)
     for path in files[:limit]:
         stat = path.stat()
         signature = hashlib.sha256(f'{path}:{stat.st_size}:{stat.st_mtime_ns}:v1'.encode()).hexdigest()
@@ -88,13 +104,18 @@ def index_pack(directory: Path, cache: Path, client, *, limit=120):
         record = {'id': signature[:16], 'path':str(path), 'name':str(path.relative_to(root)), 'kind':'video' if path.suffix.lower() in VIDEO_EXTS else 'image', 'description':path.stem.replace('_',' '), 'verified':False, 'duration':0}
         try:
             old = json.loads(cache_file.read_text(encoding='utf-8'))
-            if old.get('verified') and old.get('path') == str(path):
+            if isinstance(old, dict) and old.get('verified') and old.get('path') == str(path):
                 records.append(old)
                 continue
         except (OSError, ValueError):
             pass
         records.append(record)
         pending.append((record, cache_file))
+    if new_file_limit < 0:
+        raise ValueError('Лимит новых файлов пака должен быть неотрицательным')
+    if len(pending) > new_file_limit:
+        print(f'[story] pack {root.name}: {len(records)-len(pending)} cached; describing {new_file_limit}/{len(pending)} new files this run', flush=True)
+        pending = pending[:new_file_limit]
     for offset in range(0, len(pending), 6):
         batch = pending[offset:offset+6]
         print(f'[story] describing {root.name}: {min(offset+6,len(pending))}/{len(pending)} new files', flush=True)
@@ -113,13 +134,15 @@ def index_pack(directory: Path, cache: Path, client, *, limit=120):
         if not valid:
             continue
         try:
-            result = client._generate_json(parts, temperature=.05)
-            rows = result.get('assets', [])
+            rows = generate_validated(client, parts, temperature=.05,
+                                      validate=lambda raw: _pack_response(raw, valid), stage='pack description')
             for record, cache_file in batch:
                 match = next((r for r in rows if isinstance(r,dict) and r.get('id') == record['id']), None)
                 if match and record['id'] in valid and match.get('safe') is True and str(match.get('description','')).strip():
                     record.update(description=str(match['description'])[:700], verified=True)
                     write_json(cache_file, record)
+        except StoryResponseError as exc:
+            print(f'[story] pack response invalid: {exc}; this batch skipped', flush=True)
         except Exception as exc:
             # Avoid retrying an exhausted API quota for every remaining batch.
             print(f'[story] pack description unavailable: {type(exc).__name__}; unverified files skipped', flush=True)
@@ -199,7 +222,13 @@ def resolve_media(subject, root: Path, client, *, video=False, used=None, exclud
                 break
         if not inspected:
             continue
-        result = client._generate_json(parts, temperature=.02)
+        try:
+            result = generate_validated(client, parts, temperature=.02,
+                                        validate=lambda raw: selection_response(raw, 'choice', range(len(inspected))),
+                                        stage='visual selection')
+        except StoryResponseError as exc:
+            print(f'[story] visual response invalid: {exc}; trying next query', flush=True)
+            continue
         choice = result.get('choice')
         try:
             fit = float(result.get('fit',0))

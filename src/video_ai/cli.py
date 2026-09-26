@@ -464,6 +464,7 @@ def main() -> None:
     p_story.add_argument("--work-dir", required=True)
     p_story.add_argument("--meme-dir", default="memes")
     p_story.add_argument("--elements-dir", default="elements")
+    p_story.add_argument("--pack-new-limit", type=int, default=24, help="Maximum new files to describe per pack per run; 0 uses only cached descriptions")
     p_story.add_argument("--transcript", default=None, help="Reuse word timings from this exact voiceover")
     p_story.add_argument("--story-plan", default=None, help="Use edited story.plan.json; retains validated word boundaries")
     p_story.add_argument("--language", default="ru")
@@ -477,7 +478,7 @@ def main() -> None:
         create_story(args.audio, args.output, args.work_dir, meme_dir=args.meme_dir,
                      elements_dir=args.elements_dir, transcript_path=args.transcript,
                      story_plan=args.story_plan, language=args.language, model=args.model,
-                     cutouts=args.cutouts, effects=not args.no_effects)
+                     cutouts=args.cutouts, effects=not args.no_effects, pack_new_limit=args.pack_new_limit)
         return
 
     if args.command == "probe":

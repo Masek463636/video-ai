@@ -9,6 +9,8 @@ from video_ai.models import Transcript, Word
 from video_ai.story import create_story, validate_story
 from video_ai.story_media import download_complete, identity_supported, index_pack, resolve_media
 from video_ai.story_render import render_composition, render_story
+from video_ai.story_render import select_window
+from video_ai.story_json import StoryResponseError, generate_validated, selection_response
 from video_ai.transcript import save_transcript
 
 
@@ -79,7 +81,8 @@ def test_interrupted_download_is_not_reused(tmp_path,monkeypatch):
     assert target.read_bytes()==b'complete'
 
 
-def test_full_story_with_controlled_providers_and_real_render(tmp_path,monkeypatch):
+@pytest.mark.parametrize('array_reply', [False, True])
+def test_full_story_with_controlled_providers_and_real_render(tmp_path,monkeypatch,array_reply):
     audio=tmp_path/'voice.wav'
     subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i','sine=frequency=220:duration=3',str(audio)],check=True)
     paths=[]
@@ -90,7 +93,10 @@ def test_full_story_with_controlled_providers_and_real_render(tmp_path,monkeypat
                    {'start_word':3,'end_word':6,'kind':'photo','subjects':[item('green')]}]}
     class Client:
         def _generate_json(self,parts,**kwargs):
-            return plan if 'You edit a vertical' in parts[0]['text'] else {'choice':0,'fit':90,'reason':'Fixture colour matches'}
+            if 'You edit a vertical' in parts[0]['text']:
+                return plan['beats'] if array_reply else plan
+            result = {'choice':0,'fit':90,'reason':'Fixture colour matches'}
+            return [result] if array_reply else result
     def candidates(query,**kwargs):
         return [{'kind':'image','download_url':f'https://example.org/{query}.png','title':query,'description':query,'page_url':f'https://example.org/{query}','source':'fixture'}]
     monkeypatch.setattr('video_ai.story_media.candidates',candidates)
@@ -128,3 +134,75 @@ def test_animated_meme_loops_and_transparent_element(tmp_path):
     first=pixel(.1,30,40);later=pixel(.7,30,40)
     assert first[0]>first[2]+80 and later[2]>later[0]+80
     assert min(pixel(.7,130,125))>210
+
+
+def test_pack_bare_array_keeps_cache_and_respects_new_file_budget(tmp_path,monkeypatch):
+    pack=tmp_path/'memes';pack.mkdir()
+    for i in range(14):
+        (pack/f'meme-{i:02}.png').write_bytes(b'fixture')
+    monkeypatch.setattr('video_ai.story_media.preview_parts',lambda *a,**kw:([{'text':'fixture preview'}],0))
+    class Client:
+        calls=0
+        def _generate_json(self,parts,**kwargs):
+            self.calls+=1
+            files=[json.loads(p['text']) for p in parts if p.get('text','').startswith('{"id":')]
+            rows=[{'id':p['id'],'description':'verified test reaction','safe':True} for p in files]
+            return {'assets':rows} if self.calls==1 else rows
+    client=Client()
+    first=index_pack(pack,pack/'.video-ai-index',client,new_file_limit=6)
+    second=index_pack(pack,pack/'.video-ai-index',client,new_file_limit=6)
+    cached=index_pack(pack,pack/'.video-ai-index',client,new_file_limit=0)
+    assert [len(first),len(second),len(cached)]==[6,12,12]
+    assert client.calls==2
+    assert {a['id'] for a in first}<={a['id'] for a in second}
+
+
+def test_ambiguous_selection_is_corrected_once_not_silently_chosen():
+    class Client:
+        calls=0
+        def _generate_json(self,*args,**kwargs):
+            self.calls+=1
+            return [{'choice':0,'fit':95},{'choice':1,'fit':98}] if self.calls==1 else {'choice':1,'fit':90}
+    client=Client()
+    result=generate_validated(client,[{'text':'Choose'}],temperature=0,
+                              validate=lambda raw:selection_response(raw,'choice',range(2)),stage='test')
+    assert result['choice']==1 and client.calls==2
+
+
+@pytest.mark.parametrize('reply', [None, 'not an object', [], {'choice':True,'fit':99},
+                                  {'choice':5,'fit':99}, {'choice':0,'fit':float('nan')},
+                                  {'choice':0,'fit':101}, {'choice':0}, {'fit':99}])
+def test_malformed_selection_has_bounded_repair(reply):
+    class Client:
+        calls=0
+        def _generate_json(self,*a,**kw):
+            self.calls+=1
+            return reply
+    client=Client()
+    with pytest.raises(StoryResponseError,match='дважды'):
+        generate_validated(client,[],temperature=0,validate=lambda raw:selection_response(raw,'choice',range(2)),stage='test')
+    assert client.calls==2
+
+
+def test_format_repair_does_not_repeat_api_quota_failure():
+    class Client:
+        calls=0
+        def _generate_json(self,*a,**kw):
+            self.calls+=1
+            raise RuntimeError('Gemini request failed: HTTP 429')
+    client=Client()
+    with pytest.raises(RuntimeError,match='429'):
+        generate_validated(client,[],temperature=0,validate=lambda raw:selection_response(raw,'choice',range(2)),stage='test')
+    assert client.calls==1
+
+
+def test_window_selection_accepts_array_reply(tmp_path,monkeypatch):
+    monkeypatch.setattr('video_ai.story_render._safe_probe_duration',lambda path:8)
+    def preview(command,**kw):
+        Path(command[-1]).write_bytes(b'fixture')
+        return subprocess.CompletedProcess(command,0)
+    monkeypatch.setattr('video_ai.story_render.subprocess.run',preview)
+    class Client:
+        def _generate_json(self,*a,**kw):
+            return [{'window':2,'fit':90}]
+    assert select_window({'path':'fixture.mp4'},2,'reaction',tmp_path,Client())==4
