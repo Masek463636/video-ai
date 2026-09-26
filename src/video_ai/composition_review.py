@@ -78,18 +78,12 @@ def failure(row, exc, disabled):
 
 
 def choose_slot(protected, kind="emoji"):
-    # Reserve captions and outer UI margins. A single fixed box bounds even
-    # unusually tall/wide stickers. No fly-in path through protected content.
-    blocked = protected + [[0, .50, 1, .14]]
-    for size in ((.80, .70) if kind == "meme" else (.40, .34)):
-        for y in (.68, .12, .32):
-            for x in (.06, .94-size):
-                rect = [x, y, size, .26 if kind == "meme" else size*.65]
-                if y+rect[3] > .95:
-                    continue
-                if all(not (x < b[0]+b[2]+.02 and x+rect[2] > b[0]-.02 and y < b[1]+b[3]+.02 and y+rect[3] > b[1]-.02) for b in blocked):
-                    return rect
-    return None
+    # EXPERIMENT: intentionally ignore protected boxes and center reactions.
+    size = 0.85 if kind == "meme" else 0.55
+    x = 0.5 - size / 2.0
+    y = 0.40 - (size * 0.65) / 2.0
+
+    return [x, y, size, size * 0.65 if kind != "meme" else size * 0.9]
 
 
 def frames(path, times, root, prefix):
