@@ -6,12 +6,47 @@ from pathlib import Path
 from .models import ShotPlan, Transcript, Word
 
 
+def _plan_already_has_transcript_timings(plan: ShotPlan, transcript: Transcript) -> bool:
+    """Return True when the saved plan already carries this exact transcript timing.
+
+    New materialized plans persist the original caption words. Reusing them avoids
+    reconstructing scene membership from cut boundaries, where a word can legally
+    extend a few milliseconds past the scene end. A different transcript still
+    falls through to the strict A/B re-attachment path below.
+    """
+    embedded: list[Word] = []
+    for scene in plan.scenes:
+        if not scene.caption:
+            continue
+        if not scene.caption_words:
+            return False
+        if " ".join(w.text for w in scene.caption_words).split() != scene.caption.split():
+            return False
+        embedded.extend(scene.caption_words)
+
+    if len(embedded) != len(transcript.words):
+        return False
+
+    return all(
+        saved.text == current.text
+        and abs(saved.start - current.start) <= 0.001
+        and abs(saved.end - current.end) <= 0.001
+        for saved, current in zip(embedded, transcript.words)
+    )
+
+
 def attach_caption_timings(plan: ShotPlan, transcript: Transcript) -> None:
     """Attach cached speech timing without changing visuals or scene boundaries.
 
     Explicit A/B input must match every caption; fail before mutating the plan
     if the transcript belongs to a different narration or edit.
     """
+    # Current materialized plans already contain the original word timestamps.
+    # Keep those authoritative timings when --transcript points to that same
+    # transcript instead of re-deriving scene membership from cut boundaries.
+    if _plan_already_has_transcript_timings(plan, transcript):
+        return
+
     matched: list[list[Word]] = []
     for index, scene in enumerate(plan.scenes):
         if not scene.caption:
