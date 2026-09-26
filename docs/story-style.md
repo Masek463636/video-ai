@@ -21,7 +21,7 @@ Open **Истории и мемы**, select the MP3 and click **Создать �
 The studio runs on your computer at http://127.0.0.1:8765. Keep its terminal open.
 
 The second style needs `GEMINI_API_KEY` for planning and visual selection.
-Pexels/Pixabay keys enable stock video searches. Without them, generic footage
+Pexels/Pixabay keys enable both stock photo and video searches. Without them, generic footage
 can fall back to illustrations. Commons/Openverse image search needs no extra
 key. API limits and availability still apply; this mode has no local CLIP-only
 replacement for Gemini.
@@ -61,8 +61,16 @@ allows explanatory comparison arrows.
 ## What it does
 
 - Plans scenes from the whole voiceover, preserving every word and its timing.
-- Searches Pexels/Pixabay for generic actions and Commons/Openverse for images.
-  It judges a bounded shortlist with Gemini rather than accepting the first hit.
+- Searches Pexels/Pixabay for stock photos and videos, and Commons/Openverse for
+  images. It interleaves providers in the shortlist, then asks Gemini to judge
+  up to four usable previews against the original intent and spoken line.
+- Comparisons and collages can use video too. The planner prefers clips for
+  physical actions and short search phrases. If an ordinary subject has no
+  accepted match, retrieval tries the other medium, then asks Gemini once for
+  up to two simpler queries. It tries at most three original plus two rewritten
+  queries in each medium, skipping repeated queries and already inspected URLs.
+  Simplification can remove speed/mood/framing modifiers; the main action/object
+  and comparison contrast must still fit. The acceptance threshold stays at 65.
 - Requires source titles/descriptions to mention a planned named entity or one
   of its aliases. Generic stock is not used for that subject. This is a metadata
   guard, not proof of historical authenticity; inspect factual videos before use.
@@ -83,6 +91,13 @@ If no candidate passes, the job stops with an explanation instead of silently
 inserting an unrelated picture. `sources.json` retains source links, creators
 and reported license metadata; check the source's reuse/attribution terms when
 publishing. A pack's inclusion does not establish rights to its contents.
+
+Photo searches use the existing provider keys; no new account or dependency is
+needed. Search responses are cached for 24 hours across jobs in
+`%LOCALAPPDATA%/video-ai/stock-images` on Windows (otherwise
+`~/.cache/video-ai/stock-images`). Raw API keys and authenticated request URLs
+are not written to that cache. Named-entity searches remain image-only through
+Commons/Openverse and never use generic stock or the broader-query fallback.
 
 ## Command-line testing
 
@@ -110,7 +125,9 @@ card is retained. Background removal is not enabled by the browser UI in v1.
 
 Work files include `transcript.json`, `packs.json`, `story.plan.json`, a partial
 `story.materialized.json` checkpoint, `sources.json`, downloaded assets and
-render files. In the studio these are in `work-web/<job-id>/story-work/`.
+render files. Per-subject `assets/<scene>/retrieval-*.json` records search queries,
+candidate/preview counts and selection outcomes, including rejected matches.
+In the studio these are in `work-web/<job-id>/story-work/`.
 After a failed search you can edit the scene's queries in `story.plan.json` and
 rerun with `--story-plan <that-file>` and the same transcript/work directory.
 Planning can be reused this way, but there is no automatic resume of completed
@@ -118,9 +135,10 @@ materialized scenes yet. Existing downloads and pack descriptions are cached.
 
 ## Verification
 
-`python -m pytest tests/test_story.py tests/test_web.py` covers invalid plans,
-named-entity filtering, pack caching, interrupted downloads, HTTP job routing,
-and a complete controlled-provider story pipeline with real FFmpeg rendering.
+`python -m pytest tests/test_story.py tests/test_story_retrieval.py tests/test_stock_images.py tests/test_web.py`
+covers invalid plans, named-entity filtering, pack caching, interrupted downloads,
+photo API contracts/caching, recovery through video or rewritten queries, HTTP
+job routing, and a complete controlled-provider story pipeline with real FFmpeg rendering.
 Pixel checks cover both comparison objects, the final scene, animated reactions
 and transparent overlays; frame counts check accumulated timing drift.
 These tests do not validate real API availability or the creative quality of

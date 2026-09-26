@@ -81,13 +81,18 @@ def test_interrupted_download_is_not_reused(tmp_path,monkeypatch):
     assert target.read_bytes()==b'complete'
 
 
-@pytest.mark.parametrize('array_reply', [False, True])
-def test_full_story_with_controlled_providers_and_real_render(tmp_path,monkeypatch,array_reply):
+@pytest.mark.parametrize('mode', ['object_reply', 'array_reply', 'video_recovery'])
+def test_full_story_with_controlled_providers_and_real_render(tmp_path,monkeypatch,mode):
+    array_reply = mode == 'array_reply'
     audio=tmp_path/'voice.wav'
     subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i','sine=frequency=220:duration=3',str(audio)],check=True)
     paths=[]
     for color in ['red','blue','green']:
         p=tmp_path/(color+'.png');Image.new('RGB',(90,120),color).save(p);paths.append(p)
+    if mode == 'video_recovery':
+        subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i','color=blue:s=90x120:r=30:d=1',
+                        '-f','lavfi','-i','color=cyan:s=90x120:r=30:d=0.5',
+                        '-filter_complex','[0:v][1:v]concat=n=2:v=1:a=0[v]','-map','[v]',str(tmp_path/'blue.mp4')],check=True)
     def item(color):return dict(subject(),queries=[color],label=color)
     plan={'beats':[{'start_word':0,'end_word':3,'kind':'comparison','subjects':[item('red'),item('blue')],'point_to':'left'},
                    {'start_word':3,'end_word':6,'kind':'photo','subjects':[item('green')]}]}
@@ -98,7 +103,11 @@ def test_full_story_with_controlled_providers_and_real_render(tmp_path,monkeypat
             result = {'choice':0,'fit':90,'reason':'Fixture colour matches'}
             return [result] if array_reply else result
     def candidates(query,**kwargs):
-        return [{'kind':'image','download_url':f'https://example.org/{query}.png','title':query,'description':query,'page_url':f'https://example.org/{query}','source':'fixture'}]
+        is_video = mode == 'video_recovery' and query == 'blue'
+        if is_video and not kwargs['video']:
+            return []
+        ext = 'mp4' if is_video else 'png'
+        return [{'kind':'video' if is_video else 'image','download_url':f'https://example.org/{query}.{ext}','title':query,'description':query,'page_url':f'https://example.org/{query}','source':'fixture'}]
     monkeypatch.setattr('video_ai.story_media.candidates',candidates)
     monkeypatch.setattr('video_ai.story_media._download',lambda url,path:path.write_bytes((tmp_path/Path(url).name).read_bytes()))
     monkeypatch.setattr('video_ai.story_render.render_story',lambda *a,**kw:render_story(*a,**kw,width=180,height=320,fps=15))
@@ -117,6 +126,13 @@ def test_full_story_with_controlled_providers_and_real_render(tmp_path,monkeypat
     for timestamp,x,channel in [(.8,40,0),(.8,140,2),(2.7,90,1)]:
         raw=subprocess.check_output(['ffmpeg','-v','error','-ss',str(timestamp),'-i',str(output),'-frames:v','1','-vf',f'crop=10:10:{x}:60,scale=1:1','-f','rawvideo','-pix_fmt','rgb24','-'])
         assert raw[channel]>max(raw[c] for c in range(3) if c!=channel)+40
+    if mode == 'video_recovery':
+        # The recovered video moves inside the comparison; it isn't a frozen preview.
+        raw=subprocess.check_output(['ffmpeg','-v','error','-ss','1.3','-i',str(output),'-frames:v','1',
+                                     '-vf','crop=10:10:140:60,scale=1:1','-f','rawvideo','-pix_fmt','rgb24','-'])
+        assert raw[1]>180 and raw[2]>180 and raw[0]<60
+        beats=json.loads((work/'story.materialized.json').read_text())['beats']
+        assert [a['kind'] for a in beats[0]['assets']]==['image','video']
 
 
 def test_animated_meme_loops_and_transparent_element(tmp_path):
