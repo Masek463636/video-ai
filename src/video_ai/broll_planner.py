@@ -74,6 +74,16 @@ EDITING RULES:
 - Use MEME rarely: maximum 1 meme per ~15-20s, never repeat the same meme.
 - Search queries must describe VISIBLE ACTION/SUBJECT, not abstract narration.
 - Show what is HAPPENING, not merely the noun that was spoken.
+- Build cause -> action -> consequence across connected beats. Resolve who acts
+  and who reacts before writing queries; do not exchange their roles.
+- In visual_description specify the observable action and a misleading near-match
+  to avoid. Example: ignoring an incoming call requires noticing/rejecting it;
+  scrolling a phone only illustrates phone use, not ignoring a call.
+- Prefer feasible stock actions with short literal queries. Do not prepend
+  "person interacting with" to every object or requested action.
+- Preserve recurring roles via compatible setting/clothing or object close-ups;
+  do not imply unrelated stock actors are the same identifiable person.
+
 - Preserve the same subject/object/location when consecutive beats explain it.
   A product comparison needs the same product; a reaction needs its cause.
   Vary the action or framing, not the subject merely for variety.

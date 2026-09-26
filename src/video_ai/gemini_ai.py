@@ -314,6 +314,12 @@ FULL TIMELINE:
 {json.dumps(timeline, ensure_ascii=False)}
 
 GLOBAL RULES:
+- Distinguish caller from recipient, observing from acting, and cause from reaction.
+  Reading/scrolling a phone is not evidence of calling or dismissing a call.
+- Use the observable requirements in visual_description. A shared noun without
+  the required action is contextual footage: score below 65, never as exact.
+- Favor continuity of setting, visible object and participant role across related
+  beats when relevance is comparable; do not assume different people are one person.
 - Judge each scene against its own caption and director intent.
 - Prefer a clear human/animal/object ACTION over a static object when possible.
 - Keep the core subject honest: milk is not coffee, receipt is not landscape,

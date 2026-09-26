@@ -383,7 +383,7 @@ Schema:
             target = candidate_path
         elif effect_type in {"png", "png_text"}:
             target = out / f"overlay_{len(overlays):02d}.png"
-            candidate = _find_png(query, target, client)
+            candidate = _find_png(query, target, client, caption=scene.caption)
             if candidate is None:
                 target.unlink(missing_ok=True)
                 # Text fallback is allowed ONLY for explicit spoken values
@@ -575,7 +575,7 @@ Schema:
                 candidate = None
                 if effect_type in {"png", "png_text"} and query:
                     target = out / f"overlay_{len(overlays):02d}.png"
-                    candidate = _find_png(query, target, client)
+                    candidate = _find_png(query, target, client, caption=scene.caption)
 
                 if effect_type in {"png", "png_text"} and candidate is None:
                     if target is not None:
@@ -653,7 +653,7 @@ Schema:
                 concept = query.casefold()
                 if concept not in used_concepts:
                     target = out / f"overlay_{len(overlays):02d}.png"
-                    candidate = _find_png(query, target, client)
+                    candidate = _find_png(query, target, client, caption=scene.caption)
                     if candidate is not None:
                         effect = {
                             "scene": scene_index,
@@ -730,14 +730,8 @@ Schema:
     return overlays
 
 
-def _find_png(query: str, target: Path, client):
-    """Find a meme-style foreground visual with a guaranteed visual fallback.
-
-    First prefer a real transparent cutout. If Commons has no good cutout,
-    choose a relevant regular image with local CLIP and convert it into a
-    rounded meme-card sticker. This keeps the edit dense instead of collapsing
-    to zero inserts just because transparent PNG coverage is poor.
-    """
+def _find_png(query: str, target: Path, client, *, caption: str = ""):
+    """Find a visually verified insert; omit it when relevance is uncertain."""
     reject_words = {
         "logo", "seal", "emblem", "badge", "flag", "coat of arms",
         "newspaper", "article", "document", "screenshot", "diagram",
@@ -798,7 +792,7 @@ def _find_png(query: str, target: Path, client):
             query,
             cutouts,
             client=client,
-            prompt=f"funny meme sticker cutout of {query}",
+            prompt=f"Object insert: {query}. Narration: {caption}. Show the requested object clearly; reject merely related scenes.",
         )
         if scored:
             _, best_candidate, best_preview = scored[0]
@@ -811,8 +805,7 @@ def _find_png(query: str, target: Path, client):
             return best_candidate
 
     # 2) Fallback: regular relevant image -> rounded meme-card sticker.
-    # This is intentionally better than returning None: for Shorts, a clean
-    # meme card is more useful than having no foreground beat at all.
+    # Regular images must pass the same visual relevance gate as cutouts.
     fallback_searches = [
         f"{query} funny",
         f"{query} reaction",
@@ -866,14 +859,12 @@ def _find_png(query: str, target: Path, client):
         query,
         regular,
         client=client,
-        prompt=f"clear funny meme visual of {query}",
+        prompt=f"Object insert: {query}. Narration: {caption}. Show the requested object clearly; reject merely related scenes.",
     )
     if not scored:
-        scored = [
-            (base_score, candidate, preview)
-            for candidate, preview, base_score in regular
-        ]
-        scored.sort(key=lambda item: item[0], reverse=True)
+        for _, preview, _ in regular:
+            preview.unlink(missing_ok=True)
+        return None
 
     _, best_candidate, best_preview = scored[0]
     _meme_cardize(best_preview, target)
@@ -894,19 +885,19 @@ def _score_overlay_candidates(
     client,
     prompt: str,
 ) -> list[tuple[float, Any, Path]]:
-    """Rank overlay images visually; local CLIP is the default judge."""
+    """Fail closed for optional overlays; metadata never overrides visual rejection."""
     scored: list[tuple[float, Any, Path]] = []
     if client is not None:
         for candidate, preview, base_score in candidates:
             score = 50.0 + base_score
             quality = 50.0
-            accepted = True
+            accepted = False
             try:
                 probe_scene = Scene(
                     start=0.0,
                     end=1.0,
                     query=query,
-                    caption=query,
+                    caption=prompt,
                     visual_description=prompt,
                     visual_mode="image",
                     source_mode="generic_image",
@@ -920,25 +911,16 @@ def _score_overlay_candidates(
                     match_level="exact",
                 )
                 if judgement is not None:
-                    score = float(judgement.score) + base_score
+                    score = float(judgement.score)
                     quality = float(judgement.quality_score)
-                    accepted = bool(judgement.accept and score >= 45 and quality >= 40)
+                    accepted = bool(judgement.accept and score >= 75 and quality >= 55)
             except Exception:
-                pass
+                # Avoid retrying every optional candidate during an outage.
+                break
             if accepted:
                 scored.append((score * 0.68 + quality * 0.32, candidate, preview))
-    else:
-        try:
-            from .multimodal import get_clip_ranker
-            ranker = get_clip_ranker()
-            sims = ranker.score_images(prompt, [item[1] for item in candidates])
-            for (candidate, preview, base_score), sim in zip(candidates, sims):
-                scored.append((float(sim) * 100.0 + base_score, candidate, preview))
-        except Exception:
-            scored = [
-                (base_score, candidate, preview)
-                for candidate, preview, base_score in candidates
-            ]
+    # CLIP similarity alone is not calibrated evidence that an optional image
+    # depicts this object/action. Without a judge, keep the base edit clean.
 
     scored.sort(key=lambda item: item[0], reverse=True)
     return scored
