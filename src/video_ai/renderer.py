@@ -443,18 +443,6 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         tilt = 0.0 if layout is not None else (-0.055 if index % 2 == 0 else 0.045)
         rotation_filter = "" if layout is not None else f"rotate={tilt}:fillcolor=none:ow=rotw(iw):oh=roth(ih),"
         fade_start = max(start + 0.20, end - 0.10)
-        filters.append(
-            f"[{input_index}:v]"
-            f"trim=duration={base_duration:.3f},setpts=PTS-STARTPTS,fps={fx_fps},"
-            # Deliberately allow upscaling. The old min(iw/ih) clamp left many
-            # Commons PNGs tiny even when the editor requested a hero insert.
-            f"scale=w={width}:h={max_h}:force_original_aspect_ratio=decrease,"
-            f"format=rgba,"
-            f"{rotation_filter}"
-            # Hold fully visible, then disappear quickly instead of lingering.
-            f"fade=t=out:st={fade_start:.3f}:d=0.10:alpha=1{ov}"
-        )
-
         if side == "left":
             settled_x = "46"
         elif side == "center":
@@ -464,32 +452,37 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
 
         if layout is not None:
             settled_x = str(int(plan.width * layout[0]))
+
         y_expr = str(target_y)
+
         if animation == "fly":
-            # New Shorts rhythm: enter FAST, finish the movement quickly, then
-            # stay completely still for 1-2 seconds. No long floating/coasting.
-            travel = 0.22
+            # Fast overshoot: image passes the target slightly,
+            # then settles instead of simply decelerating.
+            travel = 0.18
             p = f"max(0,min(1,(t-{start:.3f})/{travel:.3f}))"
-            ease = f"(1-pow(1-({p}),3))"
+            ease = f"(1-pow(1-({p}),3)+0.4*sin(({p})*3.14159))"
+
             if side == "left":
                 settled = 70
                 x = (
                     f"-overlay_w+({ease})*"
                     f"(overlay_w+{settled})"
                 )
+
             elif side == "right":
                 settled = 70
                 x = (
                     f"main_w+({ease})*"
                     f"(-overlay_w-{settled})"
                 )
+
             else:
-                # Center inserts rise in quickly and decelerate near the target.
                 x = settled_x
                 y_expr = (
                     f"main_h+({ease})*"
                     f"({target_y}-main_h)"
                 )
+
         elif animation == "drop":
             x = settled_x
             settle = start + 0.15
@@ -498,15 +491,40 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
                 f"-overlay_h+(t-{start:.3f})/0.15*({target_y}+overlay_h),"
                 f"{target_y})"
             )
+
         else:
             x = settled_x
 
+        # TEMP DEBUG:
+        # Keep sticker dimensions fixed so GIF/MP4 reactions cannot collapse
+        # during dynamic per-frame scaling.
+        scale_filter = (
+            f"scale=w={width}:h={max_h}:"
+            f"force_original_aspect_ratio=decrease"
+        )
+
+        filters.append(
+            f"[{input_index}:v]"
+            f"trim=duration={base_duration:.3f},"
+            f"setpts=PTS-STARTPTS,"
+            f"fps={fx_fps},"
+            f"{scale_filter},"
+            f"format=rgba,"
+            f"{rotation_filter}"
+            f"fade=t=out:st={fade_start:.3f}:d=0.10:alpha=1{ov}"
+        )
+
+        # Keep changing overlay size centred inside its intended layout box.
+        x_expr = f"({x})+({width}-overlay_w)/2"
+        final_y_expr = f"({y_expr})+({max_h}-overlay_h)/2"
+
         filters.append(
             f"{current}{ov}overlay="
-            f"x='{x}':y='{y_expr}':"
+            f"x='{x_expr}':y='{final_y_expr}':"
             f"enable='between(t,{start:.3f},{end:.3f})':"
             f"eof_action=pass:repeatlast=1:shortest=0{nxt}"
         )
+
         current = nxt
 
     filters.append(f"{current}trim=duration={base_duration:.3f},setpts=PTS-STARTPTS[vout]")
@@ -961,18 +979,18 @@ def _ass_text_plain(text: str) -> str:
 
 def _ass_text(text: str, *, editing_polish: bool = False) -> str:
     safe = text.replace("{", "(").replace("}", ")")
+
     if editing_polish:
-        # Small 70ms scale-up gives the caption a manual-edit punch without
-        # bouncing or lingering after the spoken word.
-        start_scale = 92 if len(text.split()) == 1 else 95
         return (
-            "{\\\\fscx" + str(start_scale)
-            + "\\\\fscy" + str(start_scale)
-            + "\\\\t(0,70,\\\\fscx100\\\\fscy100)\\\\fad(4,8)}"
+            r"{\fscx40\fscy40"
+            r"\t(0,60,\fscx115\fscy115)"
+            r"\t(60,120,\fscx100\fscy100)"
+            r"\fad(0,50)}"
             + safe
         )
-    # Stable/test45 behaviour remains the default.
-    return r"{\\fad(8,12)}" + safe
+
+    return r"{\fad(8,12)}" + safe
+
 
 def _ass_time(seconds: float) -> str:
     cs = int(round(max(0.0, seconds) * 100))
