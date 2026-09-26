@@ -458,7 +458,27 @@ def main() -> None:
     p_create.add_argument("--material-v2", action="store_true", help="Action-first Material Brain 2: prefer live stock video and visible actions")
     p_create.add_argument("--material-v2-local", action="store_true", help="Run Material Brain 2 without Gemini judgements; use stock providers + local ranking")
     p_create.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
+    p_story = sub.add_parser("story", help="Voiceover to documentary/meme compositions (opt-in second style)")
+    p_story.add_argument("audio")
+    p_story.add_argument("-o", "--output", required=True)
+    p_story.add_argument("--work-dir", required=True)
+    p_story.add_argument("--meme-dir", default="memes")
+    p_story.add_argument("--elements-dir", default="elements")
+    p_story.add_argument("--transcript", default=None, help="Reuse word timings from this exact voiceover")
+    p_story.add_argument("--story-plan", default=None, help="Use edited story.plan.json; retains validated word boundaries")
+    p_story.add_argument("--language", default="ru")
+    p_story.add_argument("--model", default="small")
+    p_story.add_argument("--cutouts", action="store_true", help="Use optional rembg for comparison objects; falls back to image cards")
+    p_story.add_argument("--no-effects", action="store_true", help="Disable local reactions, elements, and effect sounds")
     args = parser.parse_args()
+
+    if args.command == "story":
+        from .story import create_story
+        create_story(args.audio, args.output, args.work_dir, meme_dir=args.meme_dir,
+                     elements_dir=args.elements_dir, transcript_path=args.transcript,
+                     story_plan=args.story_plan, language=args.language, model=args.model,
+                     cutouts=args.cutouts, effects=not args.no_effects)
+        return
 
     if args.command == "probe":
         print(json.dumps(probe(args.path), ensure_ascii=False, indent=2))

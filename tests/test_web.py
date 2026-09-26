@@ -101,3 +101,25 @@ def test_renderer_failure_releases_slot(tmp_path, monkeypatch):
     assert not studio.busy.locked()
     assert 'API unavailable' in job['logs']
     assert not (folder / 'final.mp4').exists()
+
+
+def test_story_job_uses_separate_command(tmp_path, monkeypatch):
+    studio=Studio(tmp_path)
+    folder=studio.storage/'story-test';folder.mkdir()
+    job={'id':'story-test','created':time.time(),'status':'queued','stage':'','step':0,'duration':1,'style':'story','effects':False,'logs':[]}
+    studio.jobs[job['id']]=job
+    studio.busy.acquire()
+    commands=[]
+    real_popen=subprocess.Popen
+    def fake(command, **kwargs):
+        commands.append(command)
+        output=command[command.index('-o')+1]
+        return real_popen([command[0],'-c',"from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'test'); print('[story] rendering compositions')",output],**kwargs)
+    monkeypatch.setattr(subprocess,'Popen',fake)
+    studio.run(job,{})
+    assert job['status']=='done'
+    assert len(commands)==1
+    assert 'story' in commands[0] and '--no-effects' in commands[0]
+    assert '--material-v2' not in commands[0]
+    assert str(tmp_path/'memes') in commands[0]
+    assert str(tmp_path/'elements') in commands[0]

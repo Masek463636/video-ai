@@ -8,3 +8,5 @@ work-web/
 *.egg-info/
 build/
 dist/
+
+.video-ai-index/

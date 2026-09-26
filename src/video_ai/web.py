@@ -62,6 +62,13 @@ class Studio:
         ]
         if job['effects']:
             steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', '2'])
+        if job.get('style') == 'story':
+            command = common + ['story', str(folder / 'voice.mp3'), '-o', str(folder / 'final.mp4'),
+                                '--work-dir', str(folder / 'story-work'), '--language', 'ru',
+                                '--meme-dir', str(self.root / 'memes'), '--elements-dir', str(self.root / 'elements')]
+            if not job['effects']:
+                command.append('--no-effects')
+            steps = [('Истории и мемы: подготовка материалов', command)]
         try:
             for index, (stage, command) in enumerate(steps):
                 if self.stopping.is_set():
@@ -77,6 +84,15 @@ class Studio:
                     for key in KEYS:
                         if env.get(key):
                             line = line.replace(env[key], '[ключ скрыт]')
+                    if job.get('style') == 'story' and line.startswith('[story'):
+                        if 'render' in line:
+                            self.update(job, stage='Сборка сцен и финальный рендер', step=2)
+                        elif '[story] scene ' in line:
+                            self.update(job, stage='Поиск материалов · ' + line.split(':', 1)[0].replace('[story] scene ', 'сцена '))
+                        elif 'describing' in line:
+                            self.update(job, stage='Разбор паков мемов и элементов')
+                        elif 'planning' in line:
+                            self.update(job, stage='Планирование истории')
                     with self.lock:
                         job['logs'] = (job['logs'] + [line.rstrip()])[-120:]
                 if process.wait() != 0:
@@ -183,8 +199,13 @@ def make_handler(studio):
             if not all(shutil.which(x) for x in ('ffmpeg', 'ffprobe')):
                 self.send_data({'error': 'Установите FFmpeg и добавьте его в PATH'}, 400)
                 return
-            if not os.environ.get('GEMINI_API_KEY') or not any(os.environ.get(k) for k in KEYS[1:]):
-                self.send_data({'error': 'Нужны сохранённый ключ Gemini и хотя бы один ключ Pexels или Pixabay. Перезапустите приложение после настройки ключей.'}, 400)
+            style = self.headers.get('X-Style', 'classic')
+            if style not in ('classic', 'story'):
+                self.send_data({'error': 'Неизвестный стиль'}, 400)
+                return
+            if not os.environ.get('GEMINI_API_KEY') or (style == 'classic' and not any(os.environ.get(k) for k in KEYS[1:])):
+                required = 'Нужен сохранённый ключ Gemini.' if style == 'story' else 'Нужны сохранённый ключ Gemini и хотя бы один ключ Pexels или Pixabay.'
+                self.send_data({'error': required + ' Перезапустите приложение после настройки ключей.'}, 400)
                 return
             if not studio.busy.acquire(blocking=False):
                 self.send_data({'error': 'Дождитесь завершения текущего ролика'}, 409)
@@ -209,7 +230,7 @@ def make_handler(studio):
                 duration = float(info.get('format', {}).get('duration', 0))
                 if not math.isfinite(duration) or not 0 < duration <= 180 or not any(s.get('codec_type') == 'audio' for s in info.get('streams', [])):
                     raise ValueError('Нужна озвучка длительностью от 1 до 180 секунд')
-                job = {'id': folder.name, 'created': time.time(), 'status': 'queued', 'stage': 'Озвучка загружена', 'step': 0, 'duration': round(duration, 1), 'effects': self.headers.get('X-Effects') == '1', 'logs': []}
+                job = {'id': folder.name, 'created': time.time(), 'status': 'queued', 'stage': 'Озвучка загружена', 'step': 0, 'duration': round(duration, 1), 'style': style, 'effects': self.headers.get('X-Effects') == '1', 'logs': []}
                 with studio.lock:
                     studio.jobs[job['id']] = job
                     studio.save(job)

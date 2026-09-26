@@ -20,9 +20,10 @@ class OpenverseImage:
     license_url: str = ""
     artist: str = ""
     description: str = ""
+    preview_url: str = ""
 
 
-def search_openverse(query: str, *, limit: int = 20) -> list[OpenverseImage]:
+def search_openverse(query: str, *, limit: int = 20, prefer_original: bool = False) -> list[OpenverseImage]:
     """Search Openverse anonymously for openly licensed images.
 
     Openverse supports anonymous API requests. We intentionally keep this
@@ -47,7 +48,9 @@ def search_openverse(query: str, *, limit: int = 20) -> list[OpenverseImage]:
     for raw in payload.get("results", []) or []:
         # Prefer Openverse's thumbnail proxy because upstream originals can be
         # huge, hotlink-protected, or disappear. Fall back to the original URL.
-        url = str(raw.get("thumbnail") or raw.get("url") or "").strip()
+        thumbnail = str(raw.get("thumbnail") or "").strip()
+        original = str(raw.get("url") or "").strip()
+        url = (original or thumbnail) if prefer_original else (thumbnail or original)
         if not url:
             continue
         title = str(raw.get("title") or "").strip()
@@ -68,6 +71,7 @@ def search_openverse(query: str, *, limit: int = 20) -> list[OpenverseImage]:
                 license_url=str(raw.get("license_url") or ""),
                 artist=creator,
                 description=description,
+                preview_url=thumbnail or url,
             )
         )
     return out

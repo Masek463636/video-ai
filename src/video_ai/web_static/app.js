@@ -29,6 +29,8 @@ function showJob(job) {
   $('status-badge').textContent = ({done:'Готово',error:'Ошибка',running:'В работе',queued:'Запуск'})[job.status];
   $('step1').classList.toggle('active', job.step >= 1);
   $('step2').classList.toggle('active', job.step >= 2);
+  $('step1').textContent = job.style === 'story' ? '1. История и материалы' : '1. Кадры и основа';
+  $('step2').textContent = job.style === 'story' ? '2. Сборка сцен' : '2. Оформление';
   if (running) $('progress').removeAttribute('value'); else $('progress').value = job.status === 'done' ? 2 : Math.max(0, job.step - 1);
   $('working-note').hidden = !running;
   $('elapsed').textContent = running ? `Прошло ${Math.floor((Date.now()/1000 - job.created)/60)} мин · озвучка ${job.duration} с` : `Озвучка ${job.duration} с`;
@@ -62,7 +64,7 @@ async function refresh() {
       for (const job of state.jobs) {
         const row = document.createElement('div'); row.className = 'history-row';
         const button = document.createElement('button'); button.textContent = new Date(job.created*1000).toLocaleString('ru-RU');
-        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${job.effects ? 'Со стикерами' : 'Без стикеров'}`; button.append(sub);
+        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${job.style === 'story' ? 'Истории и мемы' : 'Классический'} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
         button.onclick = ()=>{selectedJob=job.id; showJob(job);};
         const badge = document.createElement('span'); badge.className='badge'; badge.textContent=({done:'Готово',error:'Ошибка',running:'В работе',queued:'Запуск'})[job.status];
         row.append(button,badge);
@@ -76,7 +78,7 @@ $('form').addEventListener('submit', async e => {
   e.preventDefault(); if (!selectedFile || sending || state?.busy) return;
   sending=true; $('create').disabled=true; $('message').textContent='Загружаем озвучку…';
   try {
-    const response=await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'audio/mpeg','X-Studio-Request':'1','X-Effects':$('effects').checked?'1':'0'},body:selectedFile});
+    const response=await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'audio/mpeg','X-Studio-Request':'1','X-Effects':$('effects').checked?'1':'0','X-Style':$('style').value},body:selectedFile});
     const result=await response.json(); if (!response.ok) throw new Error(result.error || 'Ошибка запуска');
     selectedJob=result.id; $('message').textContent=''; $('log-details').open=false;
   } catch (error) { $('message').textContent=error.message; }
@@ -84,3 +86,9 @@ $('form').addEventListener('submit', async e => {
 });
 async function poll(){ await refresh(); setTimeout(poll,2000); }
 poll();
+
+$('style').addEventListener('change', () => {
+  const story = $('style').value === 'story';
+  $('style-note').textContent = story ? 'Фото, видео и сравнения по смыслу. Использует папки memes и elements; первый раз разбор паков займёт больше времени.' : 'Знакомый монтаж, как в предыдущих роликах.';
+  $('effects-note').textContent = story ? 'Реакции и элементы из твоих паков по смыслу истории' : 'До двух вставок по смыслу озвучки';
+});

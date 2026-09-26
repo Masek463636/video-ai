@@ -162,7 +162,7 @@ V0.4 is still an MVP engine, not a finished consumer editor.
 - CLIP ranking currently applies to image candidates; video B-roll still uses metadata/geometry ranking.
 - Procedural fallback SFX are functional placeholders, not polished production sound design.
 - There is no generated-image fallback yet when retrieval completely fails.
-- There is no Windows GUI yet.
+- A local browser studio is available; there is no standalone Windows installer yet.
 
 ## Product milestones
 
@@ -183,3 +183,8 @@ The product architecture is independent. We are studying compatible open-source 
 Run `python -m video_ai.web` from the project folder to upload a voiceover,
 create a Shorts video and download the result through a local browser UI.
 See [Local Studio setup and limitations](docs/local-studio.md).
+
+The studio has two styles: **Классический** (the existing stock/sticker workflow)
+and **Истории и мемы** (photo/video panels, comparisons and local reaction packs).
+See [the second style guide](docs/story-style.md) for installation, `memes/` and
+`elements/` folders, CLI commands and current limitations.
