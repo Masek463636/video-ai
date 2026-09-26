@@ -94,3 +94,27 @@ def test_both_planners_preserve_original_timestamps():
             pages = _caption_pages(scene.caption, scene.start, scene.end, timed_words=scene.caption_words)
             assert all(1 <= len(text.split()) <= 2 for _, _, text in pages)
             assert pages[0][0] == scene.caption_words[0].start
+
+
+def test_attach_caption_timings_keeps_embedded_words_for_same_transcript():
+    words = [Word(0, .2, "Собака"), Word(.2, 1.05, "уснула")]
+    plan = ShotPlan(
+        Path("voice.wav"),
+        [Scene(0, 1, "dog", caption="Собака уснула", caption_words=list(words))],
+    )
+    attach_caption_timings(plan, Transcript(list(words)))
+    assert plan.scenes[0].caption_words == words
+
+
+def test_attach_caption_timings_still_rejects_different_transcript_with_embedded_words():
+    saved = [Word(0, .2, "Собака"), Word(.2, 1.05, "уснула")]
+    plan = ShotPlan(
+        Path("voice.wav"),
+        [Scene(0, 1, "dog", caption="Собака уснула", caption_words=list(saved))],
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        attach_caption_timings(
+            plan,
+            Transcript([Word(0, .2, "Собака"), Word(.2, 1.05, "проснулась")]),
+        )
+    assert plan.scenes[0].caption_words == saved
