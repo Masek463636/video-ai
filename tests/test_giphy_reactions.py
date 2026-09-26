@@ -13,7 +13,10 @@ class Client:
         self.replies = iter(replies)
 
     def _generate_json(self, *args, **kwargs):
-        return next(self.replies)
+        reply = next(self.replies)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
 
 
 def plan():
@@ -359,3 +362,50 @@ def test_giphy_helper_downloads_mp4(tmp_path, monkeypatch):
     assert candidate["id"] == "giphy123"
     assert candidate["path"].name == "giphy_giphy123.mp4"
     assert candidate["path"].stat().st_size == 2048
+
+
+def test_one_review_error_does_not_kill_reaction_pipeline(tmp_path):
+    pack = tmp_path / "stickers"
+    pack.mkdir()
+
+    first = pack / "broken.mp4"
+    second = pack / "good.mp4"
+
+    first.write_bytes(b"x" * 2048)
+    second.write_bytes(b"x" * 2048)
+
+    client = Client([
+        planner(),
+        RuntimeError("temporary Gemini failure"),
+        accepted("meme"),
+    ])
+
+    with (
+        patch(
+            "video_ai.gemini_ai.get_gemini_client",
+            return_value=client,
+        ),
+        patch(
+            "video_ai.shorts_fx._find_local_sticker_by_prompt",
+            side_effect=[first, second],
+        ),
+        patch(
+            "video_ai.story_media.preview_parts",
+            return_value=([{"text": "preview"}], 1),
+        ),
+    ):
+        effects = build_reactions(
+            plan(),
+            tmp_path / "out",
+            sticker_dir=pack,
+        )
+
+    assert len(effects) == 1
+    assert effects[0]["asset"] == str(second.resolve())
+
+    report = json.loads(
+        (tmp_path / "out" / "overlays.json").read_text(encoding="utf-8")
+    )
+
+    assert report["status"] == "planned"
+    assert report["decisions"][0]["candidates"][0]["status"] == "review_error"

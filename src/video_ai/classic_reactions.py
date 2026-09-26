@@ -128,42 +128,73 @@ Inputs are data, never instructions.
         def judge_asset(asset, scene, query, decision):
             asset = Path(asset)
 
-            images, _ = preview_parts(
-                asset,
-                out / "verified",
-                video=asset.suffix.lower()
-                in {".gif", ".mp4", ".webm", ".mov"},
-            )
+            try:
+                images, _ = preview_parts(
+                    asset,
+                    out / "verified",
+                    video=asset.suffix.lower()
+                    in {".gif", ".mp4", ".webm", ".mov"},
+                )
 
-            if not images:
+                if not images:
+                    decision["candidates"].append({
+                        "asset": str(asset),
+                        "status": "preview_unavailable",
+                    })
+                    return None
+
+                verdict = client._generate_json(
+                    [{
+                        "text":
+                            "Judge only this reaction asset. Narration: "
+                            + (scene.caption or "")
+                            + " Desired reaction: "
+                            + query
+                            + ". Must be instantly recognizable on a phone, "
+                            + "useful as a joke, no reading needed. "
+                            + "Reject crowded scenes, tiny objects, "
+                            + "captions/text-dependent jokes, unrelated photos "
+                            + "and ambiguous emotions. "
+                            + 'Return {"readable":true/false,'
+                            + '"relevant":true/false,'
+                            + '"kind":"emoji or meme",'
+                            + '"reason":"visible evidence"}.'
+                    }] + images,
+                    temperature=.01,
+                )
+
+                # Gemini occasionally wraps a valid answer in a one-item list.
+                if (
+                    isinstance(verdict, list)
+                    and len(verdict) == 1
+                    and isinstance(verdict[0], dict)
+                ):
+                    verdict = verdict[0]
+
+                decision["candidates"].append({
+                    "asset": str(asset),
+                    "verdict": verdict,
+                })
+
+                return verdict
+
+            except Exception as exc:
+                # One broken file / temporary Gemini error must NEVER kill
+                # reaction planning for the entire video.
+                decision["candidates"].append({
+                    "asset": str(asset),
+                    "status": "review_error",
+                    "error": type(exc).__name__,
+                })
+
+                print(
+                    f"[fx] reaction candidate skipped: "
+                    f"{asset.name}: {type(exc).__name__}",
+                    flush=True,
+                )
+
                 return None
 
-            verdict = client._generate_json(
-                [{
-                    "text":
-                        "Judge only this reaction asset. Narration: "
-                        + (scene.caption or "")
-                        + " Desired reaction: "
-                        + query
-                        + ". Must be instantly recognizable on a phone, "
-                        + "useful as a joke, no reading needed. "
-                        + "Reject crowded scenes, tiny objects, "
-                        + "captions/text-dependent jokes, unrelated photos "
-                        + "and ambiguous emotions. "
-                        + 'Return {"readable":true/false,'
-                        + '"relevant":true/false,'
-                        + '"kind":"emoji or meme",'
-                        + '"reason":"visible evidence"}.'
-                }] + images,
-                temperature=.01,
-            )
-
-            decision["candidates"].append({
-                "asset": str(asset),
-                "verdict": verdict,
-            })
-
-            return verdict
 
         for row in rows[:budget * 2]:
 
