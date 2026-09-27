@@ -47,7 +47,7 @@ async function refresh() {
     state = await response.json();
     $('create').disabled = state.busy || sending;
     $('create').textContent = state.busy ? 'Ролик обрабатывается…' : 'Создать ролик ↗';
-    const names = {GEMINI_API_KEY:'Gemini',PEXELS_API_KEY:'Pexels',PIXABAY_API_KEY:'Pixabay',ffmpeg:'FFmpeg',ffprobe:'Проверка аудио'};
+    const names = {GEMINI_API_KEY:'Gemini',PEXELS_API_KEY:'Pexels',PIXABAY_API_KEY:'Pixabay',GIPHY_API_KEY:'Giphy (необязательно)',ffmpeg:'FFmpeg',ffprobe:'Проверка аудио'};
     $('connections').replaceChildren();
     for (const [key, ok] of Object.entries({...state.keys,...state.tools})) {
       const row = document.createElement('div'); row.className = 'key';
@@ -55,7 +55,7 @@ async function refresh() {
       const status = document.createElement('span'); status.className = ok ? 'good' : 'missing'; status.textContent = ok ? (key.endsWith('KEY') ? 'Ключ найден' : 'Готово') : 'Не найден';
       row.append(name,status); $('connections').append(row);
     }
-    $('connection-count').textContent = `${Object.values(state.keys).filter(Boolean).length}/3 ключей`;
+    $('connection-count').textContent = `${['GEMINI_API_KEY','PEXELS_API_KEY','PIXABAY_API_KEY'].filter(k=>state.keys[k]).length}/3 ключей`;
     if (!selectedJob && state.jobs.length) selectedJob = state.jobs[0].id;
     showJob(state.jobs.find(j=>j.id === selectedJob));
     $('history-count').textContent = state.jobs.length ? String(state.jobs.length) : '';
@@ -64,7 +64,7 @@ async function refresh() {
       for (const job of state.jobs) {
         const row = document.createElement('div'); row.className = 'history-row';
         const button = document.createElement('button'); button.textContent = new Date(job.created*1000).toLocaleString('ru-RU');
-        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${job.style === 'story' ? 'Истории и мемы' : 'Классический'} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
+        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${({story:'Истории и мемы',dynamic:'Динамичный',classic:'Классический'})[job.style || 'classic']} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
         button.onclick = ()=>{selectedJob=job.id; showJob(job);};
         const badge = document.createElement('span'); badge.className='badge'; badge.textContent=({done:'Готово',error:'Ошибка',running:'В работе',queued:'Запуск'})[job.status];
         row.append(button,badge);
@@ -89,6 +89,7 @@ poll();
 
 $('style').addEventListener('change', () => {
   const story = $('style').value === 'story';
-  $('style-note').textContent = story ? 'Фото, видео и сравнения по смыслу. Использует папки memes и elements; первый раз разбор паков займёт больше времени.' : 'Знакомый монтаж, как в предыдущих роликах.';
-  $('effects-note').textContent = story ? 'Реакции и элементы из твоих паков по смыслу истории' : 'Количество реакций — по смыслу, без текстовых плашек';
+  const dynamic = $('style').value === 'dynamic';
+  $('style-note').textContent = story ? 'Фото, видео и сравнения по смыслу. Использует папки memes и elements; первый раз разбор паков займёт больше времени.' : dynamic ? 'Крупные реакции по центру и пружинящие субтитры. На основе твоего удачного варианта Shorts.' : 'Знакомый монтаж, как в предыдущих роликах.';
+  $('effects-note').textContent = story ? 'Реакции и элементы из твоих паков по смыслу истории' : dynamic ? 'По смыслу примерно каждые 3–4 секунды. Сначала твои паки; Giphy — если подключён. Без текстовых плашек.' : 'Количество реакций — по смыслу, без текстовых плашек';
 });

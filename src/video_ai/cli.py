@@ -429,6 +429,7 @@ def main() -> None:
     p_render.add_argument("--crf", type=int, default=20)
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
+    p_render.add_argument("--editing-style", choices=("classic", "dynamic"), default="classic", help="Dynamic: stable-shorts1-good reactions and bouncing captions")
     p_render.add_argument("--composition-review", action="store_true", help="Review cropped scenes and safely place optional inserts with Gemini")
     p_render.add_argument("--overlays-file", default=None, help="Reuse saved overlays.json without new API requests")
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
@@ -559,6 +560,7 @@ def main() -> None:
                 max_overlays=max(0, args.max_overlays),
                 use_gemini=not args.shorts_fx_local,
                 sticker_dir=args.sticker_dir,
+                editing_style=args.editing_style,
             )
             if args.shorts_fx and not args.overlays_file else []
         )
@@ -580,12 +582,14 @@ def main() -> None:
             reference_framing=args.reference_framing,
             composition_review=args.composition_review,
             base_video=args.base_video,
+            editing_style=args.editing_style,
         )
         print(json.dumps({
             "ok": True,
             "output": str(output),
             "editing_polish": bool(args.editing_polish),
             "shorts_fx": bool(args.shorts_fx),
+            "editing_style": args.editing_style,
             "overlays": len(overlays),
         }, ensure_ascii=False, indent=2))
         return

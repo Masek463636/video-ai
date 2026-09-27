@@ -49,8 +49,10 @@ def test_http_boundaries(app):
         studio.busy.release()
 
 
-def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path):
+@pytest.mark.parametrize('style,effects', [('classic',True),('dynamic',True),('dynamic',False)])
+def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style, effects):
     studio, url = app
+    monkeypatch.setenv('GIPHY_API_KEY', 'test-giphy-secret')
     audio = tmp_path / 'test.mp3'
     subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=440:duration=1','-y',str(audio)],check=True)
     commands = []
@@ -62,10 +64,10 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path):
         commands.append(command)
         # Real child process for log streaming and lifecycle, controlled output only.
         output = command[command.index('-o') + 1]
-        return real_popen([command[0], '-c', "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'test-video'); print('test-private-key')", output], **kwargs)
+        return real_popen([command[0], '-c', "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'test-video'); print('test-private-key test-giphy-secret')", output], **kwargs)
 
     monkeypatch.setattr(subprocess, 'Popen', fake_renderer)
-    status, body = request(url + '/api/jobs', audio.read_bytes(), **{'X-Studio-Request':'1', 'X-Effects':'1'})
+    status, body = request(url + '/api/jobs', audio.read_bytes(), **{'X-Studio-Request':'1', 'X-Effects':'1' if effects else '0', 'X-Style':style})
     assert status == 202
     job_id = json.loads(body)['id']
     deadline = time.monotonic() + 10
@@ -76,8 +78,11 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path):
     assert job['status'] == 'done'
     assert len(commands) == 2
     assert '--select-moments' in commands[0]
-    assert '--shorts-fx' in commands[1]
-    assert '--max-overlays' in commands[1]
+    assert ('--shorts-fx' in commands[1]) is effects
+    assert ('--max-overlays' in commands[1]) is effects
+    assert ('--editing-style' in commands[1]) is (style == 'dynamic')
+    assert job['style'] == style
+    assert b'test-giphy-secret' not in request(url + '/api/state')[1]
     assert request(url + '/download/' + job_id) == (200, b'test-video')
     assert b'test-private-key' not in request(url + '/api/state')[1]
     assert Studio(tmp_path).jobs[job_id]['status'] == 'done'
@@ -123,3 +128,13 @@ def test_story_job_uses_separate_command(tmp_path, monkeypatch):
     assert '--material-v2' not in commands[0]
     assert str(tmp_path/'memes') in commands[0]
     assert str(tmp_path/'elements') in commands[0]
+
+
+def test_dynamic_requires_stock_key_not_optional_giphy(app,monkeypatch):
+    studio,url=app
+    monkeypatch.delenv('PEXELS_API_KEY',raising=False)
+    monkeypatch.delenv('PIXABAY_API_KEY',raising=False)
+    monkeypatch.setenv('GIPHY_API_KEY','optional-only')
+    status,body=request(url+'/api/jobs',b'audio',**{'X-Studio-Request':'1','X-Style':'dynamic'})
+    assert status==400 and 'Pexels' in body.decode()
+    assert not studio.busy.locked()

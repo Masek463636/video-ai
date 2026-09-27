@@ -26,7 +26,10 @@ def render_plan(
     reference_framing: bool = False,
     composition_review: bool = False,
     base_video: str | Path | None = None,
+    editing_style: str = "classic",
 ) -> Path:
+    if editing_style not in ("classic", "dynamic"):
+        raise ValueError("Unknown editing style")
     _require("ffmpeg")
     _require("ffprobe")
     output = Path(output)
@@ -85,8 +88,14 @@ def render_plan(
             base = root / "base.mp4"
             _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(base)])
 
+        if editing_style == "dynamic":
+            from .dynamic_reactions import place_reactions
+            overlays = place_reactions(overlays or [], audio_duration)
+            (root / "overlays.placed.json").write_text(json.dumps({"overlays": overlays}, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f'[dynamic] visible reactions={len(overlays)}', flush=True)
         if reviewer is not None:
-            overlays = reviewer.overlays(base, overlays or [], plan)
+            if editing_style != "dynamic":
+                overlays = reviewer.overlays(base, overlays or [], plan)
             counts = {}
             for row in reviewer.report['scenes']:
                 counts[row['status']] = counts.get(row['status'], 0) + 1
@@ -94,13 +103,13 @@ def render_plan(
         picture = base
         if overlays:
             overlayed = root / "overlayed.mp4"
-            _apply_overlays(base, overlays, plan, overlayed, crf=crf)
+            _apply_overlays(base, overlays, plan, overlayed, crf=crf, editing_style=editing_style)
             picture = overlayed
 
         final_filter: list[str] = []
         if captions:
             ass = root / "captions.ass"
-            _write_ass(plan, ass, editing_polish=editing_polish, overlays=overlays)
+            _write_ass(plan, ass, editing_polish=editing_polish, overlays=overlays, editing_style=editing_style)
             final_filter = ["-vf", f"ass='{_filter_path(ass)}'"]
         sfx_track: Path | None = None
         if overlays:
@@ -341,7 +350,7 @@ def _probe_video_size(path: str | Path) -> tuple[int, int] | None:
     except Exception:
         return None
 
-def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Path, *, crf: int) -> None:
+def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Path, *, crf: int, editing_style: str = "classic") -> None:
     """Composite PNG inserts over the existing edit without touching audio.
 
     PNG inputs are explicitly limited to the base duration and overlay never
@@ -501,6 +510,11 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         else:
             x = settled_x
 
+        if editing_style == "dynamic" and layout is not None:
+            # Preserve approved stable-branch centring without animated resize
+            # (which previously made GIF/MP4 reactions collapse).
+            x = f"({x})+({width}-overlay_w)/2"
+            y_expr = f"({y_expr})+({max_h}-overlay_h)/2"
         filters.append(
             f"{current}{ov}overlay="
             f"x='{x}':y='{y_expr}':"
@@ -785,6 +799,7 @@ def _write_ass(
     *,
     editing_polish: bool = False,
     overlays: list[dict] | None = None,
+    editing_style: str = "classic",
 ) -> None:
     # Reference-style Shorts subtitles: very large Impact text around the
     # lower-middle of the frame, with a heavy black stroke.
@@ -811,7 +826,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
         pages = _caption_pages(scene.caption, scene.start, scene.end, timed_words=scene.caption_words)
         for page_start, page_end, text in pages:
             events.append(
-                f"Dialogue: 0,{_ass_time(page_start)},{_ass_time(page_end)},Default,,0,0,0,,{_ass_text(text, editing_polish=editing_polish)}"
+                f"Dialogue: 0,{_ass_time(page_start)},{_ass_time(page_end)},Default,,0,0,0,,{_ass_text(text, editing_polish=editing_polish, editing_style=editing_style)}"
             )
     # Overlay value labels (e.g. "930 мл") are rendered with libass instead
     # of FFmpeg drawtext. This avoids Windows fontconfig failures while keeping
@@ -959,8 +974,10 @@ def _ass_text_plain(text: str) -> str:
     return text.replace("{", "(").replace("}", ")").replace("\\", r"\\")
 
 
-def _ass_text(text: str, *, editing_polish: bool = False) -> str:
+def _ass_text(text: str, *, editing_polish: bool = False, editing_style: str = "classic") -> str:
     safe = text.replace("{", "(").replace("}", ")")
+    if editing_style == "dynamic":
+        return (r"{\fscx40\fscy40\t(0,60,\fscx115\fscy115)\t(60,120,\fscx100\fscy100)\fad(0,50)}" + safe)
     if editing_polish:
         # Small 70ms scale-up gives the caption a manual-edit punch without
         # bouncing or lingering after the spoken word.

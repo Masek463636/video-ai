@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import webbrowser
 
 KEYS = ('GEMINI_API_KEY', 'PEXELS_API_KEY', 'PIXABAY_API_KEY')
+OPTIONAL_KEYS = ('GIPHY_API_KEY',)
 MAX_UPLOAD = 100 * 1024 * 1024
 
 
@@ -60,6 +61,8 @@ class Studio:
             ('Подбор кадров и сборка основы', common + ['create', str(folder / 'voice.mp3'), '-o', str(folder / 'base.mp4'), '--work-dir', str(work), '--language', 'ru', '--material-v2', '--reference-framing', '--select-moments', '--no-sfx']),
             ('Оформление и финальный рендер', common + ['render', str(work / 'shot_plan.materialized.json'), '--transcript', str(work / 'transcript.json'), '--editing-polish', '--reference-framing', '--composition-review', '-o', str(folder / 'final.mp4'), '--work-dir', str(folder / 'final-work')]),
         ]
+        if job.get('style') == 'dynamic':
+            steps[1][1].extend(['--editing-style', 'dynamic'])
         if job['effects']:
             steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', '0'])
         if job.get('style') == 'story':
@@ -81,7 +84,7 @@ class Studio:
                     process = self.process
                 for line in process.stdout:
                     # Logs remain bounded; API key values never go to disk or browser.
-                    for key in KEYS:
+                    for key in KEYS + OPTIONAL_KEYS:
                         if env.get(key):
                             line = line.replace(env[key], '[ключ скрыт]')
                     if job.get('style') == 'story' and line.startswith('[story'):
@@ -157,7 +160,7 @@ def make_handler(studio):
                 with studio.lock:
                     jobs = sorted(studio.jobs.values(), key=lambda j: j['created'], reverse=True)
                     snapshot = json.loads(json.dumps(jobs))
-                self.send_data({'jobs': snapshot, 'busy': studio.busy.locked(), 'keys': {k: bool(os.environ.get(k)) for k in KEYS}, 'tools': {x: bool(shutil.which(x)) for x in ('ffmpeg', 'ffprobe')}})
+                self.send_data({'jobs': snapshot, 'busy': studio.busy.locked(), 'keys': {k: bool(os.environ.get(k)) for k in KEYS + OPTIONAL_KEYS}, 'tools': {x: bool(shutil.which(x)) for x in ('ffmpeg', 'ffprobe')}})
             elif path.startswith('/download/'):
                 job_id = path.removeprefix('/download/')
                 job = studio.jobs.get(job_id)
@@ -200,10 +203,10 @@ def make_handler(studio):
                 self.send_data({'error': 'Установите FFmpeg и добавьте его в PATH'}, 400)
                 return
             style = self.headers.get('X-Style', 'classic')
-            if style not in ('classic', 'story'):
+            if style not in ('classic', 'story', 'dynamic'):
                 self.send_data({'error': 'Неизвестный стиль'}, 400)
                 return
-            if not os.environ.get('GEMINI_API_KEY') or (style == 'classic' and not any(os.environ.get(k) for k in KEYS[1:])):
+            if not os.environ.get('GEMINI_API_KEY') or (style != 'story' and not any(os.environ.get(k) for k in KEYS[1:])):
                 required = 'Нужен сохранённый ключ Gemini.' if style == 'story' else 'Нужны сохранённый ключ Gemini и хотя бы один ключ Pexels или Pixabay.'
                 self.send_data({'error': required + ' Перезапустите приложение после настройки ключей.'}, 400)
                 return
