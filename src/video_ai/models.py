@@ -38,9 +38,20 @@ MotionPreset = Literal[
 
 PremiumLayout = Literal[
     "clean",
-    "parallax",
+    "reaction",
+    "focus_zoom",
+    "arrow",
+    "circle",
+    "big_number",
+    "png_cutout",
     "text_behind",
+    "parallax",
     "split_screen",
+    "freeze_frame",
+    "spotlight",
+    "blur_background",
+    "before_after",
+    "stacked_cards",
 ]
 
 
@@ -120,6 +131,12 @@ class Scene:
 
     # Cached transparent foreground produced by rembg for 2.5D/text-behind.
     premium_foreground: str | None = None
+
+    # Viral Premium v2 scene grammar metadata.
+    pace_class: str = "normal"
+    split_layout: str = "50_50"
+    premium_subject_box: list[float] = field(default_factory=list)
+    shot_fingerprint: str | None = None
 
     @property
     def duration(self) -> float:

@@ -1486,7 +1486,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
                     + str(fs)
                     + red
                     + pulse
-                    + r"}" + "\u279c"
+                    + r"}" + "\u25ef"
                 )
 
             else:

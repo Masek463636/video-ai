@@ -82,6 +82,17 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
                 else None
             ),
             premium_foreground=premium_foreground,
+            pace_class=str(raw.get("pace_class", "normal")),
+            split_layout=str(raw.get("split_layout", "50_50")),
+            premium_subject_box=[
+                float(x) for x in (raw.get("premium_subject_box") or [])
+                if isinstance(x, (int, float))
+            ],
+            shot_fingerprint=(
+                str(raw["shot_fingerprint"])
+                if raw.get("shot_fingerprint")
+                else None
+            ),
         ))
 
     plan = ShotPlan(
@@ -157,6 +168,10 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "secondary_asset_kind": scene.secondary_asset_kind,
                 "secondary_query": scene.secondary_query,
                 "premium_foreground": portable(scene.premium_foreground),
+                "pace_class": scene.pace_class,
+                "split_layout": scene.split_layout,
+                "premium_subject_box": scene.premium_subject_box,
+                "shot_fingerprint": scene.shot_fingerprint,
             }
             for scene in plan.scenes
         ],
@@ -194,12 +209,45 @@ def validate_shot_plan(plan: ShotPlan) -> None:
 
         if scene.premium_layout not in {
             "clean",
-            "parallax",
+            "reaction",
+            "focus_zoom",
+            "arrow",
+            "circle",
+            "big_number",
+            "png_cutout",
             "text_behind",
+            "parallax",
             "split_screen",
+            "freeze_frame",
+            "spotlight",
+            "blur_background",
+            "before_after",
+            "stacked_cards",
         }:
             raise ValueError(
                 f"scene {index}: invalid premium_layout={scene.premium_layout!r}"
+            )
+
+        if scene.pace_class not in {"fast", "normal", "reveal"}:
+            raise ValueError(
+                f"scene {index}: invalid pace_class={scene.pace_class!r}"
+            )
+        if scene.split_layout not in {
+            "50_50",
+            "60_40",
+            "left_right",
+            "pip",
+            "diagonal",
+        }:
+            raise ValueError(
+                f"scene {index}: invalid split_layout={scene.split_layout!r}"
+            )
+        if scene.premium_subject_box and (
+            len(scene.premium_subject_box) != 4
+            or any(not 0.0 <= float(v) <= 1.0 for v in scene.premium_subject_box)
+        ):
+            raise ValueError(
+                f"scene {index}: invalid premium_subject_box"
             )
 
         if scene.secondary_asset_kind not in {

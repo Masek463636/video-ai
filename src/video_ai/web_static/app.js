@@ -64,7 +64,7 @@ async function refresh() {
       for (const job of state.jobs) {
         const row = document.createElement('div'); row.className = 'history-row';
         const button = document.createElement('button'); button.textContent = new Date(job.created*1000).toLocaleString('ru-RU');
-        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${({story:'Истории и мемы',dynamic:'Динамичный',classic:'Классический'})[job.style || 'classic']} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
+        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${({story:'Истории и мемы',dynamic:'Динамичный',viral:'Viral',premium:'Viral Premium',premium_v2:'Viral Premium v2',classic:'Классический'})[job.style || 'classic']} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
         button.onclick = ()=>{selectedJob=job.id; showJob(job);};
         const badge = document.createElement('span'); badge.className='badge'; badge.textContent=({done:'Готово',error:'Ошибка',running:'В работе',queued:'Запуск'})[job.status];
         row.append(button,badge);
@@ -95,7 +95,8 @@ $('style').addEventListener('change', () => {
     story: 'Storytelling with photos, reactions and comparisons.',
     dynamic: 'Large reactions and punchy subtitles.',
     viral: 'Fast Viral/Darwin edit: more cuts, snap zooms, reactions, PNGs and verified attention graphics.',
-    premium: 'Viral Premium: AI scene composer, kinetic word captions, 2.5D parallax, text behind subjects, split-screen and premium sound design.'
+    premium: 'Viral Premium: AI scene composer, kinetic word captions, 2.5D parallax, text behind subjects, split-screen and premium sound design.',
+    premium_v2: 'Premium v2: object-aware camera, semantic pacing, scene grammar, richer typography, semantic diversity and quality-gated effects.'
   };
 
   const effects = {
@@ -103,7 +104,8 @@ $('style').addEventListener('change', () => {
     story: 'Story reactions and elements are selected by context.',
     dynamic: 'Large verified reactions with Giphy fallback.',
     viral: 'Reactions + PNG/value callouts + frame-verified arrows/circles.',
-    premium: 'Everything from Viral plus expensive-looking layered compositions and exact-word typography.'
+    premium: 'Everything from Viral plus expensive-looking layered compositions and exact-word typography.',
+    premium_v2: 'One hero idea per scene: hand-drawn attention graphics, smart camera, semantic sound and strict fallbacks.'
   };
 
   $('style-note').textContent = notes[value] || notes.classic;
