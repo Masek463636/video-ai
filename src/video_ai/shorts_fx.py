@@ -22,7 +22,10 @@ def build_shorts_overlays(
     base_video=None,
 ):
 
-    if editing_style == "viral":
+    if editing_style in {
+        "viral",
+        "premium",
+    }:
         from .viral_fx import build_viral_overlays
 
         return build_viral_overlays(

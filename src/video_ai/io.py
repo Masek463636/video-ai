@@ -23,6 +23,20 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
             if not asset_path.is_absolute():
                 asset_path = (base / asset_path).resolve()
             asset = str(asset_path)
+        secondary_asset = raw.get("secondary_asset")
+        if secondary_asset:
+            secondary_path = Path(secondary_asset)
+            if not secondary_path.is_absolute():
+                secondary_path = (base / secondary_path).resolve()
+            secondary_asset = str(secondary_path)
+
+        premium_foreground = raw.get("premium_foreground")
+        if premium_foreground:
+            foreground_path = Path(premium_foreground)
+            if not foreground_path.is_absolute():
+                foreground_path = (base / foreground_path).resolve()
+            premium_foreground = str(foreground_path)
+
         scenes.append(Scene(
             start=float(raw["start"]),
             end=float(raw["end"]),
@@ -49,6 +63,25 @@ def load_shot_plan(path: str | Path) -> ShotPlan:
             focus_source=raw.get("focus_source"),
             asset_score=(float(raw["asset_score"]) if raw.get("asset_score") is not None else None),
             semantic_score=(float(raw["semantic_score"]) if raw.get("semantic_score") is not None else None),
+            premium_layout=raw.get("premium_layout", "clean"),
+            premium_highlights=[
+                str(x) for x in (raw.get("premium_highlights") or [])
+                if str(x).strip()
+            ],
+            premium_text=(
+                str(raw["premium_text"])
+                if raw.get("premium_text")
+                else None
+            ),
+            premium_music_drop=bool(raw.get("premium_music_drop", False)),
+            secondary_asset=secondary_asset,
+            secondary_asset_kind=raw.get("secondary_asset_kind", "blank"),
+            secondary_query=(
+                str(raw["secondary_query"])
+                if raw.get("secondary_query")
+                else None
+            ),
+            premium_foreground=premium_foreground,
         ))
 
     plan = ShotPlan(
@@ -116,6 +149,14 @@ def save_shot_plan(plan: ShotPlan, path: str | Path) -> Path:
                 "focus_source": scene.focus_source,
                 "asset_score": scene.asset_score,
                 "semantic_score": scene.semantic_score,
+                "premium_layout": scene.premium_layout,
+                "premium_highlights": scene.premium_highlights,
+                "premium_text": scene.premium_text,
+                "premium_music_drop": scene.premium_music_drop,
+                "secondary_asset": portable(scene.secondary_asset),
+                "secondary_asset_kind": scene.secondary_asset_kind,
+                "secondary_query": scene.secondary_query,
+                "premium_foreground": portable(scene.premium_foreground),
             }
             for scene in plan.scenes
         ],
@@ -150,6 +191,33 @@ def validate_shot_plan(plan: ShotPlan) -> None:
             raise ValueError(f"scene {index}: invalid motion_preset={scene.motion_preset!r}")
         if scene.tone not in valid_tones:
             raise ValueError(f"scene {index}: invalid tone={scene.tone!r}")
+
+        if scene.premium_layout not in {
+            "clean",
+            "parallax",
+            "text_behind",
+            "split_screen",
+        }:
+            raise ValueError(
+                f"scene {index}: invalid premium_layout={scene.premium_layout!r}"
+            )
+
+        if scene.secondary_asset_kind not in {
+            "blank",
+            "image",
+            "video",
+        }:
+            raise ValueError(
+                f"scene {index}: invalid secondary_asset_kind"
+            )
+
+        if (
+            scene.secondary_asset_kind != "blank"
+            and not scene.secondary_asset
+        ):
+            raise ValueError(
+                f"scene {index}: secondary asset kind requires asset"
+            )
         if scene.semantic_lock and not (scene.required_entities or scene.required_context or scene.semantic_fallback):
             raise ValueError(f"scene {index}: semantic_lock requires entities, context or fallback")
         for name, value in (("focus_x", scene.focus_x), ("focus_y", scene.focus_y)):

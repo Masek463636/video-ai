@@ -324,7 +324,21 @@ def _mix_if_requested(plan, audio_plan, work: Path, args) -> Path:
     if args.no_sfx and not args.music:
         return Path(plan.audio)
     mixed = work / "mixed_audio.m4a"
-    return mix_audio(plan.audio, audio_plan, mixed, work_dir=work / "audio_mix", music=args.music, sfx_dir=args.sfx_dir)
+    return mix_audio(
+        plan.audio,
+        audio_plan,
+        mixed,
+        work_dir=work / "audio_mix",
+        music=args.music,
+        sfx_dir=args.sfx_dir,
+        premium=bool(
+            getattr(
+                args,
+                "premium_style",
+                False,
+            )
+        ),
+    )
 
 
 def _gemini_manifest_stats(manifest: list[dict]) -> dict:
@@ -440,6 +454,7 @@ def main() -> None:
             "classic",
             "dynamic",
             "viral",
+            "premium",
         ),
         default="classic",
         help="Viral: fast Darwin-style accents and captions",
@@ -451,6 +466,21 @@ def main() -> None:
     p_render.add_argument("--sticker-dir", default=None, help="Local sticker/GIF pack; CLIP picks context-appropriate reaction stickers")
     p_render.add_argument("--max-overlays", type=int, default=0, help="Optional hard cap for Shorts foreground accents; 0 uses adaptive density with no fixed 6/8 limit")
     p_render.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
+    p_render.add_argument(
+        "--premium-audio",
+        action="store_true",
+        help="Premium SFX + sidechain + planned music drops",
+    )
+    p_render.add_argument(
+        "--music",
+        default=None,
+        help="Optional background music for Premium sidechain/drop mixing",
+    )
+    p_render.add_argument(
+        "--sfx-dir",
+        default=None,
+        help="Optional Premium SFX directory",
+    )
     p_make = sub.add_parser("make", help="Resolve visual assets and render an existing ShotPlan")
     p_make.add_argument("plan")
     p_make.add_argument("-o", "--output", required=True)
@@ -464,6 +494,11 @@ def main() -> None:
     p_make.add_argument(
         "--viral-style",
         action="store_true",
+    )
+    p_make.add_argument(
+        "--premium-style",
+        action="store_true",
+        help="Enable complete Viral Premium scene composer",
     )
     p_create = sub.add_parser("create", help="voiceover -> Editing Brain -> sources -> judge -> render")
     p_create.add_argument("audio")
@@ -483,6 +518,11 @@ def main() -> None:
     p_create.add_argument(
         "--viral-style",
         action="store_true",
+    )
+    p_create.add_argument(
+        "--premium-style",
+        action="store_true",
+        help="Enable complete Viral Premium scene composer",
     )
     p_story = sub.add_parser("story", help="Voiceover to documentary/meme compositions (opt-in second style)")
     p_story.add_argument("audio")
@@ -594,19 +634,49 @@ def main() -> None:
             overlays = saved.get("overlays", saved.get("effects", [])) if isinstance(saved, dict) else saved
             if not isinstance(overlays, list) or any(not isinstance(item, dict) for item in overlays):
                 raise ValueError("Invalid saved overlays")
-        output = render_plan(
-            plan,
-            args.output,
-            work_dir=args.work_dir,
-            captions=not args.no_captions,
-            crf=args.crf,
-            editing_polish=args.editing_polish,
-            overlays=overlays,
-            reference_framing=args.reference_framing,
-            composition_review=args.composition_review,
-            base_video=args.base_video,
-            editing_style=args.editing_style,
-        )
+        original_audio = plan.audio
+        premium_mixed_audio = None
+
+        if args.premium_audio:
+            premium_audio_plan = build_audio_plan(
+                plan,
+                premium=True,
+            )
+
+            premium_mixed_audio = (
+                render_work
+                / "premium_audio.m4a"
+            )
+
+            mix_audio(
+                plan.audio,
+                premium_audio_plan,
+                premium_mixed_audio,
+                work_dir=render_work
+                / "premium_audio_work",
+                music=args.music,
+                sfx_dir=args.sfx_dir,
+                premium=True,
+            )
+
+            plan.audio = premium_mixed_audio
+
+        try:
+            output = render_plan(
+                plan,
+                args.output,
+                work_dir=args.work_dir,
+                captions=not args.no_captions,
+                crf=args.crf,
+                editing_polish=args.editing_polish,
+                overlays=overlays,
+                reference_framing=args.reference_framing,
+                composition_review=args.composition_review,
+                base_video=args.base_video,
+                editing_style=args.editing_style,
+            )
+        finally:
+            plan.audio = original_audio
         print(json.dumps({
             "ok": True,
             "output": str(output),
@@ -693,10 +763,37 @@ def main() -> None:
             )
 
         manifest, qc_results, diversity_repairs = _resolve_and_repair(plan, work, args)
+
         if args.select_moments:
             select_moments(plan, work / "moments")
+
+        if getattr(
+            args,
+            "premium_style",
+            False,
+        ):
+            from .premium_style import (
+                prepare_premium_plan,
+            )
+
+            prepare_premium_plan(
+                plan,
+                work / "premium",
+                use_gemini=True,
+            )
+
         materialized = save_shot_plan(plan, work / "shot_plan.materialized.json")
-        audio_plan = build_audio_plan(plan)
+
+        audio_plan = build_audio_plan(
+            plan,
+            premium=bool(
+                getattr(
+                    args,
+                    "premium_style",
+                    False,
+                )
+            ),
+        )
         audio_plan_path = save_audio_plan(audio_plan, work / "audio_plan.json")
         qc_path = save_qc(qc_results, work / "qc.json")
         original_audio = plan.audio
@@ -709,6 +806,15 @@ def main() -> None:
                 work_dir=work / "render",
                 captions=not args.no_captions,
                 reference_framing=getattr(args, "reference_framing", False),
+                editing_style=(
+                    "premium"
+                    if getattr(
+                        args,
+                        "premium_style",
+                        False,
+                    )
+                    else "classic"
+                ),
             )
         finally:
             plan.audio = original_audio

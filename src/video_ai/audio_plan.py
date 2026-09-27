@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 import re
@@ -21,18 +21,58 @@ class AudioPlan:
     mood: str
     music_gain_db: float
     cues: list[AudioCue]
+    music_drops: list[float] = field(default_factory=list)
 
 
-def build_audio_plan(plan: ShotPlan) -> AudioPlan:
-    """Create cheap deterministic music/SFX cues from captions and cut positions."""
+def build_audio_plan(
+    plan: ShotPlan,
+    *,
+    premium: bool = False,
+) -> AudioPlan:
+    """Create deterministic music/SFX cues without changing legacy behaviour."""
     full = " ".join((scene.caption or "") for scene in plan.scenes).lower()
     mood = _mood(full)
     cues: list[AudioCue] = []
+    music_drops: list[float] = []
 
     for index, scene in enumerate(plan.scenes):
         text = (scene.caption or "").lower()
+
         if index > 0:
-            cues.append(AudioCue(time=scene.start, kind="transition", name="whoosh", gain_db=-12.0))
+            if premium:
+                # Three punchy cuts, then one softer breath.
+                if index % 4 == 0:
+                    cues.append(
+                        AudioCue(
+                            time=scene.start,
+                            kind="transition",
+                            name="whoosh",
+                            gain_db=-15.0,
+                        )
+                    )
+                elif index % 3 == 0:
+                    cues.append(
+                        AudioCue(
+                            time=scene.start,
+                            kind="transition",
+                            name="bass_hit",
+                            gain_db=-8.0,
+                        )
+                    )
+                else:
+                    cues.append(
+                        AudioCue(
+                            time=scene.start,
+                            kind="transition",
+                            name="impact",
+                            gain_db=-10.0,
+                        )
+                    )
+            else:
+                cues.append(AudioCue(time=scene.start, kind="transition", name="whoosh", gain_db=-12.0))
+
+        if premium and getattr(scene, "premium_music_drop", False):
+            music_drops.append(float(scene.start))
         if re.search(r"\b(но|вдруг|резко|однако|и тут|но тут)\b", text):
             cues.append(AudioCue(time=scene.start, kind="impact", name="impact", gain_db=-7.0))
         if re.search(r"(телефон|сообщени|уведомлен|звонок)", text):
@@ -42,7 +82,12 @@ def build_audio_plan(plan: ShotPlan) -> AudioPlan:
         if re.search(r"(деньг|цена|дорог|дешев|миллион|тысяч)", text):
             cues.append(AudioCue(time=scene.start + 0.1, kind="accent", name="cash_pop", gain_db=-12.0))
 
-    return AudioPlan(mood=mood, music_gain_db=-22.0, cues=_dedupe(cues))
+    return AudioPlan(
+        mood=mood,
+        music_gain_db=-24.0 if premium else -22.0,
+        cues=_dedupe(cues),
+        music_drops=music_drops,
+    )
 
 
 def save_audio_plan(audio_plan: AudioPlan, path: str | Path) -> Path:
@@ -52,6 +97,7 @@ def save_audio_plan(audio_plan: AudioPlan, path: str | Path) -> Path:
         "mood": audio_plan.mood,
         "music_gain_db": audio_plan.music_gain_db,
         "cues": [asdict(cue) for cue in audio_plan.cues],
+        "music_drops": audio_plan.music_drops,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 

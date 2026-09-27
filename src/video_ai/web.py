@@ -26,6 +26,10 @@ class Studio:
         self.root = root.resolve()
         self.storage = self.root / 'work-web'
         self.storage.mkdir(exist_ok=True)
+
+        # Optional user-supplied royalty-free music for Premium.
+        self.music = self.root / 'music'
+        self.music.mkdir(exist_ok=True)
         self.lock = threading.Lock()
         self.busy = threading.Lock()
         self.jobs = {}
@@ -82,6 +86,44 @@ class Studio:
                 '--base-video',
                 str(folder / 'base.mp4'),
             ])
+
+        elif job.get('style') == 'premium':
+
+            steps[0][1].extend([
+                '--viral-style',
+                '--premium-style',
+                '--meme-dir',
+                str(self.root / 'memes'),
+                '--no-captions',
+            ])
+
+            steps[1][1].extend([
+                '--editing-style',
+                'premium',
+                '--base-video',
+                str(folder / 'base.mp4'),
+                '--premium-audio',
+            ])
+
+            music_candidates = sorted(
+                [
+                    path
+                    for path in self.music.iterdir()
+                    if path.suffix.lower() in {
+                        '.mp3',
+                        '.wav',
+                        '.m4a',
+                        '.aac',
+                        '.ogg',
+                    }
+                ]
+            )
+
+            if music_candidates:
+                steps[1][1].extend([
+                    '--music',
+                    str(music_candidates[0]),
+                ])
         if job['effects']:
             steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', '0'])
         if job.get('style') == 'story':
@@ -227,6 +269,7 @@ def make_handler(studio):
                 'story',
                 'dynamic',
                 'viral',
+                'premium',
             ):
                 self.send_data({'error': 'Неизвестный стиль'}, 400)
                 return

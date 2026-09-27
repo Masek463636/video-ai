@@ -57,6 +57,8 @@ def test_http_boundaries(app):
         ('dynamic', False),
         ('viral', True),
         ('viral', False),
+        ('premium', True),
+        ('premium', False),
     ],
 )
 def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style, effects):
@@ -92,10 +94,10 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style,
     assert (
         '--editing-style' in commands[1]
     ) is (
-        style in {'dynamic', 'viral'}
+        style in {'dynamic', 'viral', 'premium'}
     )
 
-    if style in {'dynamic', 'viral'}:
+    if style in {'dynamic', 'viral', 'premium'}:
         assert (
             commands[1][
                 commands[1].index(
@@ -108,8 +110,11 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style,
     assert (
         '--viral-style' in commands[0]
     ) is (
-        style == 'viral'
+        style in {'viral', 'premium'}
     )
+
+    assert ('--premium-style' in commands[0]) is (style == 'premium')
+    assert ('--premium-audio' in commands[1]) is (style == 'premium')
 
     assert job['style'] == style
     assert b'test-giphy-secret' not in request(url + '/api/state')[1]

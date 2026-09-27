@@ -36,6 +36,13 @@ MotionPreset = Literal[
     "snap_zoom",
 ]
 
+PremiumLayout = Literal[
+    "clean",
+    "parallax",
+    "text_behind",
+    "split_screen",
+]
+
 
 @dataclass(slots=True)
 class Word:
@@ -99,6 +106,20 @@ class Scene:
     caption_words: list[Word] = field(default_factory=list)
     # Start within source footage, independent of the narration timeline.
     source_start: float = 0.0
+
+    # Viral Premium composition metadata.
+    premium_layout: PremiumLayout = "clean"
+    premium_highlights: list[str] = field(default_factory=list)
+    premium_text: str | None = None
+    premium_music_drop: bool = False
+
+    # Optional second visual for before/after, then/now and comparison scenes.
+    secondary_asset: str | None = None
+    secondary_asset_kind: AssetKind = "blank"
+    secondary_query: str | None = None
+
+    # Cached transparent foreground produced by rembg for 2.5D/text-behind.
+    premium_foreground: str | None = None
 
     @property
     def duration(self) -> float:

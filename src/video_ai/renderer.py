@@ -28,7 +28,12 @@ def render_plan(
     base_video: str | Path | None = None,
     editing_style: str = "classic",
 ) -> Path:
-    if editing_style not in ("classic", "dynamic", "viral"):
+    if editing_style not in (
+        "classic",
+        "dynamic",
+        "viral",
+        "premium",
+    ):
         raise ValueError("Unknown editing style")
     _require("ffmpeg")
     _require("ffprobe")
@@ -74,6 +79,7 @@ def render_plan(
                     crf=crf,
                     editing_polish=editing_polish,
                     reference_framing=reference_framing,
+                    editing_style=editing_style,
                 )
                 if reviewer is not None:
                     reviewer.scene(scene, plan, end-start, clip, index,
@@ -110,7 +116,10 @@ def render_plan(
                 flush=True,
             )
 
-        elif editing_style == "viral":
+        elif editing_style in {
+            "viral",
+            "premium",
+        }:
             from .viral_fx import place_viral_overlays
 
             overlays = place_viral_overlays(
@@ -128,12 +137,16 @@ def render_plan(
             )
 
             print(
-                f"[viral] visible accents={len(overlays)}",
+                f"[{editing_style}] visible accents={len(overlays)}",
                 flush=True,
             )
 
         if reviewer is not None:
-            if editing_style not in ("dynamic", "viral"):
+            if editing_style not in (
+                "dynamic",
+                "viral",
+                "premium",
+            ):
                 overlays = reviewer.overlays(
                     base,
                     overlays or [],
@@ -252,9 +265,48 @@ def _render_scene(
     crf: int,
     editing_polish: bool = False,
     reference_framing: bool = False,
+    editing_style: str = "classic",
 ) -> None:
     duration = max(0.05, duration)
     common = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p", "-r", str(plan.fps), "-t", f"{duration:.3f}", str(output)]
+
+    if editing_style == "premium":
+
+        if (
+            scene.premium_layout == "split_screen"
+            and scene.asset
+            and Path(scene.asset).is_file()
+            and scene.secondary_asset
+            and Path(scene.secondary_asset).is_file()
+        ):
+            _render_premium_split_scene(
+                scene,
+                duration,
+                plan,
+                output,
+                crf=crf,
+            )
+            return
+
+        if (
+            scene.asset_kind == "image"
+            and scene.asset
+            and Path(scene.asset).is_file()
+            and scene.premium_layout in {
+                "parallax",
+                "text_behind",
+            }
+            and scene.premium_foreground
+            and Path(scene.premium_foreground).is_file()
+        ):
+            _render_premium_layered_image(
+                scene,
+                duration,
+                plan,
+                output,
+                crf=crf,
+            )
+            return
 
     if scene.asset_kind == "image" and scene.asset and Path(scene.asset).exists():
         asset = Path(scene.asset)
@@ -295,6 +347,421 @@ def _render_scene(
         return
 
     _render_safe_background(duration, plan, output, crf=crf)
+
+
+
+def _render_premium_split_scene(
+    scene: Scene,
+    duration: float,
+    plan: ShotPlan,
+    output: Path,
+    *,
+    crf: int,
+) -> None:
+    """Premium top/bottom comparison with a clean separator."""
+
+    primary = Path(scene.asset or "")
+    secondary = Path(scene.secondary_asset or "")
+
+    half_h = max(
+        2,
+        (plan.height // 2) // 2 * 2,
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+    ]
+
+    if scene.asset_kind == "image":
+        cmd += [
+            "-loop",
+            "1",
+            "-framerate",
+            str(plan.fps),
+            "-i",
+            str(primary),
+        ]
+    else:
+        cmd += [
+            "-stream_loop",
+            "-1",
+        ]
+
+        if scene.source_start:
+            cmd += [
+                "-ss",
+                f"{scene.source_start:.3f}",
+            ]
+
+        cmd += [
+            "-i",
+            str(primary),
+        ]
+
+    # Secondary retrieval is intentionally image-only in Premium v1.
+    cmd += [
+        "-loop",
+        "1",
+        "-framerate",
+        str(plan.fps),
+        "-i",
+        str(secondary),
+    ]
+
+    filter_complex = (
+        f"[0:v]"
+        f"scale={plan.width}:{half_h}:"
+        f"force_original_aspect_ratio=increase,"
+        f"crop={plan.width}:{half_h},"
+        f"fps={plan.fps}"
+        f"[top];"
+        f"[1:v]"
+        f"scale={plan.width}:{half_h}:"
+        f"force_original_aspect_ratio=increase,"
+        f"crop={plan.width}:{half_h},"
+        f"fps={plan.fps}"
+        f"[bottom];"
+        f"[top][bottom]"
+        f"vstack=inputs=2,"
+        f"drawbox="
+        f"x=0:"
+        f"y={half_h - 3}:"
+        f"w={plan.width}:"
+        f"h=6:"
+        f"color=white@0.95:"
+        f"t=fill"
+        f"[v]"
+    )
+
+    cmd += [
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[v]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+        "-r",
+        str(plan.fps),
+        "-t",
+        f"{duration:.3f}",
+        str(output),
+    ]
+
+    _run(cmd)
+
+
+def _premium_font() -> str | None:
+    candidates = [
+        Path(r"C:\Windows\Fonts\arialbd.ttf"),
+        Path(r"C:\Windows\Fonts\impact.ttf"),
+        Path(r"C:\Windows\Fonts\seguisb.ttf"),
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    return None
+
+
+def _make_premium_text_layer(
+    text: str,
+    plan: ShotPlan,
+    target: Path,
+) -> Path | None:
+    """Create a transparent hero-word layer for text-behind-object."""
+
+    if not text.strip():
+        return None
+
+    try:
+        from PIL import (
+            Image,
+            ImageDraw,
+            ImageFont,
+        )
+
+        image = Image.new(
+            "RGBA",
+            (
+                plan.width,
+                plan.height,
+            ),
+            (
+                0,
+                0,
+                0,
+                0,
+            ),
+        )
+
+        draw = ImageDraw.Draw(image)
+
+        font_path = _premium_font()
+
+        font_size = max(
+            110,
+            int(plan.width * .155),
+        )
+
+        if font_path:
+            font = ImageFont.truetype(
+                font_path,
+                font_size,
+            )
+        else:
+            font = ImageFont.load_default()
+
+        clean = text.upper()
+
+        bbox = draw.textbbox(
+            (0, 0),
+            clean,
+            font=font,
+            stroke_width=8,
+        )
+
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        # Shrink oversized phrases.
+        while (
+            text_w > plan.width * .90
+            and font_size > 60
+            and font_path
+        ):
+            font_size -= 6
+
+            font = ImageFont.truetype(
+                font_path,
+                font_size,
+            )
+
+            bbox = draw.textbbox(
+                (0, 0),
+                clean,
+                font=font,
+                stroke_width=8,
+            )
+
+            text_w = (
+                bbox[2] - bbox[0]
+            )
+
+            text_h = (
+                bbox[3] - bbox[1]
+            )
+
+        x = int(
+            (plan.width - text_w) / 2
+        )
+
+        # Deliberately crosses the usual subject torso/head region.
+        y = int(
+            plan.height * .27
+        )
+
+        draw.text(
+            (x, y),
+            clean,
+            font=font,
+            fill=(
+                255,
+                230,
+                45,
+                255,
+            ),
+            stroke_width=max(
+                5,
+                int(font_size * .055),
+            ),
+            stroke_fill=(
+                0,
+                0,
+                0,
+                255,
+            ),
+        )
+
+        image.save(target)
+
+        return target
+
+    except Exception as exc:
+        print(
+            f"[premium] text layer unavailable: {type(exc).__name__}",
+            flush=True,
+        )
+
+        return None
+
+
+def _render_premium_layered_image(
+    scene: Scene,
+    duration: float,
+    plan: ShotPlan,
+    output: Path,
+    *,
+    crf: int,
+) -> None:
+    """2.5D still-image sandwich: bg -> optional hero text -> cutout."""
+
+    asset = Path(scene.asset or "")
+    foreground = Path(
+        scene.premium_foreground or ""
+    )
+
+    text_layer = None
+
+    if (
+        scene.premium_layout
+        == "text_behind"
+        and scene.premium_text
+    ):
+        text_layer = _make_premium_text_layer(
+            scene.premium_text,
+            plan,
+            output.with_suffix(
+                ".premium_text.png"
+            ),
+        )
+
+    bg_scene = replace(
+        scene,
+        motion_preset="micro_push",
+    )
+
+    bg_filter = _image_filter(
+        bg_scene,
+        plan,
+        duration,
+        editing_polish=True,
+    )
+
+    fx = _clamp_focus(
+        scene.focus_x
+    )
+
+    fy = _clamp_focus(
+        scene.focus_y
+    )
+
+    # Foreground is intentionally ~8% closer than background.
+    fg_w = max(
+        2,
+        int(plan.width * 1.08) // 2 * 2,
+    )
+
+    fg_h = max(
+        2,
+        int(plan.height * 1.08) // 2 * 2,
+    )
+
+    fg_filter = (
+        f"scale={plan.width}:{plan.height}:"
+        f"force_original_aspect_ratio=increase,"
+        f"crop={plan.width}:{plan.height}:"
+        f"x='{_focus_expr('iw','ow',fx)}':"
+        f"y='{_focus_expr('ih','oh',fy)}',"
+        f"format=rgba,"
+        f"scale={fg_w}:{fg_h},"
+        f"crop={plan.width}:{plan.height}:"
+        f"x='(iw-ow)/2':"
+        f"y='(ih-oh)/2',"
+        f"fps={plan.fps}"
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-loop",
+        "1",
+        "-framerate",
+        str(plan.fps),
+        "-i",
+        str(asset),
+        "-loop",
+        "1",
+        "-framerate",
+        str(plan.fps),
+        "-i",
+        str(foreground),
+    ]
+
+    filters = [
+        f"[0:v]{bg_filter}[bg]",
+        f"[1:v]{fg_filter}[fg]",
+    ]
+
+    if text_layer is not None:
+        cmd += [
+            "-loop",
+            "1",
+            "-framerate",
+            str(plan.fps),
+            "-i",
+            str(text_layer),
+        ]
+
+        filters += [
+            "[2:v]"
+            f"scale={plan.width}:{plan.height},"
+            "format=rgba"
+            "[txt]",
+            "[bg][txt]"
+            "overlay=0:0:"
+            "shortest=1"
+            "[middle]",
+            "[middle][fg]"
+            "overlay=0:0:"
+            "shortest=1"
+            "[v]",
+        ]
+
+    else:
+        filters.append(
+            "[bg][fg]"
+            "overlay=0:0:"
+            "shortest=1"
+            "[v]"
+        )
+
+    cmd += [
+        "-filter_complex",
+        ";".join(filters),
+        "-map",
+        "[v]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+        "-r",
+        str(plan.fps),
+        "-t",
+        f"{duration:.3f}",
+        str(output),
+    ]
+
+    _run(cmd)
 
 
 def _render_reference_video(
@@ -553,7 +1020,11 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         else:
             x = settled_x
 
-        if editing_style in {"dynamic", "viral"} and layout is not None:
+        if editing_style in {
+            "dynamic",
+            "viral",
+            "premium",
+        } and layout is not None:
             # Preserve approved stable-branch centring without animated resize
             # (which previously made GIF/MP4 reactions collapse).
             x = f"({x})+({width}-overlay_w)/2"
@@ -899,6 +1370,19 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     for scene in plan.scenes:
         if not scene.caption:
             continue
+
+        if (
+            editing_style == "premium"
+            and scene.caption_words
+        ):
+            events.extend(
+                _premium_caption_events(
+                    scene,
+                    plan,
+                )
+            )
+            continue
+
         pages = _caption_pages(scene.caption, scene.start, scene.end, timed_words=scene.caption_words)
         for page_start, page_end, text in pages:
             events.append(
@@ -1002,7 +1486,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
                     + str(fs)
                     + red
                     + pulse
-                    + r"}?"
+                    + r"}" + "\u279c"
                 )
 
             else:
@@ -1062,7 +1546,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
                     + str(angle)
                     + red
                     + pulse
-                    + r"}?"
+                    + r"}" + "\u279c"
                 )
 
             continue
@@ -1105,6 +1589,125 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 
     path.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")
 
+
+
+def _premium_caption_events(
+    scene: Scene,
+    plan: ShotPlan,
+) -> list[str]:
+    """Hormozi-style exact-word kinetic subtitles using Whisper timings."""
+
+    words = [
+        word
+        for word in scene.caption_words
+        if (
+            math.isfinite(word.start)
+            and math.isfinite(word.end)
+            and word.end > word.start
+        )
+    ]
+
+    if not words:
+        return []
+
+    highlights = {
+        _caption_token(value)
+        for value in (
+            scene.premium_highlights
+            or []
+        )
+        if _caption_token(value)
+    }
+
+    out = []
+
+    for index, word in enumerate(words):
+        start = max(
+            scene.start,
+            word.start,
+        )
+
+        end = min(
+            scene.end,
+            word.end,
+        )
+
+        if end <= start:
+            continue
+
+        # Three-word moving window: context stays readable while the
+        # currently spoken word physically becomes the visual focus.
+        left = max(
+            0,
+            index - 1,
+        )
+
+        right = min(
+            len(words),
+            index + 2,
+        )
+
+        parts = []
+
+        for pos in range(
+            left,
+            right,
+        ):
+            token = (
+                words[pos]
+                .text
+                .replace("{", "(")
+                .replace("}", ")")
+            )
+
+            if pos == index:
+                key = _caption_token(
+                    token
+                )
+
+                strong = key in highlights
+
+                if strong:
+                    # ASS BGR: bright red/orange punch.
+                    parts.append(
+                        r"{\c&H0040FF&"
+                        r"\fscx128\fscy128"
+                        r"\bord10"
+                        r"\t(0,70,\fscx108\fscy108)}"
+                        + token
+                    )
+                else:
+                    # Yellow active word.
+                    parts.append(
+                        r"{\c&H00FFFF&"
+                        r"\fscx118\fscy118"
+                        r"\bord9"
+                        r"\t(0,65,\fscx104\fscy104)}"
+                        + token
+                    )
+
+            else:
+                parts.append(
+                    r"{\c&HFFFFFF&"
+                    r"\fscx92\fscy92"
+                    r"\bord8}"
+                    + token
+                )
+
+        text = " ".join(
+            parts
+        )
+
+        out.append(
+            f"Dialogue: 1,"
+            f"{_ass_time(start)},"
+            f"{_ass_time(end)},"
+            "Default,,0,0,0,,"
+            + r"{\an2\fad(0,18)}"
+            + text
+        )
+
+    return out
 
 def _caption_pages(text: str, start: float, end: float, *, timed_words: list[Word] | None = None) -> list[tuple[float, float, str]]:
     """Split captions into punchy 1-2 word chunks.
@@ -1218,7 +1821,10 @@ def _ass_text(text: str, *, editing_polish: bool = False, editing_style: str = "
             + safe
         )
 
-    if editing_style == "viral":
+    if editing_style in {
+        "viral",
+        "premium",
+    }:
         return (
             r"{\fscx35\fscy35"
             r"\t(0,55,\fscx120\fscy120)"
