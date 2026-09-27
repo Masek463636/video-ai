@@ -535,7 +535,12 @@ def main() -> None:
         return
     if args.command == "plan":
         transcript = load_transcript(args.transcript)
-        plan = build_shot_plan(transcript, Path(args.audio), target_scene_seconds=args.pace, min_scene_seconds=args.min_scene, max_scene_seconds=args.max_scene, meme_dir=args.meme_dir)
+        if args.viral_style:
+            plan = build_donor_shot_plan(transcript, Path(args.audio), meme_dir=args.meme_dir, viral_style=True)
+            from .viral_style import apply_viral_motion
+            apply_viral_motion(plan)
+        else:
+            plan = build_shot_plan(transcript, Path(args.audio), target_scene_seconds=args.pace, min_scene_seconds=args.min_scene, max_scene_seconds=args.max_scene, meme_dir=args.meme_dir)
         grammar_rewritten = apply_pre_asset_grammar(plan)
         output = save_shot_plan(plan, args.output)
         payload = {"ok": True, "output": str(output), "scenes": len(plan.scenes), "duration": round(plan.scenes[-1].end, 3), "director_source": plan.director_source, "director_model": plan.director_model, "editing_grammar_scenes": grammar_rewritten, "visuals": [{"mode": s.visual_mode, "source": s.source_mode, "motion": s.motion_preset, "tone": s.tone, "meme": s.meme_filename, "semantic_lock": s.semantic_lock, "entities": s.required_entities, "context": s.required_context, "description": s.visual_description, "queries": s.search_queries} for s in plan.scenes]}
@@ -695,6 +700,10 @@ def main() -> None:
         manifest, qc_results, diversity_repairs = _resolve_and_repair(plan, work, args)
         if args.select_moments:
             select_moments(plan, work / "moments")
+        if getattr(args, "viral_style", False):
+            # Material resolution can rewrite motion presets; preserve the
+            # selected style in the actual saved/rendered plan.
+            apply_viral_motion(plan)
         materialized = save_shot_plan(plan, work / "shot_plan.materialized.json")
         audio_plan = build_audio_plan(plan)
         audio_plan_path = save_audio_plan(audio_plan, work / "audio_plan.json")
@@ -708,6 +717,7 @@ def main() -> None:
                 args.output,
                 work_dir=work / "render",
                 captions=not args.no_captions,
+                editing_polish=bool(getattr(args, "viral_style", False)),
                 reference_framing=getattr(args, "reference_framing", False),
             )
         finally:

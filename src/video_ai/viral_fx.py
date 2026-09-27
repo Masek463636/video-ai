@@ -57,7 +57,7 @@ def build_viral_overlays(
     # ---------------------------------------------------------
 
     reaction_budget = max(
-        2,
+        1,
         min(
             total_budget,
             int(round(total_budget * .40)),
@@ -77,7 +77,7 @@ def build_viral_overlays(
     # ---------------------------------------------------------
 
     object_budget = max(
-        1,
+        0,
         min(
             total_budget - len(reactions),
             int(round(total_budget * .30)),
@@ -384,7 +384,9 @@ RULES:
             ).split()
         )[:180]
 
-        if not anchor or not target:
+        import re
+        normalize = lambda text: " ".join(re.findall(r"\w+", text.casefold().replace("ё", "е")))
+        if not target or not normalize(anchor) or (" " + normalize(anchor) + " ") not in (" " + normalize(scene.caption or "") + " "):
             continue
 
         start = _anchor_start(
@@ -403,15 +405,18 @@ RULES:
 
             continue
 
+        end = min(float(scene.end), timeline_end, start + (.82 if kind == "arrow" else .90))
+        if end - start < .35:
+            continue
         locator_prompt = (
-            "Inspect ONLY this actual rendered video frame. "
+            "Inspect these THREE actual rendered frames in chronological order. "
             f"Narration beat: {scene.caption or ''}. "
             f"Requested target: {target}. "
-            "Find it ONLY if it is genuinely visible. "
+            "Find it ONLY if genuinely visible in ALL three frames. Return one box for each frame. "
             "Do not infer it from narration. "
             "Return exactly one JSON object "
             '{"found":true/false,'
-            '"target_box":[x,y,width,height],'
+            '"target_boxes":[[x,y,width,height],[x,y,width,height],[x,y,width,height]],'
             '"confidence":0.0,'
             '"reason":"visible evidence"}. '
             "Coordinates are normalized 0..1. "
@@ -429,18 +434,7 @@ RULES:
 
             image_parts = frames(
                 base,
-                [
-                    min(
-                        max(
-                            0.0,
-                            start + .05,
-                        ),
-                        max(
-                            0.0,
-                            timeline_end - .05,
-                        ),
-                    )
-                ],
+                [start + (end-start)*f for f in (.08, .5, .92)],
                 frame_dir,
                 f"attention_{scene_index}",
             )
@@ -505,17 +499,19 @@ RULES:
 
                 continue
 
-            target_box = boxes([
-                verdict.get(
-                    "target_box"
-                )
-            ])[0]
+            tracked_boxes = boxes(verdict.get("target_boxes"))
+            if len(tracked_boxes) != 3:
+                raise ValueError("Three target boxes required")
+            target_box = tracked_boxes[1]
+            cx, cy = target_box[0]+target_box[2]/2, target_box[1]+target_box[3]/2
+            if any(abs(b[0]+b[2]/2-cx) > .04 or abs(b[1]+b[3]/2-cy) > .04 for b in tracked_boxes):
+                decisions.append({"proposal": raw, "status": "moving_target"})
+                continue
 
             # Caption-heavy lower area.
             if (
-                target_box[1]
-                + target_box[3] / 2
-                > .78
+                target_box[1] + target_box[3] / 2 > .78
+                or (target_box[1] < .66 and target_box[1] + target_box[3] > .50)
             ):
                 decisions.append({
                     "proposal": raw,
@@ -535,19 +531,6 @@ RULES:
                     type(exc).__name__,
             })
 
-            continue
-
-        end = min(
-            timeline_end,
-            start
-            + (
-                .82
-                if kind == "arrow"
-                else .90
-            ),
-        )
-
-        if end - start < .35:
             continue
 
         effect = {
@@ -750,6 +733,9 @@ def place_viral_overlays(
         else:
             continue
 
+        # Reactions take priority; do not stack decorative accents over them.
+        if any(start < other["end"] + .15 and end + .15 > other["start"] for other in placed):
+            continue
         placed.append(
             dict(
                 item,

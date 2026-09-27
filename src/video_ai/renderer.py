@@ -150,9 +150,10 @@ def render_plan(
             picture = overlayed
 
         final_filter: list[str] = []
-        if captions:
+        burn_ass = captions or (editing_style == "viral" and any(e.get("type") in {"arrow", "circle", "text", "png_text"} for e in overlays or []))
+        if burn_ass:
             ass = root / "captions.ass"
-            _write_ass(plan, ass, editing_polish=editing_polish, overlays=overlays, editing_style=editing_style)
+            _write_ass(plan, ass, editing_polish=editing_polish, overlays=overlays, editing_style=editing_style, captions=captions)
             final_filter = ["-vf", f"ass='{_filter_path(ass)}'"]
         sfx_track: Path | None = None
         if overlays:
@@ -166,7 +167,7 @@ def render_plan(
         if sfx_track is not None and sfx_track.exists():
             final_cmd += ["-i", str(sfx_track)]
 
-        if captions:
+        if burn_ass:
             final_cmd += final_filter
 
         if sfx_track is not None and sfx_track.exists():
@@ -178,8 +179,8 @@ def render_plan(
             final_cmd += ["-map", "0:v:0", "-map", "1:a:0"]
 
         final_cmd += [
-            "-c:v", "libx264" if captions else "copy",
-            *([] if not captions else ["-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p"]),
+            "-c:v", "libx264" if burn_ass else "copy",
+            *([] if not burn_ass else ["-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p"]),
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
             "-t", f"{audio_duration:.3f}", str(output),
         ]
@@ -869,6 +870,42 @@ def _focus_expr(inner: str, outer: str, focus: float) -> str:
     return f"max(0,min({inner}-{outer},{focus:.5f}*{inner}-{outer}/2))"
 
 
+def _attention_drawing(item, plan):
+    """Resolution-independent ASS paths: no missing Unicode/font glyphs."""
+    from .composition_review import boxes
+    try:
+        x, y, w, h = boxes([item.get("target_box")])[0]
+    except (ValueError, TypeError):
+        return ""
+    width, height = plan.width, plan.height
+    cx, cy = (x+w/2)*width, (y+h/2)*height
+    def point(px, py): return f"{px:.1f} {py:.1f}"
+    if item["type"] == "circle":
+        rx, ry = min(w*width*.60, cx-3, width-cx-3), min(h*height*.60, cy-3, height-cy-3)
+        if min(rx,ry) < 3: return ""
+        k=.55228475
+        path=(f"m {point(cx+rx,cy)} b {point(cx+rx,cy+k*ry)} {point(cx+k*rx,cy+ry)} {point(cx,cy+ry)} "
+              f"{point(cx-k*rx,cy+ry)} {point(cx-rx,cy+k*ry)} {point(cx-rx,cy)} "
+              f"{point(cx-rx,cy-k*ry)} {point(cx-k*rx,cy-ry)} {point(cx,cy-ry)} "
+              f"{point(cx+k*rx,cy-ry)} {point(cx+rx,cy-k*ry)} {point(cx+rx,cy)}")
+        colour=r"\1a&HFF&\3c&H0000FF&"
+        border=max(2,width*.009)
+    else:
+        # Put shaft on the side with most room; tip hits target's centre.
+        direction=1 if cx < width/2 else -1
+        length=min(width*.24, (width-cx-5) if direction==1 else (cx-5))
+        half=max(3,width*.012); head=max(8,width*.05)
+        pts=[(cx,cy),(cx+direction*head,cy-head*.65),(cx+direction*head,cy-half),
+             (cx+direction*length,cy-half),(cx+direction*length,cy+half),
+             (cx+direction*head,cy+half),(cx+direction*head,cy+head*.65),(cx,cy)]
+        pts=[(max(2,min(width-2,px)),max(2,min(height-2,py))) for px,py in pts]
+        path="m "+point(*pts[0])+" l "+" ".join(point(*p) for p in pts[1:])
+        colour=r"\c&H0000FF&\3c&H000000&"
+        border=max(1,width*.004)
+    return (r"{\an7\pos(0,0)\p1\fscx100\fscy100\shad0\fad(30,45)"+colour+
+            r"\bord"+f"{border:.1f}"+"}"+path+r"{\p0}")
+
+
 def _write_ass(
     plan: ShotPlan,
     path: Path,
@@ -876,6 +913,7 @@ def _write_ass(
     editing_polish: bool = False,
     overlays: list[dict] | None = None,
     editing_style: str = "classic",
+    captions: bool = True,
 ) -> None:
     # Reference-style Shorts subtitles: very large Impact text around the
     # lower-middle of the frame, with a heavy black stroke.
@@ -897,7 +935,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
     events: list[str] = []
     for scene in plan.scenes:
-        if not scene.caption:
+        if not captions or not scene.caption:
             continue
         pages = _caption_pages(scene.caption, scene.start, scene.end, timed_words=scene.caption_words)
         for page_start, page_end, text in pages:
@@ -916,155 +954,11 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
         if end <= start:
             continue
 
-        # --------------------------------------------------------
-        # VIRAL ATTENTION GRAPHICS
-        # --------------------------------------------------------
-
         if effect_type in {"arrow", "circle"}:
-
-            box = item.get("target_box")
-
-            if not isinstance(box, list) or len(box) != 4:
-                continue
-
-            try:
-                bx, by, bw, bh = [
-                    float(value)
-                    for value in box
-                ]
-            except (TypeError, ValueError):
-                continue
-
-            if not all(
-                math.isfinite(value)
-                for value in (bx, by, bw, bh)
-            ):
-                continue
-
-            if (
-                bx < 0
-                or by < 0
-                or bw <= 0
-                or bh <= 0
-                or bx + bw > 1.001
-                or by + bh > 1.001
-            ):
-                continue
-
-            tx = int(
-                plan.width * (bx + bw / 2)
-            )
-
-            ty = int(
-                plan.height * (by + bh / 2)
-            )
-
-            pulse = (
-                r"\fscx70\fscy70"
-                r"\t(0,70,\fscx118\fscy118)"
-                r"\t(70,140,\fscx100\fscy100)"
-                r"\fad(0,45)"
-            )
-
-            # ASS colours are BGR.
-            red = (
-                r"\c&H0000FF&"
-                r"\3c&H000000&"
-                r"\bord6\shad0"
-            )
-
-            if effect_type == "circle":
-
-                fs = max(
-                    130,
-                    int(
-                        plan.width
-                        * max(
-                            .18,
-                            min(
-                                .52,
-                                max(bw, bh) * 1.45,
-                            ),
-                        )
-                    ),
-                )
-
-                events.append(
-                    f"Dialogue: 4,"
-                    f"{_ass_time(start)},"
-                    f"{_ass_time(end)},"
-                    "Default,,0,0,0,,"
-                    + r"{\an5\pos("
-                    + str(tx)
-                    + ","
-                    + str(ty)
-                    + r")\fnSegoe UI Symbol\fs"
-                    + str(fs)
-                    + red
-                    + pulse
-                    + r"}?"
-                )
-
-            else:
-
-                # Arrow glyph points RIGHT by default.
-                # Position and rotate it towards the target.
-
-                if tx < int(plan.width * .35):
-                    ax = min(
-                        plan.width - 80,
-                        tx + int(plan.width * .20),
-                    )
-                    ay = ty
-                    angle = 180
-
-                elif tx > int(plan.width * .65):
-                    ax = max(
-                        80,
-                        tx - int(plan.width * .20),
-                    )
-                    ay = ty
-                    angle = 0
-
-                elif ty < int(plan.height * .35):
-                    ax = tx
-                    ay = min(
-                        plan.height - 100,
-                        ty + int(plan.height * .12),
-                    )
-                    angle = -90
-
-                else:
-                    ax = tx
-                    ay = max(
-                        90,
-                        ty - int(plan.height * .12),
-                    )
-                    angle = 90
-
-                fs = max(
-                    150,
-                    int(plan.width * .20),
-                )
-
-                events.append(
-                    f"Dialogue: 5,"
-                    f"{_ass_time(start)},"
-                    f"{_ass_time(end)},"
-                    "Default,,0,0,0,,"
-                    + r"{\an5\pos("
-                    + str(ax)
-                    + ","
-                    + str(ay)
-                    + r")\fnSegoe UI Symbol\fs"
-                    + str(fs)
-                    + r"\frz"
-                    + str(angle)
-                    + red
-                    + pulse
-                    + r"}?"
-                )
-
+            if editing_style == "viral":
+                drawing = _attention_drawing(item, plan)
+                if drawing:
+                    events.append(f"Dialogue: 4,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{drawing}")
             continue
 
         label = str(
