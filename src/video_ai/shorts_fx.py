@@ -11,13 +11,41 @@ from .assets import _download, search_commons
 from .models import Scene, ShotPlan
 
 
-def build_shorts_overlays(plan, out_dir, *, max_overlays=0, use_gemini=True, sticker_dir=None, editing_style="classic"):
+def build_shorts_overlays(
+    plan,
+    out_dir,
+    *,
+    max_overlays=0,
+    use_gemini=True,
+    sticker_dir=None,
+    editing_style="classic",
+    base_video=None,
+):
+
+    if editing_style == "viral":
+        from .viral_fx import build_viral_overlays
+
+        return build_viral_overlays(
+            plan,
+            out_dir,
+            max_overlays=max_overlays,
+            use_gemini=use_gemini,
+            sticker_dir=sticker_dir,
+            base_video=base_video,
+        )
+
     if editing_style == "dynamic":
         from .dynamic_reactions import build_reactions
     else:
         from .classic_reactions import build_reactions
-    return build_reactions(plan, out_dir, max_overlays=max_overlays,
-                           use_gemini=use_gemini, sticker_dir=sticker_dir)
+
+    return build_reactions(
+        plan,
+        out_dir,
+        max_overlays=max_overlays,
+        use_gemini=use_gemini,
+        sticker_dir=sticker_dir,
+    )
 
 
 def _build_legacy_shorts_overlays(

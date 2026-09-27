@@ -49,7 +49,16 @@ def test_http_boundaries(app):
         studio.busy.release()
 
 
-@pytest.mark.parametrize('style,effects', [('classic',True),('dynamic',True),('dynamic',False)])
+@pytest.mark.parametrize(
+    'style,effects',
+    [
+        ('classic', True),
+        ('dynamic', True),
+        ('dynamic', False),
+        ('viral', True),
+        ('viral', False),
+    ],
+)
 def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style, effects):
     studio, url = app
     monkeypatch.setenv('GIPHY_API_KEY', 'test-giphy-secret')
@@ -80,7 +89,28 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style,
     assert '--select-moments' in commands[0]
     assert ('--shorts-fx' in commands[1]) is effects
     assert ('--max-overlays' in commands[1]) is effects
-    assert ('--editing-style' in commands[1]) is (style == 'dynamic')
+    assert (
+        '--editing-style' in commands[1]
+    ) is (
+        style in {'dynamic', 'viral'}
+    )
+
+    if style in {'dynamic', 'viral'}:
+        assert (
+            commands[1][
+                commands[1].index(
+                    '--editing-style'
+                ) + 1
+            ]
+            == style
+        )
+
+    assert (
+        '--viral-style' in commands[0]
+    ) is (
+        style == 'viral'
+    )
+
     assert job['style'] == style
     assert b'test-giphy-secret' not in request(url + '/api/state')[1]
     assert request(url + '/download/' + job_id) == (200, b'test-video')

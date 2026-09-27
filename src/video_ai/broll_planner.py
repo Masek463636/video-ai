@@ -13,6 +13,7 @@ def build_donor_shot_plan(
     audio: str | Path,
     *,
     meme_dir: str | Path | None = None,
+    viral_style: bool = False,
 ) -> ShotPlan:
     """Whole-transcript storyboard planner inspired by AutoBroll/MoneyPrinterTurbo.
 
@@ -33,7 +34,36 @@ def build_donor_shot_plan(
     indexed = " ".join(f"{i}:{word.text}" for i, word in enumerate(words))
     meme_names = _meme_names(meme_dir)
     duration = transcript.duration
-    target_beats = max(5, min(18, round(duration / 2.15)))
+
+    if viral_style:
+        target_seconds = 1.15
+        target_beats = max(
+            8,
+            min(35, round(duration / target_seconds)),
+        )
+
+        beat_rule = (
+            "- Typical beat length: 0.8-1.5 seconds. "
+            "KEEP IT FAST. Avoid >2.0s unless continuity truly helps."
+        )
+
+        min_shot_seconds = 0.65
+        max_gap_seconds = 1.90
+
+    else:
+        target_seconds = 2.15
+        target_beats = max(
+            5,
+            min(18, round(duration / target_seconds)),
+        )
+
+        beat_rule = (
+            "- Typical beat length: 1.4-3.0 seconds. "
+            "Avoid >3.4s unless continuity truly helps."
+        )
+
+        min_shot_seconds = 0.85
+        max_gap_seconds = 3.50
 
     prompt = f"""
 You are a senior short-form video editor planning the COMPLETE visual timeline
@@ -67,7 +97,7 @@ Return ONLY JSON:
 EDITING RULES:
 - Plan the WHOLE story before choosing any beat.
 - Cover the transcript from first word to last word in chronological order.
-- Typical beat length: 1.4-3.0 seconds. Avoid >3.4s unless continuity truly helps.
+{beat_rule}
 - Prefer VIDEO for actions, reactions, environments and modern generic concepts.
 - Prefer IMAGE only for exact historical portraits/maps/documents, still artwork,
   or when motion footage would be dishonest.
@@ -110,7 +140,13 @@ EDITING RULES:
         raise RuntimeError("Gemini donor planner returned too few beats")
 
     planned = _sanitize_beats(raw_beats, len(words))
-    starts = _normalize_start_indices(planned, transcript, target_seconds=2.15)
+    starts = _normalize_start_indices(
+        planned,
+        transcript,
+        target_seconds=target_seconds,
+        min_shot_seconds=min_shot_seconds,
+        max_gap_seconds=max_gap_seconds,
+    )
     if len(starts) < 2:
         raise RuntimeError("Donor planner could not build a useful timeline")
 
@@ -225,7 +261,14 @@ def _sanitize_beats(raw_beats: list[object], word_count: int) -> list[dict]:
     return out
 
 
-def _normalize_start_indices(planned: list[dict], transcript: Transcript, *, target_seconds: float) -> list[int]:
+def _normalize_start_indices(
+    planned: list[dict],
+    transcript: Transcript,
+    *,
+    target_seconds: float,
+    min_shot_seconds: float = 0.85,
+    max_gap_seconds: float = 3.50,
+) -> list[int]:
     words = transcript.words
     starts = sorted({int(item["start_idx"]) for item in planned if 0 <= int(item["start_idx"]) < len(words)})
     if not starts or starts[0] != 0:
@@ -234,7 +277,7 @@ def _normalize_start_indices(planned: list[dict], transcript: Transcript, *, tar
     # Drop cut points that would create twitchy sub-second shots.
     filtered = [starts[0]]
     for idx in starts[1:]:
-        if words[idx].start - words[filtered[-1]].start >= 0.85:
+        if words[idx].start - words[filtered[-1]].start >= min_shot_seconds:
             filtered.append(idx)
 
     # Fill suspiciously long planner gaps with a neutral midpoint cut.
@@ -244,7 +287,7 @@ def _normalize_start_indices(planned: list[dict], transcript: Transcript, *, tar
         next_idx = filtered[pos + 1] if pos + 1 < len(filtered) else len(words)
         start_time = words[idx].start
         end_time = words[next_idx].start if next_idx < len(words) else words[-1].end
-        while end_time - start_time > 3.5:
+        while end_time - start_time > max_gap_seconds:
             target = start_time + min(target_seconds, (end_time - start_time) / 2)
             split = _nearest_word_index(words, target, low=idx + 1, high=next_idx - 1)
             if split is None or split <= result[-1]:

@@ -33,6 +33,7 @@ MotionPreset = Literal[
     "pull_back",
     "reveal_left",
     "reveal_right",
+    "snap_zoom",
 ]
 
 

@@ -62,7 +62,26 @@ class Studio:
             ('Оформление и финальный рендер', common + ['render', str(work / 'shot_plan.materialized.json'), '--transcript', str(work / 'transcript.json'), '--editing-polish', '--reference-framing', '--composition-review', '-o', str(folder / 'final.mp4'), '--work-dir', str(folder / 'final-work')]),
         ]
         if job.get('style') == 'dynamic':
-            steps[1][1].extend(['--editing-style', 'dynamic'])
+            steps[1][1].extend([
+                '--editing-style',
+                'dynamic',
+            ])
+
+        elif job.get('style') == 'viral':
+
+            steps[0][1].extend([
+                '--viral-style',
+                '--meme-dir',
+                str(self.root / 'memes'),
+                '--no-captions',
+            ])
+
+            steps[1][1].extend([
+                '--editing-style',
+                'viral',
+                '--base-video',
+                str(folder / 'base.mp4'),
+            ])
         if job['effects']:
             steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', '0'])
         if job.get('style') == 'story':
@@ -203,7 +222,12 @@ def make_handler(studio):
                 self.send_data({'error': 'Установите FFmpeg и добавьте его в PATH'}, 400)
                 return
             style = self.headers.get('X-Style', 'classic')
-            if style not in ('classic', 'story', 'dynamic'):
+            if style not in (
+                'classic',
+                'story',
+                'dynamic',
+                'viral',
+            ):
                 self.send_data({'error': 'Неизвестный стиль'}, 400)
                 return
             if not os.environ.get('GEMINI_API_KEY') or (style != 'story' and not any(os.environ.get(k) for k in KEYS[1:])):

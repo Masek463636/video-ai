@@ -28,7 +28,7 @@ def render_plan(
     base_video: str | Path | None = None,
     editing_style: str = "classic",
 ) -> Path:
-    if editing_style not in ("classic", "dynamic"):
+    if editing_style not in ("classic", "dynamic", "viral"):
         raise ValueError("Unknown editing style")
     _require("ffmpeg")
     _require("ffprobe")
@@ -90,12 +90,55 @@ def render_plan(
 
         if editing_style == "dynamic":
             from .dynamic_reactions import place_reactions
-            overlays = place_reactions(overlays or [], audio_duration)
-            (root / "overlays.placed.json").write_text(json.dumps({"overlays": overlays}, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f'[dynamic] visible reactions={len(overlays)}', flush=True)
+
+            overlays = place_reactions(
+                overlays or [],
+                audio_duration,
+            )
+
+            (root / "overlays.placed.json").write_text(
+                json.dumps(
+                    {"overlays": overlays},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            print(
+                f"[dynamic] visible reactions={len(overlays)}",
+                flush=True,
+            )
+
+        elif editing_style == "viral":
+            from .viral_fx import place_viral_overlays
+
+            overlays = place_viral_overlays(
+                overlays or [],
+                audio_duration,
+            )
+
+            (root / "overlays.placed.json").write_text(
+                json.dumps(
+                    {"overlays": overlays},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            print(
+                f"[viral] visible accents={len(overlays)}",
+                flush=True,
+            )
+
         if reviewer is not None:
-            if editing_style != "dynamic":
-                overlays = reviewer.overlays(base, overlays or [], plan)
+            if editing_style not in ("dynamic", "viral"):
+                overlays = reviewer.overlays(
+                    base,
+                    overlays or [],
+                    plan,
+                )
             counts = {}
             for row in reviewer.report['scenes']:
                 counts[row['status']] = counts.get(row['status'], 0) + 1
@@ -510,7 +553,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         else:
             x = settled_x
 
-        if editing_style == "dynamic" and layout is not None:
+        if editing_style in {"dynamic", "viral"} and layout is not None:
             # Preserve approved stable-branch centring without animated resize
             # (which previously made GIF/MP4 reactions collapse).
             x = f"({x})+({width}-overlay_w)/2"
@@ -674,8 +717,21 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float, *, editing_poli
     if preset == "none":
         return base + f",crop={rw}:{rh}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}'" + finish
 
-    if preset in {"micro_push", "slow_push", "dramatic_push", "pull_back"}:
-        if preset == "micro_push":
+    if preset in {
+        "micro_push",
+        "slow_push",
+        "dramatic_push",
+        "pull_back",
+        "snap_zoom",
+    }:
+        local_ease = ease_on
+
+        if preset == "snap_zoom":
+            # Viral punch: mostly stable, then fast hit near the cut.
+            start, end = 1.000, 1.140
+            local_ease = f"pow({t_on},6)"
+
+        elif preset == "micro_push":
             start, end = 1.000, 1.018 if editing_polish else 1.020
         elif preset == "slow_push":
             if editing_polish:
@@ -688,7 +744,7 @@ def _image_filter(scene: Scene, plan: ShotPlan, duration: float, *, editing_poli
         else:
             start, end = (1.050, 1.000) if editing_polish else (1.065, 1.000)
         delta = end - start
-        zoom = f"{start:.5f}+({delta:.5f})*{ease_on}"
+        zoom = f"{start:.5f}+({delta:.5f})*{local_ease}"
         return base + "," + f"zoompan=z='{zoom}':x='max(0,min(iw-iw/zoom,{fx:.5f}*iw-iw/zoom/2))':y='max(0,min(ih-ih/zoom,{fy:.5f}*ih-ih/zoom/2))':d=1:s={rw}x{rh}:fps={fps}" + finish
 
     if preset in {"reveal_left", "reveal_right"}:
@@ -721,7 +777,11 @@ def _editorial_video_filter(scene: Scene, plan: ShotPlan, duration: float) -> st
     ease = _ae_ease_expr(t, 2.2)
     preset = _resolved_preset(scene)
 
-    if preset == "dramatic_push":
+    if preset == "snap_zoom":
+        start, end = 1.000, 1.140
+        ease = f"pow({t},6)"
+
+    elif preset == "dramatic_push":
         start, end = 1.000, 1.045
     elif preset == "pull_back":
         start, end = 1.028, 1.000
@@ -749,14 +809,30 @@ def _video_filter(scene: Scene, plan: ShotPlan, duration: float) -> str:
     fy = _clamp_focus(scene.focus_y)
     preset = _resolved_preset(scene)
     base = f"scale={plan.width}:{plan.height}:force_original_aspect_ratio=increase,crop={plan.width}:{plan.height}:x='{_focus_expr('iw','ow',fx)}':y='{_focus_expr('ih','oh',fy)}'"
-    if preset not in {"micro_push", "slow_push"}:
+    if preset not in {
+        "micro_push",
+        "slow_push",
+        "snap_zoom",
+    }:
         return base + f",fps={plan.fps}"
 
     frames = max(2, int(math.ceil(duration * plan.fps)))
     denominator = max(1, frames - 1)
     t = f"min(max(n/{denominator},0),1)"
-    ease = _ae_ease_expr(t, 2.0)
-    strength = 0.008 if preset == "micro_push" else 0.014
+
+    ease = (
+        f"pow({t},6)"
+        if preset == "snap_zoom"
+        else _ae_ease_expr(t, 2.0)
+    )
+
+    strength = (
+        0.140
+        if preset == "snap_zoom"
+        else 0.008
+        if preset == "micro_push"
+        else 0.014
+    )
     scale = f"1+({strength:.5f})*{ease}"
     return base + f",scale='iw*({scale})':'ih*({scale})':eval=frame,crop={plan.width}:{plan.height},fps={plan.fps}"
 
@@ -833,12 +909,169 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     # the same bold Shorts look used by the normal captions.
     for index, item in enumerate(overlays or []):
         effect_type = str(item.get("type") or "png")
-        label = str(item.get("label") or "").strip()
-        if not label:
-            continue
+
         start = float(item.get("start", 0.0))
         end = float(item.get("end", start))
+
         if end <= start:
+            continue
+
+        # --------------------------------------------------------
+        # VIRAL ATTENTION GRAPHICS
+        # --------------------------------------------------------
+
+        if effect_type in {"arrow", "circle"}:
+
+            box = item.get("target_box")
+
+            if not isinstance(box, list) or len(box) != 4:
+                continue
+
+            try:
+                bx, by, bw, bh = [
+                    float(value)
+                    for value in box
+                ]
+            except (TypeError, ValueError):
+                continue
+
+            if not all(
+                math.isfinite(value)
+                for value in (bx, by, bw, bh)
+            ):
+                continue
+
+            if (
+                bx < 0
+                or by < 0
+                or bw <= 0
+                or bh <= 0
+                or bx + bw > 1.001
+                or by + bh > 1.001
+            ):
+                continue
+
+            tx = int(
+                plan.width * (bx + bw / 2)
+            )
+
+            ty = int(
+                plan.height * (by + bh / 2)
+            )
+
+            pulse = (
+                r"\fscx70\fscy70"
+                r"\t(0,70,\fscx118\fscy118)"
+                r"\t(70,140,\fscx100\fscy100)"
+                r"\fad(0,45)"
+            )
+
+            # ASS colours are BGR.
+            red = (
+                r"\c&H0000FF&"
+                r"\3c&H000000&"
+                r"\bord6\shad0"
+            )
+
+            if effect_type == "circle":
+
+                fs = max(
+                    130,
+                    int(
+                        plan.width
+                        * max(
+                            .18,
+                            min(
+                                .52,
+                                max(bw, bh) * 1.45,
+                            ),
+                        )
+                    ),
+                )
+
+                events.append(
+                    f"Dialogue: 4,"
+                    f"{_ass_time(start)},"
+                    f"{_ass_time(end)},"
+                    "Default,,0,0,0,,"
+                    + r"{\an5\pos("
+                    + str(tx)
+                    + ","
+                    + str(ty)
+                    + r")\fnSegoe UI Symbol\fs"
+                    + str(fs)
+                    + red
+                    + pulse
+                    + r"}?"
+                )
+
+            else:
+
+                # Arrow glyph points RIGHT by default.
+                # Position and rotate it towards the target.
+
+                if tx < int(plan.width * .35):
+                    ax = min(
+                        plan.width - 80,
+                        tx + int(plan.width * .20),
+                    )
+                    ay = ty
+                    angle = 180
+
+                elif tx > int(plan.width * .65):
+                    ax = max(
+                        80,
+                        tx - int(plan.width * .20),
+                    )
+                    ay = ty
+                    angle = 0
+
+                elif ty < int(plan.height * .35):
+                    ax = tx
+                    ay = min(
+                        plan.height - 100,
+                        ty + int(plan.height * .12),
+                    )
+                    angle = -90
+
+                else:
+                    ax = tx
+                    ay = max(
+                        90,
+                        ty - int(plan.height * .12),
+                    )
+                    angle = 90
+
+                fs = max(
+                    150,
+                    int(plan.width * .20),
+                )
+
+                events.append(
+                    f"Dialogue: 5,"
+                    f"{_ass_time(start)},"
+                    f"{_ass_time(end)},"
+                    "Default,,0,0,0,,"
+                    + r"{\an5\pos("
+                    + str(ax)
+                    + ","
+                    + str(ay)
+                    + r")\fnSegoe UI Symbol\fs"
+                    + str(fs)
+                    + r"\frz"
+                    + str(angle)
+                    + red
+                    + pulse
+                    + r"}?"
+                )
+
+            continue
+
+        label = str(
+            item.get("label") or ""
+        ).strip()
+
+        if not label:
             continue
 
         side = str(item.get("position") or "right")
@@ -977,7 +1210,23 @@ def _ass_text_plain(text: str) -> str:
 def _ass_text(text: str, *, editing_polish: bool = False, editing_style: str = "classic") -> str:
     safe = text.replace("{", "(").replace("}", ")")
     if editing_style == "dynamic":
-        return (r"{\fscx40\fscy40\t(0,60,\fscx115\fscy115)\t(60,120,\fscx100\fscy100)\fad(0,50)}" + safe)
+        return (
+            r"{\fscx40\fscy40"
+            r"\t(0,60,\fscx115\fscy115)"
+            r"\t(60,120,\fscx100\fscy100)"
+            r"\fad(0,50)}"
+            + safe
+        )
+
+    if editing_style == "viral":
+        return (
+            r"{\fscx35\fscy35"
+            r"\t(0,55,\fscx120\fscy120)"
+            r"\t(55,110,\fscx100\fscy100)"
+            r"\fad(0,35)}"
+            + safe
+        )
+
     if editing_polish:
         # Small 70ms scale-up gives the caption a manual-edit punch without
         # bouncing or lingering after the spoken word.

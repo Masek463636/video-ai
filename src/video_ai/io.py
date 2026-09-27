@@ -146,7 +146,7 @@ def validate_shot_plan(plan: ShotPlan) -> None:
             raise ValueError(f"scene {index}: invalid visual_mode={scene.visual_mode!r}")
         if scene.source_mode not in {"auto", "historical_archive", "stock_video", "meme_library", "generic_image"}:
             raise ValueError(f"scene {index}: invalid source_mode={scene.source_mode!r}")
-        if scene.motion_preset not in {"none", "micro_push", "slow_push", "dramatic_push", "pull_back", "reveal_left", "reveal_right"}:
+        if scene.motion_preset not in {"none", "micro_push", "slow_push", "dramatic_push", "pull_back", "reveal_left", "reveal_right", "snap_zoom"}:
             raise ValueError(f"scene {index}: invalid motion_preset={scene.motion_preset!r}")
         if scene.tone not in valid_tones:
             raise ValueError(f"scene {index}: invalid tone={scene.tone!r}")

@@ -404,6 +404,11 @@ def main() -> None:
     p_plan.add_argument("--min-scene", type=float, default=0.95)
     p_plan.add_argument("--max-scene", type=float, default=2.7)
     p_plan.add_argument("--meme-dir", default=None)
+    p_plan.add_argument(
+        "--viral-style",
+        action="store_true",
+        help="Fast Viral/Darwin storyboard",
+    )
     p_assets = sub.add_parser("assets", help="Find, rank and download images/videos/memes for a ShotPlan")
     p_assets.add_argument("plan")
     p_assets.add_argument("-o", "--output", required=True)
@@ -429,7 +434,16 @@ def main() -> None:
     p_render.add_argument("--crf", type=int, default=20)
     p_render.add_argument("--transcript", default=None, help="Use existing word timestamps for a caption-only A/B render; keeps visual assets and cut points")
     p_render.add_argument("--editing-polish", action="store_true", help="A/B: keep the same assets/cut points, add subtle editor-style motion and caption pop")
-    p_render.add_argument("--editing-style", choices=("classic", "dynamic"), default="classic", help="Dynamic: stable-shorts1-good reactions and bouncing captions")
+    p_render.add_argument(
+        "--editing-style",
+        choices=(
+            "classic",
+            "dynamic",
+            "viral",
+        ),
+        default="classic",
+        help="Viral: fast Darwin-style accents and captions",
+    )
     p_render.add_argument("--composition-review", action="store_true", help="Review cropped scenes and safely place optional inserts with Gemini")
     p_render.add_argument("--overlays-file", default=None, help="Reuse saved overlays.json without new API requests")
     p_render.add_argument("--shorts-fx", action="store_true", help="Add sparse TikTok/Shorts PNG pop-ins over the existing edit")
@@ -447,6 +461,10 @@ def main() -> None:
     p_make.add_argument("--material-v2", action="store_true", help="Action-first Material Brain 2: prefer live stock video and visible actions")
     p_make.add_argument("--material-v2-local", action="store_true", help="Run Material Brain 2 without Gemini judgements; use stock providers + local ranking")
     p_make.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
+    p_make.add_argument(
+        "--viral-style",
+        action="store_true",
+    )
     p_create = sub.add_parser("create", help="voiceover -> Editing Brain -> sources -> judge -> render")
     p_create.add_argument("audio")
     p_create.add_argument("-o", "--output", required=True)
@@ -462,6 +480,10 @@ def main() -> None:
     p_create.add_argument("--material-v2", action="store_true", help="Action-first Material Brain 2: prefer live stock video and visible actions")
     p_create.add_argument("--material-v2-local", action="store_true", help="Run Material Brain 2 without Gemini judgements; use stock providers + local ranking")
     p_create.add_argument("--reference-framing", action="store_true", help="Fit wide video over a blurred full-frame background like modern Shorts")
+    p_create.add_argument(
+        "--viral-style",
+        action="store_true",
+    )
     p_story = sub.add_parser("story", help="Voiceover to documentary/meme compositions (opt-in second style)")
     p_story.add_argument("audio")
     p_story.add_argument("-o", "--output", required=True)
@@ -561,6 +583,7 @@ def main() -> None:
                 use_gemini=not args.shorts_fx_local,
                 sticker_dir=args.sticker_dir,
                 editing_style=args.editing_style,
+                base_video=args.base_video,
             )
             if args.shorts_fx and not args.overlays_file else []
         )
@@ -606,6 +629,13 @@ def main() -> None:
                     transcript,
                     Path(args.audio),
                     meme_dir=args.meme_dir,
+                    viral_style=bool(
+                        getattr(
+                            args,
+                            "viral_style",
+                            False,
+                        )
+                    ),
                 )
                 grammar_rewritten = []
                 reference_rewritten = []
@@ -642,6 +672,25 @@ def main() -> None:
             material_v2_scenes = apply_material_brain_v2(plan)
             if material_v2_scenes:
                 print(f"[material-v2] action-first scenes: {material_v2_scenes}", flush=True)
+
+        if getattr(
+            args,
+            "viral_style",
+            False,
+        ):
+            from .viral_style import (
+                apply_viral_motion,
+            )
+
+            viral_changed = (
+                apply_viral_motion(plan)
+            )
+
+            print(
+                "[viral] camera beats: "
+                + str(viral_changed),
+                flush=True,
+            )
 
         manifest, qc_results, diversity_repairs = _resolve_and_repair(plan, work, args)
         if args.select_moments:
