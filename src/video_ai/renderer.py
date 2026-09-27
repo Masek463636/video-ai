@@ -54,7 +54,7 @@ def render_plan(
         reviewer = None
         if composition_review:
             from .composition_review import CompositionReviewer
-            reviewer = CompositionReviewer(root / "composition")
+            reviewer = CompositionReviewer(root / "composition", contextual=editing_style == "viral")
         if base_video is not None:
             base = Path(base_video)
             if not base.is_file(): raise ValueError('Saved base video not found')
@@ -116,6 +116,7 @@ def render_plan(
             overlays = place_viral_overlays(
                 overlays or [],
                 audio_duration,
+                spans=[(start, end) for _, start, end in spans],
             )
 
             (root / "overlays.placed.json").write_text(

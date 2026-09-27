@@ -718,6 +718,8 @@ def main() -> None:
                 work_dir=work / "render",
                 captions=not args.no_captions,
                 editing_polish=bool(getattr(args, "viral_style", False)),
+                editing_style="viral" if getattr(args, "viral_style", False) else "classic",
+                composition_review=bool(getattr(args, "viral_style", False)),
                 reference_framing=getattr(args, "reference_framing", False),
             )
         finally:

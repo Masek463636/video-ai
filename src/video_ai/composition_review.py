@@ -103,7 +103,8 @@ def frames(path, times, root, prefix):
 
 
 class CompositionReviewer:
-    def __init__(self, root, client=None):
+    def __init__(self, root, client=None, *, contextual=False):
+        self.contextual = contextual
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         if client is None:
@@ -156,7 +157,8 @@ class CompositionReviewer:
         if not queries: return
         self.replacement_attempts+=1
         root=self.root/f'replacement_{index}'; root.mkdir(exist_ok=True)
-        subject={'intent':scene.visual_description or scene.query,'queries':queries,'aliases':[]}
+        subject={'intent':'; '.join(row.get('requirements', [])) if self.contextual else scene.visual_description or scene.query,
+                 'queries':queries,'aliases':[]}
         row['retrieval']=[]; seen=set()
         print(f'[composition] scene {index+1}: searching replacement footage',flush=True)
         for query in queries:
@@ -202,6 +204,20 @@ class CompositionReviewer:
                     'If action is missing set failure_kind=action; if obscured by crop set failure_kind=framing. '
                     'For unusable footage provide replacement_queries: 1-2 short English stock search phrases for the core action. '
                     'Extract a fixed checklist from the required action and narration, including required objects and interactions. Do not invent extra requirements. Return JSON {"usable":true/false,"reason":"specific visible evidence","requirements":["one concrete visible requirement",...],"failure_kind":"action or framing", "replacement_queries":["short search"]}.')
+            if self.contextual:
+                story = ' '.join(s.caption or '' for s in plan.scenes)
+                prompt += (
+                    f' FULL STORY CONTEXT: {story}. '
+                    'For this Viral edit, narration and story context outrank the proposed visual brief. '
+                    'The brief can itself be wrong. Reject exaggerated screaming, panic, disgust or '
+                    'random grimacing as illustration of ordinary choosing, waiting or disagreement. '
+                    'A generic funny face is not evidence of choosing a movie. Require a visible '
+                    'connection to the situation, such as a screen, remote, browsing or discussion. '
+                    'Use proportionate emotion; reject unrelated reaction footage even if it is amusing. '
+                    'Treat context or emotional-intensity mismatch as failure_kind=action. '
+                    'Derive fixed requirements and replacement queries from the narrated situation, '
+                    'not from a misleading visual brief. Do not change historical identities.'
+                )
             times=[duration*f for f in (.08,.5,.90)]
             data=self.ask([{'text':prompt}]+frames(clip,times,self.root,f'scene{index}'))
             row['reason']=str(data.get('reason',''))[:500]

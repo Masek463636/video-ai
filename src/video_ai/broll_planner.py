@@ -32,7 +32,8 @@ def build_donor_shot_plan(
         raise ValueError("Transcript contains no words")
 
     indexed = " ".join(f"{i}:{word.text}" for i, word in enumerate(words))
-    meme_names = _meme_names(meme_dir)
+    # Viral reactions are a separate timed foreground layer, not random base shots.
+    meme_names = [] if viral_style else _meme_names(meme_dir)
     duration = transcript.duration
 
     if viral_style:
@@ -134,6 +135,13 @@ EDITING RULES:
 - start_idx/end_idx are word indexes from the transcript above.
 """.strip()
 
+    if viral_style:
+        prompt += ("\nVIRAL BASE FOOTAGE: use grounded story footage; memes are added separately. "
+                   "Do not choose meme beats or generic screaming/grimacing stock actors. "
+                   "Keep everyday situations emotionally proportionate. For choosing a film show "
+                   "browsing titles, discussing a choice or using a remote, not an unrelated comic face. "
+                   "Fast cuts must still explain the action. A short fragment such as 'not yet' "
+                   "inherits its meaning from the surrounding sentence.")
     data = client._generate_json([{"text": prompt}], temperature=0.08)
     raw_beats = data.get("beats", []) if isinstance(data, dict) else []
     if not isinstance(raw_beats, list) or len(raw_beats) < 2:

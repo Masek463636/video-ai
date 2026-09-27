@@ -148,6 +148,9 @@ def build_viral_overlays(
         *attention,
     ]
 
+    from .renderer import _visual_spans
+    combined = pace_viral_accents(combined, [(a, b) for _, a, b in _visual_spans(plan, duration)])
+
     combined.sort(
         key=lambda item: (
             float(item.get("start", 0.0)),
@@ -588,10 +591,50 @@ RULES:
     return accepted
 
 
+def pace_viral_accents(overlays, spans):
+    """Let each new shot read before an accent; never carry one over a cut.
+
+    At most 0.32s of delay keeps the spoken anchor recognizable. Targets already
+    located in preview frames are never retimed; omit them if too close to a cut.
+    """
+    result = []
+    for item in overlays:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start, end = float(item['start']), float(item['end'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            continue
+        span = next(((a, b) for a, b in spans if a <= start < b), None)
+        if span is None:
+            continue
+        a, b = span
+        kind = item.get('type')
+        if kind in ('arrow', 'circle'):
+            if start < a + .32 or end > b - .10:
+                continue
+            new_start, new_end = start, end
+        else:
+            new_start = max(start, a + .32)
+            new_end = min(new_start + end - start, b - .10)
+        minimum = .65 if kind == 'sticker' else .35
+        if new_end - new_start < minimum - 1e-6:
+            continue
+        result.append(dict(item, start=round(new_start, 3), end=round(new_end, 3)))
+    return result
+
+
 def place_viral_overlays(
     overlays,
     duration,
+    *,
+    spans=None,
 ):
+    if spans is not None:
+        overlays = pace_viral_accents(overlays, spans)
+
 
     from .dynamic_reactions import (
         place_reactions,

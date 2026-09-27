@@ -264,7 +264,7 @@ def test_real_viral_vectors_render_without_fonts_or_captions(tmp_path):
     ff('-f','lavfi','-i','color=blue:s=360x640:r=24:d=3',str(base))
     ff('-f','lavfi','-i','sine=frequency=440:duration=3',str(audio))
     plan=ShotPlan(audio,[Scene(0,3,'',caption='Не показывать')],width=360,height=640,fps=24)
-    effects=[{'type':kind,'start':start,'end':end,'source':'gemini_attention','attention_verified':True,'target_box':[.2,.2,.2,.2]} for kind,start,end in [('arrow',.2,1),('circle',1.3,2.3)]]
+    effects=[{'type':kind,'start':start,'end':end,'source':'gemini_attention','attention_verified':True,'target_box':[.2,.2,.2,.2]} for kind,start,end in [('arrow',.4,1),('circle',1.3,2.3)]]
     output=render_plan(plan,tmp_path/'final.mp4',base_video=base,work_dir=tmp_path/'work',editing_style='viral',captions=False,overlays=effects)
     def red_count(t):
         raw=subprocess.check_output(['ffmpeg','-v','error','-ss',str(t),'-i',str(output),'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-'])
@@ -306,3 +306,44 @@ def test_snap_zoom_actually_moves_wide_video(tmp_path):
     first,last=pixels(.05),pixels(1.4)
     assert len(first)==len(last)==18000
     assert sum(abs(a-b) for a,b in zip(first,last))/len(first)>15
+
+
+def test_viral_reaction_waits_for_cut_and_leaves_before_next():
+    from video_ai.viral_fx import pace_viral_accents
+    dog = {'type': 'sticker', 'start': 2., 'end': 3.25, 'anchor': 'пиццы'}
+    result = pace_viral_accents([dog], [(0, 2), (2, 3.2), (3.2, 5)])
+    assert result[0]['start'] == 2.32
+    assert result[0]['end'] == 3.1
+    assert result[0]['anchor'] == 'пиццы'
+    assert dog['start'] == 2.  # Do not corrupt cached planner timing.
+    assert pace_viral_accents(result, [(0, 2), (2, 3.2), (3.2, 5)]) == result
+    # Tiny shots cannot fit both the new background and a readable meme.
+    assert pace_viral_accents([dog], [(2, 2.8)]) == []
+    # An accent on the final word must not spill into a different shot.
+    assert pace_viral_accents([dict(dog, start=3.)], [(2, 3.2), (3.2, 5)]) == []
+
+
+def test_located_attention_is_omitted_instead_of_retimed():
+    from video_ai.viral_fx import pace_viral_accents
+    arrow = {'type':'arrow', 'start':2., 'end':2.9}
+    assert pace_viral_accents([arrow], [(2, 4)]) == []
+    arrow['start'] = 2.4
+    assert pace_viral_accents([arrow], [(2, 4)]) == [arrow]
+
+
+def test_context_review_rejects_wrong_emotion_and_requests_replacement(tmp_path):
+    from unittest.mock import patch, Mock
+    from video_ai.composition_review import CompositionReviewer
+    client = Mock()
+    client._generate_json.return_value = {'usable': False, 'failure_kind': 'action',
+        'requirements': ['choosing a movie on a screen'],
+        'replacement_queries': ['person browsing streaming movies'], 'reason':'unrelated grimace'}
+    review = CompositionReviewer(tmp_path, client, contextual=True)
+    shot = Scene(0, 2, 'screaming man', caption='ещё не', asset_kind='video')
+    plan = ShotPlan(Path('voice'), [shot, Scene(2,4,'remote',caption='выбрали фильм')])
+    with patch('video_ai.composition_review.frames', return_value=[]), patch.object(review,'replace_source') as repair:
+        review.scene(shot,plan,2,Path('clip'),0,reference_framing=True,editing_polish=True)
+    repair.assert_called_once()
+    prompt = client._generate_json.call_args.args[0][0]['text']
+    assert 'выбрали фильм' in prompt and 'narration and story context outrank' in prompt
+    assert review.report['scenes'][0]['status'] == 'unresolved'
