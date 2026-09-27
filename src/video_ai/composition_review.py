@@ -78,16 +78,11 @@ def failure(row, exc, disabled):
 
 
 def choose_slot(protected, kind="emoji"):
-    # EXPERIMENT: reactions stay horizontally centered but live above captions.
-    size = 0.85 if kind == "meme" else 0.55
-    height = size * 0.9 if kind == "meme" else size * 0.65
-    x = 0.5 - size / 2.0
+    # Large centered reaction, clearly above the subtitle zone.
+    if kind == "meme":
+        return [0.02, 0.05, 0.96, 0.50]
 
-    # Memes are usually wider; emoji/Giphy reactions can safely sit a little
-    # lower while still remaining clearly above the subtitle zone.
-    y = 0.08 if kind == "meme" else 0.10
-
-    return [x, y, size, height]
+    return [0.13, 0.08, 0.74, 0.42]
 
 
 def frames(path, times, root, prefix):
@@ -272,6 +267,42 @@ class CompositionReviewer:
                 row['reason']='Review unavailable; optional insert omitted'; continue
             try:
                 start,end=float(item['start']),float(item['end'])
+
+                # Reactions from classic_reactions have ALREADY passed
+                # preview_parts + Gemini readable/relevant/kind validation.
+                # Do not let a second Gemini call randomly delete or
+                # reclassify an already-approved reaction.
+                trusted_source = item.get('source') in ('local_reaction', 'giphy')
+                trusted_kind = str(item.get('reaction_kind') or '')
+
+                if trusted_source and trusted_kind in ('emoji', 'meme'):
+                    slot = choose_slot([], trusted_kind)
+
+                    placed = dict(
+                        item,
+                        layout_box=slot,
+                        animation='pop',
+                        label='',
+                    )
+
+                    result.append(placed)
+
+                    row['insert_review'] = {
+                        'reused': True,
+                        'relevant': True,
+                        'readable': True,
+                        'kind': trusted_kind,
+                        'reason': 'Already verified by classic_reactions',
+                    }
+
+                    row.update(
+                        status='placed',
+                        layout_box=slot,
+                        reason='Already verified by classic_reactions',
+                    )
+
+                    continue
+
                 caption=' '.join(s.caption or '' for s in plan.scenes if s.start<end and s.end>start)
                 prompt=(f'Judge ONLY the attached OPTIONAL INSERT, without any background footage. Narration: {caption}. '
                     f'Requested insert: {item.get("query", "")}. '

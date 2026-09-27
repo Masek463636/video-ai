@@ -14,8 +14,8 @@ def test_invalid_boxes_rejected(value):
 def test_centered_slot_ignores_protected_boxes_in_experiment():
     emoji = choose_slot([[0,0,1,1]], "emoji")
     meme = choose_slot([[0,0,1,1]], "meme")
-    assert emoji == pytest.approx([.225, .10, .55, .3575])
-    assert meme == pytest.approx([.075, .08, .85, .765])
+    assert emoji == pytest.approx([.13, .08, .74, .42])
+    assert meme == pytest.approx([.02, .05, .96, .50])
 
 class Client:
     def __init__(self, replies): self.replies=iter(replies); self.calls=0
@@ -33,7 +33,7 @@ def test_irrelevant_insert_removed_and_relevant_placed(tmp_path):
     with patch('video_ai.composition_review.frames',return_value=[]):
         result=review.overlays('base',effects,plan)
     assert len(result)==1 and result[0]['animation']=='pop'
-    assert result[0]['layout_box'] == pytest.approx([.225, .10, .55, .3575])
+    assert result[0]['layout_box'] == pytest.approx([.13, .08, .74, .42])
     assert review.report['overlays'][0]['status']=='unsupported_accent'
     assert json.loads((tmp_path/'overlays.reviewed.json').read_text())['overlays']==result
 
@@ -181,3 +181,39 @@ def test_jpeg_frames_convert_limited_range_video(tmp_path):
     subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i','color=blue:s=100x180:d=1',
                     '-pix_fmt','yuv420p','-color_range','tv',str(source)],check=True)
     assert len(frames(source,[.2,.5,.8],tmp_path,'limited'))==3
+
+
+def test_verified_reactions_are_not_second_reviewed_or_dropped(tmp_path):
+    client = Client([])
+    review = CompositionReviewer(tmp_path, client)
+
+    effects = [
+        {
+            'type': 'sticker',
+            'asset': f'reaction_{i}.mp4',
+            'query': 'reaction',
+            'start': float(i * 2),
+            'end': float(i * 2 + 1.25),
+            'source': 'giphy' if i % 2 else 'local_reaction',
+            'reaction_kind': 'meme',
+        }
+        for i in range(4)
+    ]
+
+    plan = ShotPlan(
+        Path('audio'),
+        [Scene(0, 10, 'x', caption='test')]
+    )
+
+    with patch(
+        'video_ai.composition_review.frames',
+        side_effect=AssertionError('verified reactions must not be re-reviewed'),
+    ):
+        result = review.overlays('base', effects, plan)
+
+    assert len(result) == 4
+    assert client.calls == 0
+    assert all(
+        item['layout_box'] == pytest.approx([.02, .05, .96, .50])
+        for item in result
+    )
