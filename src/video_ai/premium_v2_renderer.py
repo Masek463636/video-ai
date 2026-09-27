@@ -70,10 +70,10 @@ def premium_caption_events_v2(scene: Scene, plan: ShotPlan) -> list[str]:
             )
             continue
 
-        left = max(0, index - window // 2)
-        right = min(len(words), left + window)
-        if right - left < window:
-            left = max(0, right - window)
+        # Never reveal future words before they are spoken.
+        # Keep only the active word plus a short trail of previous context.
+        right = index + 1
+        left = max(0, right - window)
 
         parts: list[str] = []
         for pos in range(left, right):
