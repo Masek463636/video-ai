@@ -160,6 +160,28 @@ def setup_chat(endpoint: str = DEFAULT_CDP_ENDPOINT) -> int:
             browser.close()
             return 2
 
+        if "gemini.google.com/app/" not in url:
+            print("У этого окна пока нет ID конкретного чата. Отправляю служебное сообщение...")
+            try:
+                answer = send_message(
+                    page,
+                    "Это постоянный рабочий чат VIDEO AI EDITOR. Ответь только: VIDEO_AI_CHAT_READY",
+                )
+                print("Gemini:", answer.splitlines()[-1] if answer else "")
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline and "gemini.google.com/app/" not in page.url:
+                    page.wait_for_timeout(250)
+                url = page.url
+            except Exception as exc:
+                print(f"Не удалось закрепить чат: {exc}")
+                browser.close()
+                return 4
+
+        if "gemini.google.com/app/" not in url:
+            print(f"Не удалось получить URL конкретного чата: {url}")
+            browser.close()
+            return 5
+
         state = _read_state()
         state["chat_url"] = url
         state["cdp_endpoint"] = endpoint
