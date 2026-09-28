@@ -1018,7 +1018,10 @@ def _v2_select_roll_batch(
             if top_rows:
                 gemini_groups.append({"scene": scene_index, "candidates": top_rows})
 
-        batch_size = 4
+        is_browser_gemini = getattr(gemini, "provider_name", "") == "gemini_browser"
+        # Gemini Web accepts only a limited number of attachments per prompt.
+        # Each scene contributes at most 3 CLIP previews, so 3 scenes = <=9 images.
+        batch_size = 3 if is_browser_gemini else 4
         total_batches = (len(gemini_groups) + batch_size - 1) // batch_size
         gemini_selected = 0
         for batch_no, offset in enumerate(range(0, len(gemini_groups), batch_size), start=1):
