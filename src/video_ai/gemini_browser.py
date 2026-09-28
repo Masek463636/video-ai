@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -55,6 +57,12 @@ def _write_state(value: dict) -> None:
     temp = STATE_FILE.with_suffix(".tmp")
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(STATE_FILE)
+
+
+def browser_chat_ready() -> bool:
+    state = _read_state()
+    url = str(state.get("chat_url") or "").strip()
+    return bool(url and "gemini.google.com/app/" in url)
 
 
 def _first_visible(page, selectors: list[str], timeout_ms: int = 15000):
@@ -113,51 +121,118 @@ def wait_for_answer(page, before: str, timeout_s: float = 120.0) -> str:
     raise RuntimeError("Timed out waiting for Gemini response")
 
 
+def _try_set_file_input(page, paths: list[str]) -> bool:
+    try:
+        locator = page.locator('input[type="file"]')
+        count = locator.count()
+        for i in range(count - 1, -1, -1):
+            try:
+                locator.nth(i).set_input_files(paths)
+                page.wait_for_timeout(1400)
+                return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _click_and_choose_files(page, locator, paths: list[str], *, timeout: int = 5000) -> bool:
+    try:
+        with page.expect_file_chooser(timeout=timeout) as chooser_info:
+            locator.click(force=True)
+        chooser_info.value.set_files(paths)
+        page.wait_for_timeout(1400)
+        return True
+    except Exception:
+        return False
+
+
 def _attach_files(page, file_paths: list[str] | None) -> None:
     paths = [str(Path(p).resolve()) for p in (file_paths or []) if Path(p).is_file()]
     if not paths:
         return
 
-    # Gemini usually keeps a hidden file input in the composer. This is more
-    # stable than relying on translated button labels.
-    for selector in FILE_INPUT_SELECTORS:
-        try:
-            locator = page.locator(selector)
-            if locator.count():
-                locator.last.set_input_files(paths)
-                page.wait_for_timeout(1200)
-                return
-        except Exception:
-            continue
+    # Fast path: sometimes Gemini keeps a hidden input in the composer.
+    if _try_set_file_input(page, paths):
+        return
 
-    # Fallback for layouts where the file input appears only after opening the
-    # add/attach menu.
-    for pattern in (
-        r"upload",
-        r"attach",
-        r"add file",
-        r"files",
-        r"загруз",
-        r"прикреп",
-        r"добав",
-    ):
+    # Current Gemini UI (2026) commonly calls the plus button "Upload & tools".
+    menu_selectors = [
+        'button[aria-label="Upload & tools"]',
+        'button[aria-label="Open upload file menu"]',
+        'button[aria-label*="Upload" i]',
+        'button[aria-label*="Attach" i]',
+        'button[aria-label*="Add file" i]',
+        'button[aria-label*="Add files" i]',
+    ]
+    for selector in menu_selectors:
         try:
-            button = page.get_by_role("button", name=re.compile(pattern, re.I))
+            button = page.locator(selector)
             if not button.count():
                 continue
-            button.last.click()
+            button.last.click(force=True)
             page.wait_for_timeout(500)
-            locator = page.locator('input[type="file"]')
-            if locator.count():
-                locator.last.set_input_files(paths)
-                page.wait_for_timeout(1200)
+            if _try_set_file_input(page, paths):
+                return
+            break
+        except Exception:
+            continue
+
+    # The current UI may render the upload action in this dedicated wrapper.
+    direct_upload_selectors = [
+        'images-files-uploader[data-test-id="uploader-images-files-button-advanced"]',
+        '[data-test-id="local-images-files-uploader-icon"]',
+        '[data-test-id*="uploader-images-files"]',
+        '[role="menuitem"]:has-text("Upload files")',
+        '[role="menuitem"]:has-text("Загрузить файлы")',
+        'button:has-text("Upload files")',
+        'button:has-text("Загрузить файлы")',
+    ]
+    for selector in direct_upload_selectors:
+        try:
+            item = page.locator(selector)
+            if not item.count():
+                continue
+            if _click_and_choose_files(page, item.last, paths):
+                return
+            # Some builds create the input only after this click instead of
+            # emitting the native file chooser event.
+            try:
+                item.last.click(force=True)
+                page.wait_for_timeout(350)
+            except Exception:
+                pass
+            if _try_set_file_input(page, paths):
                 return
         except Exception:
             continue
 
-    raise RuntimeError("Не удалось найти загрузку файлов в интерфейсе Gemini")
+    # Last resort: inspect visible menu/buttons by accessible text.
+    for pattern in (
+        r"upload files",
+        r"upload from computer",
+        r"attach files",
+        r"загрузить файлы",
+        r"загрузить с компьютера",
+        r"прикрепить файлы",
+    ):
+        for role in ("menuitem", "button"):
+            try:
+                item = page.get_by_role(role, name=re.compile(pattern, re.I))
+                if not item.count():
+                    continue
+                if _click_and_choose_files(page, item.last, paths):
+                    return
+                if _try_set_file_input(page, paths):
+                    return
+            except Exception:
+                continue
 
-
+    raise RuntimeError(
+        "Не удалось найти загрузку файлов в интерфейсе Gemini "
+        "(искал Upload & tools / Upload files / uploader-images-files)"
+    )
 def send_message(
     page,
     message: str,
@@ -242,7 +317,7 @@ def setup_chat(endpoint: str = DEFAULT_CDP_ENDPOINT) -> int:
     return 0
 
 
-def test_chat(message: str, endpoint: str | None = None) -> int:
+def test_chat(message: str, endpoint: str | None = None, file_paths: list[str] | None = None) -> int:
     state = _read_state()
     chat_url = str(state.get("chat_url") or "").strip()
     if not chat_url:
@@ -259,7 +334,7 @@ def test_chat(message: str, endpoint: str | None = None) -> int:
 
         page.goto(chat_url, wait_until="domcontentloaded")
         try:
-            answer = send_message(page, message)
+            answer = send_message(page, message, file_paths=file_paths)
         except PlaywrightTimeoutError as exc:
             print(f"Playwright timeout: {exc}")
             return 3
@@ -289,9 +364,32 @@ def main() -> None:
         default="Ответь только одной строкой: VIDEO_AI_OK",
     )
 
+    p_upload = sub.add_parser("test-upload", help="Attach a tiny test image in the saved Gemini chat")
+    p_upload.add_argument("--cdp-endpoint", default=None)
+
     args = parser.parse_args()
     if args.command == "setup":
         raise SystemExit(setup_chat(args.cdp_endpoint))
+    if args.command == "test-upload":
+        # 1x1 PNG, only to verify that Gemini's file uploader is being driven.
+        test_png = Path(tempfile.gettempdir()) / "video-ai-upload-test.png"
+        test_png.write_bytes(
+            bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                "0000000d49444154789c6360f8cfc000000301010018dd8db10000000049454e44ae426082"
+            )
+        )
+        try:
+            raise SystemExit(test_chat(
+                "Если ты видишь прикреплённое изображение, ответь только: IMAGE_UPLOAD_OK",
+                endpoint=args.cdp_endpoint,
+                file_paths=[str(test_png)],
+            ))
+        finally:
+            try:
+                test_png.unlink(missing_ok=True)
+            except OSError:
+                pass
     raise SystemExit(test_chat(args.message, endpoint=args.cdp_endpoint))
 
 
