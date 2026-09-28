@@ -19,6 +19,7 @@ class MemeAsset:
     kind: str
     score: float
     title: str
+    description: str = ""
 
 
 @dataclass(slots=True)
@@ -31,6 +32,12 @@ class GiphyMemeAsset:
 
 
 def search_memes(directory: str | Path | None, query: str, *, limit: int = 12) -> list[MemeAsset]:
+    """Search the local meme pack without exposing the whole directory to Gemini.
+
+    Prefer verified visual descriptions cached in .video-ai-index. Filenames and
+    folder names are only lightweight fallback tags, so opaque VID_/hash names do
+    not pretend to carry semantic meaning.
+    """
     if not directory:
         return []
     root = Path(directory)
@@ -38,27 +45,82 @@ def search_memes(directory: str | Path | None, query: str, *, limit: int = 12) -
         return []
 
     wanted = _tokens(query)
+    descriptions = _load_meme_index(root)
     results: list[MemeAsset] = []
     for path in root.rglob("*"):
         if not path.is_file():
             continue
+        try:
+            relative = str(path.relative_to(root)).replace("\\", "/")
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in Path(relative).parts):
+            continue
         suffix = path.suffix.lower()
         if suffix not in _VIDEO_EXTS | _IMAGE_EXTS:
             continue
+
+        description = descriptions.get(relative.casefold(), "")
+        description_tokens = _tokens(description)
         name_tokens = _tokens(path.stem.replace("_", " ").replace("-", " "))
-        overlap = len(wanted & name_tokens)
-        score = overlap * 8.0
-        # Meme videos are usually more useful than static images for Shorts.
+        parent_tokens = _tokens(" ".join(path.relative_to(root).parts[:-1]))
+
+        # Verified visual descriptions dominate. Human-readable names/folders are
+        # useful as secondary tags; opaque camera/hash filenames naturally score 0.
+        desc_overlap = len(wanted & description_tokens)
+        name_overlap = len(wanted & name_tokens)
+        parent_overlap = len(wanted & parent_tokens)
+        score = desc_overlap * 12.0 + name_overlap * 3.0 + parent_overlap * 1.5
+
         kind = "video" if suffix in _VIDEO_EXTS else "image"
         if kind == "video":
-            score += 2.5
-        # Files in named folders can act like lightweight tags.
-        parent_tokens = _tokens(" ".join(p.name for p in path.parents if p != root.parent))
-        score += len(wanted & parent_tokens) * 2.0
-        results.append(MemeAsset(path=path, kind=kind, score=score, title=path.stem))
+            score += 1.0
+        if description:
+            score += 2.0
 
-    results.sort(key=lambda item: item.score, reverse=True)
+        results.append(MemeAsset(
+            path=path,
+            kind=kind,
+            score=score,
+            title=path.stem,
+            description=description,
+        ))
+
+    results.sort(
+        key=lambda item: (
+            item.score,
+            bool(item.description),
+            item.kind == "video",
+            item.path.name.casefold(),
+        ),
+        reverse=True,
+    )
     return results[:max(1, limit)]
+
+
+def _load_meme_index(root: Path) -> dict[str, str]:
+    """Load copied/persistent pack descriptions by RELATIVE filename.
+
+    Cached records contain absolute paths from the machine that built the index;
+    using the stored relative 'name' keeps copied packs valid in worktrees.
+    """
+    cache = root / ".video-ai-index"
+    if not cache.is_dir():
+        return {}
+
+    out: dict[str, str] = {}
+    for file in cache.glob("*.json"):
+        try:
+            row = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if not isinstance(row, dict) or not row.get("verified"):
+            continue
+        name = str(row.get("name") or "").replace("\\", "/").strip("/")
+        description = str(row.get("description") or "").strip()
+        if name and description:
+            out[name.casefold()] = description[:1000]
+    return out
 
 
 def _tokens(value: str) -> set[str]:
