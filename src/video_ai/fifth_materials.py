@@ -82,12 +82,16 @@ def prepare_candidates(plan,catalog,cache,*,ranker=None):
     return result
 
 
-def choose_batches(plan,candidates,session,output,*,batch_size=2):
+def choose_batches(plan,candidates,session,output,*,batch_size=2, previous=None):
     """Joint choices are cached with actual preview contents, not just filenames."""
     if batch_size < 1: raise ValueError('batch_size must be positive')
     report=dict(schema='fifth-selection-v1',selections={},unresolved=[],errors=[])
     used=set()
-    beats=plan['beats']; prior=[]
+    if previous:
+        report['selections'] = dict(previous.get('selections', {}))
+    beats=[b for b in plan['beats'] if b['id'] not in report['selections']]
+    prior=[dict(beat=bid,candidate=row['selected']['id'],reason=row['reason']) for bid,row in report['selections'].items()]
+    used.update(row['candidate'] for row in prior)
     for offset in range(0,len(beats),batch_size):
         group=beats[offset:offset+batch_size]
         print(f'[fifth] selecting beats {offset+1}–{offset+len(group)}/{len(beats)}',flush=True)

@@ -91,6 +91,18 @@ class Studio:
             if not job['effects']:
                 command.append('--no-effects')
             steps = [('Истории и мемы: подготовка материалов', command)]
+        if job.get('style') == 'fifth':
+            fifth_work = folder / 'fifth-work'
+            edit = job.get('edit')
+            if edit:
+                command = common + ['fifth-edit', str(fifth_work), '-o', str(folder / 'final.mp4'),
+                                    '--beat', edit['beat'], '--action', edit['action']]
+            else:
+                command = common + ['fifth-create', str(folder / 'voice.mp3'), '-o', str(folder / 'final.mp4'),
+                                    '--work-dir', str(fifth_work), '--meme-dir', str(self.root / 'memes'),
+                                    '--sticker-dir', str(self.root / 'stickers')]
+                if not job['effects']: command.append('--no-effects')
+            steps = [('Пятый стиль: подготовка истории' if not edit else 'Изменение выбранной сцены', command)]
         try:
             for index, (stage, command) in enumerate(steps):
                 if self.stopping.is_set():
@@ -106,6 +118,8 @@ class Studio:
                     for key in KEYS + OPTIONAL_KEYS:
                         if env.get(key):
                             line = line.replace(env[key], '[ключ скрыт]')
+                    if job.get('style') == 'fifth' and line.startswith('[fifth-stage]'):
+                        self.update(job, stage=line.split(']', 1)[1].strip(), step=2 if 'рендер' in line else 1)
                     if job.get('style') == 'story' and line.startswith('[story'):
                         if 'render' in line:
                             self.update(job, stage='Сборка сцен и финальный рендер', step=2)
@@ -121,7 +135,7 @@ class Studio:
                     raise RuntimeError('Этап завершился с ошибкой. Подробности — в журнале.')
             if not (folder / 'final.mp4').is_file():
                 raise RuntimeError('Рендер не создал итоговый файл')
-            self.update(job, status='done', stage='Ролик готов', step=2)
+            self.update(job, status='done', stage='Ролик готов', step=2, edit=None)
         except Exception as error:
             self.update(job, status='error', stage=str(error))
         finally:
@@ -180,6 +194,20 @@ def make_handler(studio):
                     jobs = sorted(studio.jobs.values(), key=lambda j: j['created'], reverse=True)
                     snapshot = json.loads(json.dumps(jobs))
                 self.send_data({'jobs': snapshot, 'busy': studio.busy.locked(), 'keys': {k: bool(os.environ.get(k)) for k in KEYS + OPTIONAL_KEYS}, 'tools': {x: bool(shutil.which(x)) for x in ('ffmpeg', 'ffprobe')}})
+            elif path.startswith('/api/scenes/'):
+                job_id = path.removeprefix('/api/scenes/')
+                job = studio.jobs.get(job_id)
+                if not job or job.get('style') != 'fifth' or job['status'] != 'done':
+                    self.send_data({'error': 'Сцены пока недоступны'}, 404); return
+                try:
+                    folder = studio.storage / job_id / 'fifth-work'
+                    plan = json.loads((folder / 'director-plan.json').read_text(encoding='utf-8'))
+                    selected = json.loads((folder / 'selection.json').read_text(encoding='utf-8'))['selections']
+                    self.send_data({'scenes': [dict(id=b['id'], caption=b['caption'],
+                        alternatives=len(selected.get(b['id'], {}).get('alternatives', [])),
+                        camera=b['camera'], emoji=bool(b.get('emoji'))) for b in plan['beats']]})
+                except (OSError, ValueError, KeyError):
+                    self.send_data({'error': 'Сохранённый план недоступен'}, 400)
             elif path.startswith('/download/'):
                 job_id = path.removeprefix('/download/')
                 job = studio.jobs.get(job_id)
@@ -208,6 +236,40 @@ def make_handler(studio):
         def do_POST(self):
             if not self.allowed(mutation=True):
                 return
+            if self.path.startswith('/api/resume/') or self.path.startswith('/api/edit/'):
+                editing = self.path.startswith('/api/edit/')
+                job_id = self.path.rsplit('/', 1)[-1]
+                job = studio.jobs.get(job_id)
+                if not job or job.get('style') != 'fifth' or job['status'] not in ('done', 'error'):
+                    self.send_data({'error': 'Ролик недоступен для изменения'}, 400); return
+                if not studio.busy.acquire(blocking=False):
+                    self.send_data({'error': 'Дождись завершения текущего ролика'}, 409); return
+                launched = False
+                released = False
+                try:
+                    edit = None
+                    if editing:
+                        if job['status'] != 'done': raise ValueError('Сначала заверши создание ролика')
+                        length = int(self.headers.get('Content-Length', '0'))
+                        if not 0 < length <= 2048: raise ValueError('Некорректный запрос')
+                        self.connection.settimeout(10)
+                        edit = json.loads(self.rfile.read(length))
+                        if not isinstance(edit, dict) or edit.get('action') not in ('alternative', 'calmer', 'no-emoji'):
+                            raise ValueError('Неизвестное действие')
+                        plan = json.loads((studio.storage / job_id / 'fifth-work' / 'director-plan.json').read_text(encoding='utf-8'))
+                        if edit.get('beat') not in [b['id'] for b in plan['beats']]: raise ValueError('Неизвестная сцена')
+                        edit = dict(beat=edit['beat'], action=edit['action'])
+                    studio.update(job, status='queued', stage='Продолжаем сохранённый ролик', edit=edit, logs=[])
+                    threading.Thread(target=studio.run, args=(job, dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1')), daemon=True).start()
+                    launched = True
+                    self.send_data({'id': job_id}, 202)
+                except (ValueError, OSError, KeyError, TypeError) as error:
+                    studio.busy.release()
+                    released = True
+                    self.send_data({'error': str(error)}, 400)
+                finally:
+                    if not launched and not released: studio.busy.release()
+                return
             if self.path != '/api/jobs':
                 self.send_data({'error': 'Не найдено'}, 404)
                 return
@@ -227,6 +289,7 @@ def make_handler(studio):
                 'story',
                 'dynamic',
                 'viral',
+                'fifth',
             ):
                 self.send_data({'error': 'Неизвестный стиль'}, 400)
                 return

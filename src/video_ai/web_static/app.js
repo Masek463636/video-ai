@@ -23,6 +23,10 @@ for (const type of ['dragover', 'dragleave', 'drop']) $('drop').addEventListener
 });
 function showJob(job) {
   if (!job) return;
+  $('resume-fifth').hidden = job.style !== 'fifth' || job.status !== 'error';
+  $('resume-fifth').disabled = !!state?.busy;
+  $('fifth-editor').hidden = job.style !== 'fifth' || job.status !== 'done';
+  if (job.style === 'fifth' && job.status === 'done') loadScenes(job.id);
   $('empty').hidden = true; $('job').hidden = false;
   $('stage').textContent = job.stage;
   const running = ['running', 'queued'].includes(job.status);
@@ -64,7 +68,7 @@ async function refresh() {
       for (const job of state.jobs) {
         const row = document.createElement('div'); row.className = 'history-row';
         const button = document.createElement('button'); button.textContent = new Date(job.created*1000).toLocaleString('ru-RU');
-        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${({story:'Истории и мемы',dynamic:'Динамичный',viral:'Viral / Darwin',classic:'Классический'})[job.style || 'classic']} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
+        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${({story:'Истории и мемы',dynamic:'Динамичный',viral:'Viral / Darwin',fifth:'Режиссёрский',classic:'Классический'})[job.style || 'classic']} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
         button.onclick = ()=>{selectedJob=job.id; showJob(job);};
         const badge = document.createElement('span'); badge.className='badge'; badge.textContent=({done:'Готово',error:'Ошибка',running:'В работе',queued:'Запуск'})[job.status];
         row.append(button,badge);
@@ -88,9 +92,58 @@ async function poll(){ await refresh(); setTimeout(poll,2000); }
 poll();
 
 $('style').addEventListener('change', () => {
+  if ($('style').value === 'fifth') {
+    $('style-note').textContent = 'Общий план истории, стоки и отдельные мемные кадры. Сохранение прогресса и замена отдельных сцен. Тестовая версия.';
+    $('effects-note').textContent = 'Мемы, проверенные эмодзи и звуки по смыслу. Первый запуск описывает до 24 новых файлов из твоих папок.';
+    return;
+  }
   const story = $('style').value === 'story';
   const dynamic = $('style').value === 'dynamic';
   const viral = $('style').value === 'viral';
   $('style-note').textContent = story ? 'Фото, видео и сравнения по смыслу. Использует папки memes и elements; первый раз разбор паков займёт больше времени.' : dynamic ? 'Крупные реакции по центру и пружинящие субтитры. На основе твоего удачного варианта Shorts.' : viral ? 'Стоки и мемы сменяют друг друга отдельными кадрами. Без зумов; смайлики — поверх видео.' : 'Знакомый монтаж, как в предыдущих роликах.';
   $('effects-note').textContent = story ? 'Реакции и элементы из твоих паков по смыслу истории' : dynamic ? 'По смыслу примерно каждые 3–4 секунды. Сначала твои паки; Giphy — если подключён. Без текстовых плашек.' : viral ? 'Мемы — отдельными кадрами по смыслу фразы. Смайлики — короткими реакциями поверх видео.' : 'Количество реакций — по смыслу, без текстовых плашек';
 });
+
+let scenesLoadedFor = null, sceneRows = [];
+async function loadScenes(id) {
+  if (scenesLoadedFor === id) { updateEditButtons(); return; }
+  scenesLoadedFor = id;
+  try {
+    const response = await fetch('/api/scenes/' + id);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    if (selectedJob !== id) { scenesLoadedFor = null; return; }
+    sceneRows = data.scenes;
+    $('edit-scene').replaceChildren();
+    sceneRows.forEach((scene, i) => {
+      const option = document.createElement('option'); option.value = scene.id;
+      option.textContent = `${i+1}. ${scene.caption}`; $('edit-scene').append(option);
+    });
+    updateEditButtons();
+  } catch (error) { scenesLoadedFor = null; $('message').textContent = error.message; }
+}
+function updateEditButtons() {
+  const scene = sceneRows.find(s=>s.id === $('edit-scene').value);
+  $('edit-alternative').disabled = !!state?.busy || !scene?.alternatives;
+  $('edit-calmer').disabled = !!state?.busy || !scene || scene.camera === 'none';
+  $('edit-emoji').disabled = !!state?.busy || !scene?.emoji;
+}
+$('edit-scene').addEventListener('change', updateEditButtons);
+async function changeFifth(action) {
+  if (sending || state?.busy || !selectedJob) return;
+  sending = true;
+  try {
+    const response = await fetch('/api/' + (action ? 'edit/' : 'resume/') + selectedJob, {
+      method:'POST', headers:{'X-Studio-Request':'1','Content-Type':'application/json'},
+      body:JSON.stringify(action ? {beat:$('edit-scene').value,action} : {})
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error);
+    scenesLoadedFor = null; $('message').textContent = '';
+  } catch (error) { $('message').textContent = error.message; }
+  finally { sending = false; await refresh(); }
+}
+$('resume-fifth').onclick=()=>changeFifth(null);
+$('edit-alternative').onclick=()=>changeFifth('alternative');
+$('edit-calmer').onclick=()=>changeFifth('calmer');
+$('edit-emoji').onclick=()=>changeFifth('no-emoji');

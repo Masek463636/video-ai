@@ -168,3 +168,37 @@ def test_dynamic_requires_stock_key_not_optional_giphy(app,monkeypatch):
     status,body=request(url+'/api/jobs',b'audio',**{'X-Studio-Request':'1','X-Style':'dynamic'})
     assert status==400 and 'Pexels' in body.decode()
     assert not studio.busy.locked()
+
+
+def test_fifth_pipeline_uses_own_command(tmp_path,monkeypatch):
+    studio=Studio(tmp_path);folder=studio.storage/'fifth-test';folder.mkdir()
+    job=dict(id='fifth-test',created=time.time(),status='queued',stage='',step=0,duration=1,style='fifth',effects=False,logs=[])
+    studio.jobs[job['id']]=job;studio.busy.acquire();commands=[];real=subprocess.Popen
+    def fake(command,**kwargs):
+        commands.append(command)
+        return real([command[0],'-c',"from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'test'); print('[fifth-stage] Сборка сцен и финальный рендер')",command[command.index('-o')+1]],**kwargs)
+    monkeypatch.setattr(subprocess,'Popen',fake)
+    studio.run(job,{})
+    assert job['status']=='done' and len(commands)==1
+    assert 'fifth-create' in commands[0] and '--no-effects' in commands[0]
+    assert '--composition-review' not in commands[0]
+
+
+def test_fifth_edit_endpoint_validates_job_scene_and_action(app,monkeypatch):
+    studio,url=app;folder=studio.storage/'fifth-edit';(folder/'fifth-work').mkdir(parents=True)
+    job=dict(id='fifth-edit',created=time.time(),status='done',style='fifth',logs=[])
+    studio.jobs[job['id']]=job
+    (folder/'fifth-work/director-plan.json').write_text(json.dumps({'beats':[{'id':'beat-000','caption':'Hello','camera':'none','emoji':None}]}))
+    (folder/'fifth-work/selection.json').write_text(json.dumps({'selections':{'beat-000':{'alternatives':[]}}}))
+    assert request(url+'/api/scenes/fifth-edit')[0]==200
+    headers={'X-Studio-Request':'1'}
+    assert request(url+'/api/edit/fifth-edit',json.dumps({'beat':'nope','action':'calmer'}).encode(),**headers)[0]==400
+    assert request(url+'/api/edit/fifth-edit',json.dumps({'beat':'beat-000','action':'shell'}).encode(),**headers)[0]==400
+    assert not studio.busy.locked()
+    launched=[]
+    def fake_run(job,env):launched.append(dict(job));studio.busy.release()
+    monkeypatch.setattr(studio,'run',fake_run)
+    assert request(url+'/api/edit/fifth-edit',json.dumps({'beat':'beat-000','action':'calmer'}).encode(),**headers)[0]==202
+    deadline=time.monotonic()+2
+    while not launched and time.monotonic()<deadline:time.sleep(.01)
+    assert launched[0]['edit']=={'beat':'beat-000','action':'calmer'}

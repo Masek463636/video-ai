@@ -526,7 +526,31 @@ def main() -> None:
     p_fifth_render.add_argument("--cache-dir", default=".video-ai-index/fifth")
     p_fifth_render.add_argument("--no-effects", action="store_true")
     p_fifth_render.add_argument("-o", "--output", required=True)
+    p_fifth_create = sub.add_parser("fifth-create", help="Resumable fifth-style audio-to-video pipeline")
+    p_fifth_create.add_argument("audio")
+    p_fifth_create.add_argument("-o", "--output", required=True)
+    p_fifth_create.add_argument("--work-dir", required=True)
+    p_fifth_create.add_argument("--cache-dir", default=".video-ai-index/fifth")
+    p_fifth_create.add_argument("--meme-dir", default="memes")
+    p_fifth_create.add_argument("--sticker-dir", default="stickers")
+    p_fifth_create.add_argument("--no-effects", action="store_true")
+    p_fifth_edit = sub.add_parser("fifth-edit", help="Edit a saved fifth-style scene locally")
+    p_fifth_edit.add_argument("work")
+    p_fifth_edit.add_argument("-o", "--output", required=True)
+    p_fifth_edit.add_argument("--cache-dir", default=".video-ai-index/fifth")
+    p_fifth_edit.add_argument("--beat", required=True)
+    p_fifth_edit.add_argument("--action", choices=["alternative", "calmer", "no-emoji"], required=True)
     args = parser.parse_args()
+
+    if args.command in ("fifth-create", "fifth-edit"):
+        from .fifth_pipeline import create_fifth, edit_fifth
+        if args.command == "fifth-create":
+            result = create_fifth(args.audio, args.output, args.work_dir, cache=args.cache_dir,
+                                  meme_dir=args.meme_dir, sticker_dir=args.sticker_dir, effects=not args.no_effects)
+        else:
+            result = edit_fifth(args.work, args.output, cache=args.cache_dir, beat_id=args.beat, action=args.action)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
 
     if args.command == "fifth-render":
         from .fifth_render import render_fifth
