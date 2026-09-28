@@ -70,6 +70,13 @@ class Studio:
             ])
 
         elif job.get('style') == 'style5':
+            # Style 5 changes MATERIAL SELECTION, not just the final overlay pass:
+            # abstract / hard-to-stock beats may become primary meme scenes.
+            steps[0][1].extend([
+                '--style5',
+                '--meme-dir',
+                str(self.root / 'memes'),
+            ])
             steps[1][1].extend([
                 '--editing-style',
                 'style5',
