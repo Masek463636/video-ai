@@ -19,6 +19,7 @@ GEMINI_HOME = "https://gemini.google.com/app"
 STATE_DIR = Path.home() / ".video-ai"
 PROFILE_DIR = STATE_DIR / "gemini-browser-profile"
 STATE_FILE = STATE_DIR / "gemini-browser-state.json"
+DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
 
 PROMPT_SELECTORS = [
     'div[contenteditable="true"][role="textbox"]',
@@ -120,72 +121,85 @@ def send_message(page, message: str) -> str:
     return wait_for_answer(page, before)
 
 
-def open_context():
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    return sync_playwright()
+def _connect_existing_chrome(p, endpoint: str):
+    try:
+        browser = p.chromium.connect_over_cdp(endpoint)
+    except Exception as exc:
+        raise RuntimeError(
+            "Не удалось подключиться к обычному Chrome. "
+            "Сначала запусти Chrome с --remote-debugging-port=9222 "
+            "и отдельным --user-data-dir. "
+            f"Endpoint: {endpoint}. Ошибка: {exc}"
+        ) from exc
+    if not browser.contexts:
+        raise RuntimeError("Chrome подключён, но browser context не найден")
+    context = browser.contexts[0]
+    pages = context.pages
+    page = pages[-1] if pages else context.new_page()
+    return browser, context, page
 
 
-def setup_chat() -> int:
+def setup_chat(endpoint: str = DEFAULT_CDP_ENDPOINT) -> int:
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="chrome",
-            headless=False,
-            viewport=None,
-        )
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(GEMINI_HOME, wait_until="domcontentloaded")
-        print("\nОткрыл Gemini в отдельном профиле.")
-        print("1) Войди в Google сам, если попросит.")
-        print("2) Создай новый чат или открой чат, который будет использовать VIDEO AI.")
-        print("3) Когда нужный чат открыт — вернись сюда и нажми Enter.\n")
+        try:
+            browser, context, page = _connect_existing_chrome(p, endpoint)
+        except RuntimeError as exc:
+            print(exc)
+            return 3
+
+        if "gemini.google.com" not in page.url:
+            page.goto(GEMINI_HOME, wait_until="domcontentloaded")
+
+        print("\nПодключился к уже открытому обычному Chrome.")
+        print("Открой нужный постоянный чат Gemini в этом окне.")
+        print("Когда нужный чат открыт — вернись сюда и нажми Enter.\n")
         input()
         url = page.url
         if "gemini.google.com" not in url:
             print("Ошибка: сейчас открыт не Gemini.")
-            context.close()
+            browser.close()
             return 2
+
         state = _read_state()
         state["chat_url"] = url
+        state["cdp_endpoint"] = endpoint
         _write_state(state)
         print(f"Чат сохранён: {url}")
-        context.close()
+        browser.close()
     return 0
 
 
-def test_chat(message: str) -> int:
+def test_chat(message: str, endpoint: str | None = None) -> int:
     state = _read_state()
     chat_url = str(state.get("chat_url") or "").strip()
     if not chat_url:
         print("Сначала запусти: python -m video_ai.gemini_browser setup")
         return 2
 
+    endpoint = endpoint or str(state.get("cdp_endpoint") or DEFAULT_CDP_ENDPOINT)
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="chrome",
-            headless=False,
-            viewport=None,
-        )
-        page = context.pages[0] if context.pages else context.new_page()
+        try:
+            browser, context, page = _connect_existing_chrome(p, endpoint)
+        except RuntimeError as exc:
+            print(exc)
+            return 3
+
         page.goto(chat_url, wait_until="domcontentloaded")
         try:
             answer = send_message(page, message)
         except PlaywrightTimeoutError as exc:
             print(f"Playwright timeout: {exc}")
-            context.close()
+            browser.close()
             return 3
         except Exception as exc:
             print(f"Gemini browser bridge error: {exc}")
-            print("Интерфейс Gemini мог измениться. Окно оставлено открытым для проверки.")
-            input("Нажми Enter, чтобы закрыть браузер...")
-            context.close()
+            print("Интерфейс Gemini мог измениться. Chrome оставлен открытым для проверки.")
             return 4
 
         print("\n===== GEMINI ANSWER =====")
         print(answer)
         print("=========================\n")
-        context.close()
+        browser.close()
     return 0
 
 
@@ -193,9 +207,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Gemini website bridge for VIDEO AI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("setup", help="Login manually and save the dedicated Gemini chat URL")
+    p_setup = sub.add_parser("setup", help="Attach to an already authenticated normal Chrome and save the Gemini chat URL")
+    p_setup.add_argument("--cdp-endpoint", default=DEFAULT_CDP_ENDPOINT)
 
     p_test = sub.add_parser("test", help="Send one message to the saved Gemini chat")
+    p_test.add_argument("--cdp-endpoint", default=None)
     p_test.add_argument(
         "message",
         nargs="?",
@@ -204,8 +220,8 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "setup":
-        raise SystemExit(setup_chat())
-    raise SystemExit(test_chat(args.message))
+        raise SystemExit(setup_chat(args.cdp_endpoint))
+    raise SystemExit(test_chat(args.message, endpoint=args.cdp_endpoint))
 
 
 if __name__ == "__main__":
