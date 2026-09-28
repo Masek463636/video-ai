@@ -32,6 +32,9 @@ def render_plan(
         raise ValueError("Unknown editing style")
     _require("ffmpeg")
     _require("ffprobe")
+    if editing_style == "viral":
+        from .viral_style import apply_viral_motion
+        apply_viral_motion(plan)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     audio_duration = _probe_duration(plan.audio)
@@ -72,12 +75,12 @@ def render_plan(
                     plan,
                     clip,
                     crf=crf,
-                    editing_polish=editing_polish,
+                    editing_polish=editing_polish and editing_style != "viral",
                     reference_framing=reference_framing,
                 )
                 if reviewer is not None:
                     reviewer.scene(scene, plan, end-start, clip, index,
-                                   reference_framing=reference_framing, editing_polish=editing_polish)
+                                   reference_framing=reference_framing, editing_polish=editing_polish and editing_style != "viral")
                 clips.append(clip)
 
             concat_file = root / "concat.txt"
@@ -111,13 +114,10 @@ def render_plan(
             )
 
         elif editing_style == "viral":
-            from .viral_fx import place_viral_overlays
-
-            overlays = place_viral_overlays(
-                overlays or [],
-                audio_duration,
-                spans=[(start, end) for _, start, end in spans],
-            )
+            from .viral_montage import compose_meme_shots, emoji_overlays
+            base, meme_shots = compose_meme_shots(base, overlays or [], plan, root, audio_duration, crf=crf)
+            overlays = emoji_overlays(overlays or [], audio_duration, meme_shots,
+                                     [(start, end) for _, start, end in spans])
 
             (root / "overlays.placed.json").write_text(
                 json.dumps(

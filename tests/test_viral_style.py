@@ -27,7 +27,7 @@ def test_old_style_default_is_untouched():
     assert scene.motion_preset == "slow_push"
 
 
-def test_viral_motion_has_fast_beats_and_rest():
+def test_viral_disables_all_camera_motion():
     scenes = [
         Scene(
             0, 1, "a",
@@ -66,10 +66,10 @@ def test_viral_motion_has_fast_beats_and_rest():
         scene.motion_preset
         for scene in scenes
     ] == [
-        "snap_zoom",
-        "snap_zoom",
-        "snap_zoom",
-        "micro_push",
+        "none",
+        "none",
+        "none",
+        "none",
     ]
 
 
@@ -93,7 +93,7 @@ def test_viral_keeps_meme_without_snap():
     assert scene.motion_preset == "none"
 
 
-def test_viral_locked_scene_uses_safe_push():
+def test_viral_locked_scene_is_static():
     scene = Scene(
         0,
         1,
@@ -112,7 +112,7 @@ def test_viral_locked_scene_uses_safe_push():
 
     apply_viral_motion(plan)
 
-    assert scene.motion_preset == "dramatic_push"
+    assert scene.motion_preset == "none"
 
 
 def test_snap_zoom_round_trip(tmp_path):
@@ -255,7 +255,7 @@ def test_accents_do_not_cover_reactions(tmp_path):
     assert [e['type'] for e in effects]==['sticker','text']
 
 
-def test_real_viral_vectors_render_without_fonts_or_captions(tmp_path):
+def test_viral_ignores_legacy_decorative_overlays(tmp_path):
     import subprocess,json
     import numpy as np
     from video_ai.renderer import render_plan
@@ -270,11 +270,10 @@ def test_real_viral_vectors_render_without_fonts_or_captions(tmp_path):
         raw=subprocess.check_output(['ffmpeg','-v','error','-ss',str(t),'-i',str(output),'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-'])
         pixels=np.frombuffer(raw,dtype=np.uint8).reshape(640,360,3).astype(int)
         return ((pixels[:,:,0]>pixels[:,:,1]+80)&(pixels[:,:,0]>pixels[:,:,2]+80)).sum()
-    assert red_count(.6)>100
-    assert red_count(1.7)>100
+    assert red_count(.6)==0
+    assert red_count(1.7)==0
     assert red_count(2.7)==0
-    ass=(tmp_path/'work/captions.ass').read_text()
-    assert '?' not in ass and 'Не показывать' not in ass and r'\p1' in ass
+    assert not (tmp_path/'work/captions.ass').exists()
     info=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(output)]))
     assert {s['codec_type'] for s in info['streams']}=={'audio','video'}
     assert abs(float(info['format']['duration'])-3)<.15
@@ -291,21 +290,24 @@ def test_hard_cap_one_does_not_request_more_objects(tmp_path):
     assert len(result)==1
 
 
-def test_snap_zoom_actually_moves_wide_video(tmp_path):
+def test_viral_keeps_wide_video_static(tmp_path):
     import subprocess
     from PIL import Image,ImageDraw
-    from video_ai.renderer import _render_scene
+    from video_ai.renderer import render_plan
     image=Image.new('RGB',(320,180),'white');draw=ImageDraw.Draw(image)
     for x in range(0,320,20): draw.rectangle((x,0,x+8,180),fill='black')
     still=tmp_path/'stripes.png';source=tmp_path/'source.mp4';output=tmp_path/'snap.mp4';image.save(still)
     subprocess.run(['ffmpeg','-y','-v','error','-loop','1','-i',str(still),'-t','1.5','-pix_fmt','yuv420p',str(source)],check=True)
     scene=Scene(0,1.5,'',asset=str(source),asset_kind='video',motion_preset='snap_zoom')
-    plan=ShotPlan(Path('unused.wav'),[scene],width=180,height=320,fps=24)
-    _render_scene(scene,1.5,plan,output,crf=20,editing_polish=True,reference_framing=True)
+    audio=tmp_path/'voice.wav'
+    subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i','sine=duration=1.5',str(audio)],check=True)
+    plan=ShotPlan(audio,[scene],width=180,height=320,fps=24)
+    apply_viral_motion(plan)
+    render_plan(plan,output,work_dir=tmp_path/"work",editing_style="viral",captions=False,editing_polish=True,reference_framing=True)
     def pixels(t):return subprocess.check_output(['ffmpeg','-v','error','-ss',str(t),'-i',str(output),'-frames:v','1','-vf','crop=180:100:0:0','-f','rawvideo','-pix_fmt','gray','-'])
     first,last=pixels(.05),pixels(1.4)
     assert len(first)==len(last)==18000
-    assert sum(abs(a-b) for a,b in zip(first,last))/len(first)>15
+    assert sum(abs(a-b) for a,b in zip(first,last))/len(first)<2
 
 
 def test_viral_reaction_waits_for_cut_and_leaves_before_next():

@@ -17,191 +17,22 @@ def build_viral_overlays(
     base_video=None,
 ):
 
-    from .dynamic_reactions import (
-        build_reactions,
-    )
-
-    from .shorts_fx import (
-        _build_legacy_shorts_overlays,
-    )
-
+    from .dynamic_reactions import build_reactions
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-
-    duration = max(
-        (
-            float(scene.end)
-            for scene in plan.scenes
-        ),
-        default=0.0,
-    )
-
+    duration = max((float(s.end) for s in plan.scenes), default=0.)
     if duration <= 0:
         return []
-
-    # About one foreground accent every ~2 sec maximum.
-    total_budget = (
-        max_overlays
-        if max_overlays > 0
-        else max(
-            6,
-            min(
-                18,
-                int(round(duration / 2.0)),
-            ),
-        )
-    )
-
-    # ---------------------------------------------------------
-    # 1. VERIFIED REACTIONS
-    # ---------------------------------------------------------
-
-    reaction_budget = max(
-        1,
-        min(
-            total_budget,
-            int(round(total_budget * .40)),
-        ),
-    )
-
-    reactions = build_reactions(
-        plan,
-        out / "reactions",
-        max_overlays=reaction_budget,
-        use_gemini=use_gemini,
-        sticker_dir=sticker_dir,
-    )
-
-    # ---------------------------------------------------------
-    # 2. LITERAL PNG / NUMBER CALLOUTS
-    # ---------------------------------------------------------
-
-    object_budget = max(
-        0,
-        min(
-            total_budget - len(reactions),
-            int(round(total_budget * .30)),
-        ),
-    )
-
-    objects = []
-
-    if object_budget > 0:
-
-        objects = _build_legacy_shorts_overlays(
-            plan,
-            out / "objects",
-            max_overlays=object_budget,
-            use_gemini=use_gemini,
-            sticker_dir=None,
-        )
-
-        objects = [
-            item
-            for item in objects
-            if item.get("type")
-            in {
-                "png",
-                "png_text",
-                "text",
-            }
-        ]
-
-    used_scenes = {
-        int(item["scene"])
-        for item in [
-            *reactions,
-            *objects,
-        ]
-        if (
-            isinstance(item, dict)
-            and type(item.get("scene")) is int
-        )
-    }
-
-    # ---------------------------------------------------------
-    # 3. FRAME-AWARE ARROWS / CIRCLES
-    # ---------------------------------------------------------
-
-    attention_budget = max(
-        0,
-        total_budget
-        - len(reactions)
-        - len(objects),
-    )
-
-    attention = _attention_accents(
-        plan,
-        out / "attention",
-        base_video=base_video,
-        budget=min(
-            7,
-            attention_budget,
-        ),
-        use_gemini=use_gemini,
-        avoid_scenes=used_scenes,
-    )
-
-    combined = [
-        *reactions,
-        *objects,
-        *attention,
-    ]
-
-    from .renderer import _visual_spans
-    combined = pace_viral_accents(combined, [(a, b) for _, a, b in _visual_spans(plan, duration)])
-
-    combined.sort(
-        key=lambda item: (
-            float(item.get("start", 0.0)),
-            int(item.get("scene", 10**6)),
-        )
-    )
-
-    combined = combined[:total_budget]
-
-    report = {
-        "style": "viral",
-        "budget": total_budget,
-        "reactions": len(reactions),
-        "objects": len(objects),
-        "attention": len(attention),
-        "overlays": combined,
-    }
-
-    (out / "viral_overlays.json").write_text(
-        json.dumps(
-            report,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    # Keep the familiar filename too.
-    (out / "overlays.json").write_text(
-        json.dumps(
-            {
-                "status": "planned",
-                "overlays": combined,
-                "effects": combined,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    print(
-        "[viral] "
-        f"overlays={len(combined)} "
-        f"reactions={len(reactions)} "
-        f"objects={len(objects)} "
-        f"attention={len(attention)}",
-        flush=True,
-    )
-
-    return combined
+    budget = max_overlays if max_overlays > 0 else max(4, min(14, round(duration / 2.5)))
+    # Preserve the existing asset retrieval and visual verification. The renderer
+    # routes memes to the primary video track and emojis to the overlay track.
+    effects = build_reactions(plan, out / "reactions", max_overlays=budget,
+        use_gemini=use_gemini, sticker_dir=sticker_dir, montage=True)
+    report = {"style":"viral", "budget":budget, "overlays":effects,
+              "effects":effects, "mode":"meme_shots_and_emoji_overlays"}
+    for name in ("viral_overlays.json", "overlays.json"):
+        (out / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return effects
 
 
 def _attention_accents(
