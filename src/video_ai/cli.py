@@ -485,6 +485,11 @@ def main() -> None:
         "--viral-style",
         action="store_true",
     )
+    p_create.add_argument(
+        "--style5",
+        action="store_true",
+        help="Style 5 material brain: use local memes as primary B-roll for abstract/hard-to-stock beats",
+    )
     p_story = sub.add_parser("story", help="Voiceover to documentary/meme compositions (opt-in second style)")
     p_story.add_argument("audio")
     p_story.add_argument("-o", "--output", required=True)
@@ -642,6 +647,7 @@ def main() -> None:
                             False,
                         )
                     ),
+                    style5=bool(getattr(args, "style5", False)),
                 )
                 grammar_rewritten = []
                 reference_rewritten = []
