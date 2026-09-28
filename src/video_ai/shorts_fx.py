@@ -45,7 +45,8 @@ def build_shorts_overlays(
         max_overlays=max_overlays,
         use_gemini=use_gemini,
         sticker_dir=sticker_dir,
-        montage=(editing_style == "style5"),
+        montage=False,
+        emoji_only=(editing_style == "style5"),
     ) if editing_style in {"dynamic", "style5"} else build_reactions(
         plan,
         out_dir,
