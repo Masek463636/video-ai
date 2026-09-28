@@ -33,6 +33,10 @@ class GeminiBrowserClient(GeminiClient):
         url = str(state.get("chat_url") or "").strip()
         return bool(url and "gemini.google.com/app/" in url)
 
+    @property
+    def available(self) -> bool:
+        return self.browser_ready or super().available
+
     def _browser_json(self, parts: list[dict[str, Any]]) -> Any:
         if sync_playwright is None:
             raise RuntimeError("Playwright is not installed")
