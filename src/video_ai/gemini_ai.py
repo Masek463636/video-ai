@@ -725,6 +725,17 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
 
 
 def get_gemini_client() -> GeminiClient | None:
+    provider = os.getenv("VIDEO_AI_AI_PROVIDER", "gemini").strip().lower()
+    if provider == "qwen":
+        try:
+            from .qwen_ai import get_qwen_client
+            client = get_qwen_client()
+            if client is not None:
+                return client
+        except Exception as exc:
+            print(f"[qwen] provider init failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
     client = GeminiClient()
     return client if client.available else None
 
