@@ -108,7 +108,7 @@ class QwenClient(GeminiClient):
         preferred = (model or os.getenv("QWEN_MODEL", "")).strip()
         fallback = os.getenv(
             "QWEN_FALLBACK_MODEL",
-            "qwen/qwen3-vl-235b-a22b-thinking:free",
+            "qwen/qwen3.6-plus:free",
         ).strip()
         candidates = [preferred or "qwen/qwen3.8-27b:free", fallback]
         self.models = []
