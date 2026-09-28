@@ -379,13 +379,37 @@ def materialize_assets(
         )
         print(f"{prefix} candidates={len(ranked)}" + (" | deep visual CLIP ranked" if semantic else ""), flush=True)
 
-        chosen, target, search_used, judge_info, rejected, local_rejected, checked = _select_best_candidate(
-            scene, ranked[max(0, rank_offset):], out_dir, index=index, gemini=gemini,
-            max_checks=5, prefix=prefix, match_level="exact",
-        )
+        if scene.source_mode == "meme_library":
+            # Style 5 meme scenes are a true two-stage workflow:
+            # director decided MEME -> engine searches local/Giphy -> Gemini compares
+            # the actual shortlist ONCE. Never dump the whole pack and never spend
+            # one browser request per candidate.
+            meme_ranked = _rank_meme_shortlist_with_gemini(
+                scene,
+                ranked[max(0, rank_offset):],
+                out_dir,
+                index=index,
+                gemini=gemini,
+                prefix=prefix,
+            )
+            chosen, target, search_used, judge_info, rejected, local_rejected, checked = _select_best_candidate(
+                scene,
+                meme_ranked,
+                out_dir,
+                index=index,
+                gemini=None,
+                max_checks=3,
+                prefix=prefix,
+                match_level="exact",
+            )
+        else:
+            chosen, target, search_used, judge_info, rejected, local_rejected, checked = _select_best_candidate(
+                scene, ranked[max(0, rank_offset):], out_dir, index=index, gemini=gemini,
+                max_checks=5, prefix=prefix, match_level="exact",
+            )
 
         recovery_used = False
-        if chosen is None and not scene.semantic_lock:
+        if chosen is None and not scene.semantic_lock and scene.source_mode != "meme_library":
             previous_queries = list(variants)
             rewritten: list[str] = []
             if gemini is not None:
@@ -457,7 +481,7 @@ def materialize_assets(
         # Final ladder level: broad contextual B-roll. The exact gesture/object
         # no longer needs to be present, but the footage must honestly support
         # the narration topic and remain usable.
-        if chosen is None and not scene.semantic_lock:
+        if chosen is None and not scene.semantic_lock and scene.source_mode != "meme_library":
             previous_queries = list(_query_variants(scene))
             context_queries: list[str] = []
             if gemini is not None:
@@ -1274,6 +1298,7 @@ def _build_ranked_pool(
                     0, 0, meme.path.stat().st_size, meme.kind, "local user library",
                     source="local_meme", local_path=str(meme.path.resolve()),
                     score=30.0 + meme.score + exact,
+                    description=meme.description or scene.visual_description or meme_query,
                 ),
                 "local meme library",
             )
@@ -1369,6 +1394,165 @@ def _build_recovery_pool(
         _semantic_rerank(scene, ranked, top_k=min(4, len(ranked)))
         ranked.sort(key=lambda item: item[0].score, reverse=True)
     return ranked
+
+
+def _rank_meme_shortlist_with_gemini(
+    scene: Scene,
+    ranked: list[tuple[AssetCandidate, str]],
+    out_dir: Path,
+    *,
+    index: int,
+    gemini,
+    prefix: str,
+) -> list[tuple[AssetCandidate, str]]:
+    """Show Gemini a small balanced meme shortlist, then rank by its choice.
+
+    One representative preview per candidate keeps Gemini Web safely below its
+    attachment limit. Local and Giphy candidates are interleaved so the huge
+    local pack cannot starve internet options merely because of source bonuses.
+    """
+    if not ranked:
+        return []
+
+    local = [item for item in ranked if item[0].source == "local_meme"]
+    web = [item for item in ranked if item[0].source == "giphy_meme"]
+    other = [item for item in ranked if item[0].source not in {"local_meme", "giphy_meme"}]
+
+    shortlist: list[tuple[AssetCandidate, str]] = []
+    for pos in range(max(len(local), len(web), len(other), 1)):
+        for group in (local, web, other):
+            if pos < len(group):
+                shortlist.append(group[pos])
+                if len(shortlist) >= 6:
+                    break
+        if len(shortlist) >= 6:
+            break
+    if not shortlist:
+        return []
+
+    # If Gemini is unavailable, keep deterministic local ranking; do not turn a
+    # meme beat into unrelated stock footage.
+    if gemini is None:
+        print(f"{prefix} meme shortlist: Gemini unavailable; using local ranking", flush=True)
+        return shortlist[:3]
+
+    preview_root = out_dir / f"_meme_previews_{index:03d}"
+    preview_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    by_id: dict[int, tuple[AssetCandidate, str]] = {}
+    temp_assets: list[Path] = []
+
+    try:
+        for label, (candidate, search) in enumerate(shortlist, start=1):
+            suffix = _suffix(candidate)
+            asset = preview_root / f"candidate_{label:02d}{suffix}"
+            frame = preview_root / f"candidate_{label:02d}.jpg"
+            try:
+                if candidate.local_path:
+                    shutil.copy2(candidate.local_path, asset)
+                else:
+                    _download(candidate.preview_url or candidate.download_url, asset)
+                temp_assets.append(asset)
+                if candidate.kind == "image":
+                    command = [
+                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", str(asset), "-frames:v", "1",
+                        "-vf", "scale=512:512:force_original_aspect_ratio=decrease",
+                        str(frame),
+                    ]
+                else:
+                    duration = _safe_media_duration(asset)
+                    seek = max(0.0, duration * 0.5 if duration > 0 else 0.7)
+                    command = [
+                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{seek:.3f}", "-i", str(asset), "-frames:v", "1",
+                        "-vf", "scale=512:512:force_original_aspect_ratio=decrease",
+                        str(frame),
+                    ]
+                completed = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=20,
+                    check=False,
+                )
+                if completed.returncode != 0 or not frame.exists() or frame.stat().st_size < 512:
+                    continue
+            except Exception:
+                continue
+
+            rows.append({
+                "index": label,
+                "preview_path": str(frame),
+                "title": candidate.title,
+                "source": candidate.source,
+                "search": search,
+            })
+            by_id[label] = (candidate, search)
+
+        if not rows:
+            print(f"{prefix} meme shortlist: no decodable previews; using local ranking", flush=True)
+            return shortlist[:3]
+
+        print(
+            f"{prefix} meme shortlist -> Gemini: {len(rows)} actual candidate preview(s)",
+            flush=True,
+        )
+        choices = gemini.choose_visual_candidates(scene, rows, mode="exact")
+        if not choices:
+            print(f"{prefix} meme shortlist: Gemini returned no ranking; using local ranking", flush=True)
+            return shortlist[:3]
+
+        ordered: list[tuple[AssetCandidate, str]] = []
+        seen: set[str] = set()
+        for choice in choices:
+            try:
+                label = int(choice.get("index", -1))
+                fit = int(choice.get("fit", 0))
+            except (TypeError, ValueError):
+                continue
+            pair = by_id.get(label)
+            if pair is None or fit < 35:
+                continue
+            key = pair[0].download_url or pair[0].local_path or pair[0].title
+            if key in seen:
+                continue
+            seen.add(key)
+            pair[0].score = float(fit)
+            pair[0].semantic_score = fit / 100.0
+            ordered.append(pair)
+
+        if ordered:
+            print(
+                f"{prefix} meme Gemini ranking: "
+                + ", ".join(f"{item[0].title[:28]}:{int(item[0].score)}" for item in ordered[:3]),
+                flush=True,
+            )
+            return ordered[:3]
+
+        print(f"{prefix} meme shortlist: all Gemini fits <35; no meme accepted", flush=True)
+        return []
+    finally:
+        shutil.rmtree(preview_root, ignore_errors=True)
+
+
+def _safe_media_duration(path: Path) -> float:
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return float((completed.stdout or "0").strip() or 0.0)
+    except Exception:
+        return 0.0
 
 
 def _select_best_candidate(
