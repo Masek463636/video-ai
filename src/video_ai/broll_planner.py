@@ -67,6 +67,14 @@ def build_donor_shot_plan(
         min_shot_seconds = 0.85
         max_gap_seconds = 3.50
 
+    meme_rule = (
+        "- For Style 5, use MEME whenever it is a better semantic match than stock. "
+        "There is no meme quota; do not force memes, but do not artificially limit them either. "
+        "Never repeat the same meme."
+        if style5
+        else "- Use MEME rarely: maximum 1 meme per ~15-20s, never repeat the same meme."
+    )
+
     prompt = f"""
 You are a senior short-form video editor planning the COMPLETE visual timeline
 for a vertical YouTube Short. There is only voiceover underneath: every moment
@@ -103,7 +111,7 @@ EDITING RULES:
 - Prefer VIDEO for actions, reactions, environments and modern generic concepts.
 - Prefer IMAGE only for exact historical portraits/maps/documents, still artwork,
   or when motion footage would be dishonest.
-- Use MEME rarely: maximum 1 meme per ~15-20s, never repeat the same meme.
+{meme_rule}
 - Search queries must describe VISIBLE ACTION/SUBJECT, not abstract narration.
 - Show what is HAPPENING, not merely the noun that was spoken.
 - Build cause -> action -> consequence across connected beats. Resolve who acts
