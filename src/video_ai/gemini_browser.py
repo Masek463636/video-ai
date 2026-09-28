@@ -115,11 +115,68 @@ def _last_response_text(page) -> str:
             continue
 
     return newest
+
+
+def _gemini_web_error_text(page) -> str:
+    """Return a visible Gemini web error such as 'Something went wrong (11555)'."""
+    patterns = (
+        r"что-то пошло не так",
+        r"что то пошло не так",
+        r"повторите попытку",
+        r"попробуйте ещё раз",
+        r"попробуйте еще раз",
+        r"something went wrong",
+        r"try again",
+    )
+    try:
+        text = page.locator("body").inner_text(timeout=2500)
+    except Exception:
+        return ""
+    lowered = text.lower()
+    if not any(re.search(pattern, lowered, re.I) for pattern in patterns):
+        return ""
+    # Keep the relevant line and a nearby numeric code if Gemini shows one.
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        low = line.lower()
+        if any(re.search(pattern, low, re.I) for pattern in patterns):
+            nearby = " | ".join(lines[index:index + 3])
+            code = re.search(r"\(?\b\d{3,6}\b\)?", nearby)
+            return (nearby + (f" [code={code.group(0)}]" if code else ""))[:500]
+    return "Gemini Web reported an unknown error"
+
+
+def _retry_failed_response(page) -> bool:
+    """Click Gemini's Retry/Try again button once if the web UI exposes it."""
+    names = (
+        r"^retry$",
+        r"try again",
+        r"повторить",
+        r"повторите",
+        r"попробовать снова",
+        r"попробуйте снова",
+    )
+    for pattern in names:
+        try:
+            button = page.get_by_role("button", name=re.compile(pattern, re.I))
+            if button.count():
+                candidate = button.last
+                if candidate.is_visible():
+                    candidate.click(force=True)
+                    page.wait_for_timeout(800)
+                    return True
+        except Exception:
+            continue
+    return False
 def wait_for_answer(page, before: str, timeout_s: float = 120.0) -> str:
     deadline = time.monotonic() + timeout_s
     stable_text = ""
     stable_since = time.monotonic()
     while time.monotonic() < deadline:
+        web_error = _gemini_web_error_text(page)
+        if web_error:
+            raise RuntimeError("Gemini Web error: " + web_error)
+
         current = _last_response_text(page)
         if current and current.strip() != before.strip():
             if current != stable_text:
@@ -341,7 +398,17 @@ def send_message(
         page.keyboard.insert_text(message)
 
     _click_send(page)
-    return wait_for_answer(page, before)
+    try:
+        return wait_for_answer(page, before)
+    except RuntimeError as exc:
+        if "Gemini Web error:" not in str(exc):
+            raise
+        print(f"[gemini-browser] {exc}", flush=True)
+        print("[gemini-browser] waiting 3s and trying Gemini's Retry button once", flush=True)
+        page.wait_for_timeout(3000)
+        if not _retry_failed_response(page):
+            raise
+        return wait_for_answer(page, before)
 
 
 def _connect_existing_chrome(p, endpoint: str):
