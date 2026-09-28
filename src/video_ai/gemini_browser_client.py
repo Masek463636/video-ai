@@ -95,8 +95,9 @@ class GeminiBrowserClient(GeminiClient):
             return self._browser_json(parts)
         except Exception as exc:
             self.last_error = str(exc)
-            if os.getenv("VIDEO_AI_BROWSER_STRICT", "0") == "1":
-                raise
+            allow_api_fallback = os.getenv("VIDEO_AI_BROWSER_ALLOW_API_FALLBACK", "0") == "1"
+            if not allow_api_fallback:
+                raise RuntimeError(f"Gemini browser request failed: {exc}") from exc
             print(f"[gemini-browser] browser request fallback to API: {exc}", flush=True)
             return super()._generate_json(parts, temperature=temperature)
 
