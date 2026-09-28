@@ -11,7 +11,7 @@ from typing import Any
 from .gemini_ai import GeminiClient, _parse_json_text
 
 
-_DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 def _parts_to_openai_content(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -91,10 +91,9 @@ class QwenClient(GeminiClient):
     """Drop-in replacement for GeminiClient used by Premium v2.
 
     The high-level editing helpers live on GeminiClient; this subclass keeps the
-    same interface but sends every JSON/vision request to Alibaba Model Studio's
-    OpenAI-compatible Qwen endpoint. That lets the existing Premium v2 pipeline
-    stay unchanged while the AI provider can be swapped with one environment
-    flag.
+    same interface but sends every JSON/vision request to Qwen through
+    OpenRouter's OpenAI-compatible endpoint. The exact Premium v2 editing
+    pipeline stays unchanged; only the AI provider/model is swapped.
     """
 
     provider_name = "qwen"
@@ -102,13 +101,16 @@ class QwenClient(GeminiClient):
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self.api_key = (
             api_key
+            or os.getenv("OPENROUTER_API_KEY", "")
             or os.getenv("QWEN_API_KEY", "")
-            or os.getenv("DASHSCOPE_API_KEY", "")
         ).strip()
 
         preferred = (model or os.getenv("QWEN_MODEL", "")).strip()
-        fallback = os.getenv("QWEN_FALLBACK_MODEL", "qwen3-vl-flash").strip()
-        candidates = [preferred or "qwen3.5-flash", fallback]
+        fallback = os.getenv(
+            "QWEN_FALLBACK_MODEL",
+            "qwen/qwen3.8-omni-flash",
+        ).strip()
+        candidates = [preferred or "qwen/qwen3.8-flash", fallback]
         self.models = []
         for name in candidates:
             if name and name not in self.models:
@@ -124,7 +126,7 @@ class QwenClient(GeminiClient):
     def _generate_json(self, parts: list[dict[str, Any]], *, temperature: float) -> Any:
         if not self.api_key:
             raise RuntimeError(
-                "QWEN_API_KEY (or DASHSCOPE_API_KEY) is not configured"
+                "OPENROUTER_API_KEY is not configured"
             )
 
         content = _parts_to_openai_content(parts)
@@ -136,9 +138,7 @@ class QwenClient(GeminiClient):
             "temperature": temperature,
             "max_tokens": 8192,
             "stream": False,
-            # Fast editor mode: we need structured decisions, not a long hidden
-            # reasoning pass on every scene/candidate batch.
-            "enable_thinking": False,
+            "response_format": {"type": "json_object"},
         }
 
         errors: list[str] = []
@@ -162,6 +162,8 @@ class QwenClient(GeminiClient):
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {self.api_key}",
                         "User-Agent": "video-ai/2.0.0",
+                        "HTTP-Referer": "http://127.0.0.1",
+                        "X-OpenRouter-Title": "Video AI Studio",
                     },
                 )
                 self.request_count += 1
