@@ -36,8 +36,7 @@ def build_donor_shot_plan(
     # Viral reactions are a separate timed foreground layer, not random base shots.
     meme_names = [] if (viral_style or style5) else _meme_names(meme_dir)
     meme_catalog_prompt = (
-        "LOCAL MEME LIBRARY: available to the downstream material picker. "
-        "Do not choose filenames during this planning pass."
+        ""
         if style5
         else (
             "AVAILABLE LOCAL MEMES (exact filenames; optional):\n"
@@ -83,6 +82,19 @@ def build_donor_shot_plan(
         if style5
         else "- Use MEME rarely: maximum 1 meme per ~15-20s, never repeat the same meme."
     )
+    scene_count_rule = (
+        "Choose the number of visual scenes yourself from the story's meaning and rhythm. "
+        "There is NO target scene count. Cut only when the visual idea, action, reaction, setup, "
+        "or punchline genuinely changes; do not create filler cuts just to increase pace."
+        if style5
+        else f"{scene_count_rule}"
+    )
+    style5_beat_rule = (
+        "- You control the scene boundaries. Avoid useless micro-scenes, but keep a scene longer "
+        "when one continuous visual idea genuinely covers the narration."
+        if style5
+        else beat_rule
+    )
 
     prompt = f"""
 You are a senior short-form video editor planning the COMPLETE visual timeline
@@ -115,7 +127,7 @@ Return ONLY JSON:
 EDITING RULES:
 - Plan the WHOLE story before choosing any beat.
 - Cover the transcript from first word to last word in chronological order.
-{beat_rule}
+{style5_beat_rule}
 - Prefer VIDEO for actions, reactions, environments and modern generic concepts.
 - Prefer IMAGE only for exact historical portraits/maps/documents, still artwork,
   or when motion footage would be dishonest.
@@ -190,12 +202,16 @@ EDITING RULES:
         raise RuntimeError("Gemini donor planner returned too few beats")
 
     planned = _sanitize_beats(raw_beats, len(words))
-    starts = _normalize_start_indices(
-        planned,
-        transcript,
-        target_seconds=target_seconds,
-        min_shot_seconds=min_shot_seconds,
-        max_gap_seconds=max_gap_seconds,
+    starts = (
+        _style5_start_indices(planned, len(words))
+        if style5
+        else _normalize_start_indices(
+            planned,
+            transcript,
+            target_seconds=target_seconds,
+            min_shot_seconds=min_shot_seconds,
+            max_gap_seconds=max_gap_seconds,
+        )
     )
     if len(starts) < 2:
         raise RuntimeError("Donor planner could not build a useful timeline")
@@ -314,6 +330,21 @@ def _sanitize_beats(raw_beats: list[object], word_count: int) -> list[dict]:
         out.append(item)
     out.sort(key=lambda item: int(item["start_idx"]))
     return out
+
+
+def _style5_start_indices(planned: list[dict], word_count: int) -> list[int]:
+    """Preserve Gemini's Style 5 cut count; only repair invalid coverage at word 0."""
+    starts = sorted({
+        int(item["start_idx"])
+        for item in planned
+        if 0 <= int(item["start_idx"]) < word_count
+    })
+    if not starts:
+        return []
+    if starts[0] != 0:
+        # Repair coverage without inventing an extra scene/cut.
+        starts[0] = 0
+    return sorted(set(starts))
 
 
 def _normalize_start_indices(
