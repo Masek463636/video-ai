@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,7 +89,15 @@ def _semantic_diversity_pass(plan, work: Path, args) -> list[int]:
     return repairs
 
 
+def _activate_qwen_provider() -> None:
+    # This CLI is the exact "Viral Premium v2 - human-style director" mode.
+    # Keep every editing algorithm unchanged and swap only the AI brain.
+    os.environ["VIDEO_AI_AI_PROVIDER"] = "qwen"
+    print("[premium-v2] AI provider: Qwen", flush=True)
+
+
 def _base(args) -> None:
+    _activate_qwen_provider()
     work = Path(args.work_dir)
     work.mkdir(parents=True, exist_ok=True)
 
@@ -166,6 +175,7 @@ def _base(args) -> None:
 
 
 def _final(args) -> None:
+    _activate_qwen_provider()
     plan = load_shot_plan(args.plan)
     if args.transcript:
         attach_caption_timings(plan, load_transcript(args.transcript))
