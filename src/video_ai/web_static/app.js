@@ -64,7 +64,7 @@ async function refresh() {
       for (const job of state.jobs) {
         const row = document.createElement('div'); row.className = 'history-row';
         const button = document.createElement('button'); button.textContent = new Date(job.created*1000).toLocaleString('ru-RU');
-        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${({story:'Истории и мемы',dynamic:'Динамичный',viral:'Viral / Darwin',classic:'Классический'})[job.style || 'classic']} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
+        const sub = document.createElement('small'); sub.textContent = `${job.duration} с · ${({story:'Истории и мемы',dynamic:'Динамичный',viral:'Viral / Darwin',style5:'Стиль 5',classic:'Классический'})[job.style || 'classic']} · ${job.effects ? 'С реакциями' : 'Без реакций'}`; button.append(sub);
         button.onclick = ()=>{selectedJob=job.id; showJob(job);};
         const badge = document.createElement('span'); badge.className='badge'; badge.textContent=({done:'Готово',error:'Ошибка',running:'В работе',queued:'Запуск'})[job.status];
         row.append(button,badge);
@@ -91,6 +91,7 @@ $('style').addEventListener('change', () => {
   const story = $('style').value === 'story';
   const dynamic = $('style').value === 'dynamic';
   const viral = $('style').value === 'viral';
-  $('style-note').textContent = story ? 'Фото, видео и сравнения по смыслу. Использует папки memes и elements; первый раз разбор паков займёт больше времени.' : dynamic ? 'Крупные реакции по центру и пружинящие субтитры. На основе твоего удачного варианта Shorts.' : viral ? 'Стоки и мемы сменяют друг друга отдельными кадрами. Без зумов; смайлики — поверх видео.' : 'Знакомый монтаж, как в предыдущих роликах.';
-  $('effects-note').textContent = story ? 'Реакции и элементы из твоих паков по смыслу истории' : dynamic ? 'По смыслу примерно каждые 3–4 секунды. Сначала твои паки; Giphy — если подключён. Без текстовых плашек.' : viral ? 'Мемы — отдельными кадрами по смыслу фразы. Смайлики — короткими реакциями поверх видео.' : 'Количество реакций — по смыслу, без текстовых плашек';
+  const style5 = $('style').value === 'style5';
+  $('style-note').textContent = story ? 'Фото, видео и сравнения по смыслу. Использует папки memes и elements; первый раз разбор паков займёт больше времени.' : dynamic ? 'Крупные реакции по центру и пружинящие субтитры. На основе твоего удачного варианта Shorts.' : viral ? 'Стоки и мемы сменяют друг друга отдельными кадрами. Без зумов; смайлики — поверх видео.' : style5 ? 'Основа как у 3 стиля: динамичные субтитры и движение. Мемы больше не висят поверх — они становятся отдельными кадрами видеоряда. Поверх остаются только эмодзи.' : 'Знакомый монтаж, как в предыдущих роликах.';
+  $('effects-note').textContent = story ? 'Реакции и элементы из твоих паков по смыслу истории' : dynamic ? 'По смыслу примерно каждые 3–4 секунды. Сначала твои паки; Giphy — если подключён. Без текстовых плашек.' : viral ? 'Мемы — отдельными кадрами по смыслу фразы. Смайлики — короткими реакциями поверх видео.' : style5 ? 'Никаких мемов-картинок поверх видео. Мемы режутся прямо в основной видеоряд; foreground-вставки — только эмодзи.' : 'Количество реакций — по смыслу, без текстовых плашек';
 });
