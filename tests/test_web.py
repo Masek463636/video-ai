@@ -113,6 +113,14 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style,
         style == 'viral'
     )
 
+    assert (
+        '--style5' in commands[0]
+    ) is (
+        style == 'style5'
+    )
+    if style == 'style5':
+        assert '--meme-dir' in commands[0]
+
     assert job['style'] == style
     assert b'test-giphy-secret' not in request(url + '/api/state')[1]
     assert request(url + '/download/' + job_id) == (200, b'test-video')
