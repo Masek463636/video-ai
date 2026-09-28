@@ -86,39 +86,49 @@ def _first_visible(page, selectors: list[str], timeout_ms: int = 15000):
 
 
 def _last_response_text(page) -> str:
-    best = ""
+    """Return the newest visible Gemini answer, not the longest old answer."""
+    newest = ""
+    newest_y = -1.0
+
     for selector in RESPONSE_SELECTORS:
         try:
             locator = page.locator(selector)
             count = locator.count()
             for i in range(count):
                 item = locator.nth(i)
-                if not item.is_visible():
+                try:
+                    if not item.is_visible():
+                        continue
+                    text = (item.inner_text(timeout=3000) or "").strip()
+                    if not text:
+                        continue
+                    box = item.bounding_box()
+                    y = float(box["y"]) if box else float(i)
+                    if y >= newest_y:
+                        newest_y = y
+                        newest = text
+                except Exception:
                     continue
-                text = (item.inner_text(timeout=3000) or "").strip()
-                if len(text) > len(best):
-                    best = text
         except Exception:
             continue
-    return best
 
-
+    return newest
 def wait_for_answer(page, before: str, timeout_s: float = 120.0) -> str:
     deadline = time.monotonic() + timeout_s
     stable_text = ""
     stable_since = time.monotonic()
     while time.monotonic() < deadline:
         current = _last_response_text(page)
-        if current and current != before:
+        if current and current.strip() != before.strip():
             if current != stable_text:
                 stable_text = current
                 stable_since = time.monotonic()
-            elif time.monotonic() - stable_since >= 2.2:
+            elif time.monotonic() - stable_since >= 2.5:
                 return current
         page.wait_for_timeout(450)
-    if stable_text:
+    if stable_text and stable_text.strip() != before.strip():
         return stable_text
-    raise RuntimeError("Timed out waiting for Gemini response")
+    raise RuntimeError("Timed out waiting for a NEW Gemini response")
 
 
 def _try_set_file_input(page, paths: list[str]) -> bool:
@@ -182,6 +192,29 @@ def _attach_files(page, file_paths: list[str] | None) -> None:
             break
         except Exception:
             continue
+
+    # Russian Gemini UI often shows an exact visible menu item "Файлы".
+    try:
+        text_node = page.get_by_text("Файлы", exact=True)
+        if text_node.count():
+            candidate = text_node.last
+            # Walk up to a clickable menu/button container when possible.
+            clickable = candidate.locator(
+                "xpath=ancestor-or-self::*[self::button or @role='button' or @role='menuitem'][1]"
+            )
+            if clickable.count():
+                candidate = clickable
+            if _click_and_choose_files(page, candidate, paths):
+                return
+            try:
+                candidate.click(force=True)
+                page.wait_for_timeout(350)
+            except Exception:
+                pass
+            if _try_set_file_input(page, paths):
+                return
+    except Exception:
+        pass
 
     # The current UI may render the upload action in this dedicated wrapper.
     direct_upload_selectors = [
