@@ -57,6 +57,8 @@ def test_http_boundaries(app):
         ('dynamic', False),
         ('viral', True),
         ('viral', False),
+        ('style5', True),
+        ('style5', False),
     ],
 )
 def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style, effects):
@@ -92,10 +94,10 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style,
     assert (
         '--editing-style' in commands[1]
     ) is (
-        style in {'dynamic', 'viral'}
+        style in {'dynamic', 'viral', 'style5'}
     )
 
-    if style in {'dynamic', 'viral'}:
+    if style in {'dynamic', 'viral', 'style5'}:
         assert (
             commands[1][
                 commands[1].index(
