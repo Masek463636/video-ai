@@ -248,7 +248,34 @@ def make_handler(studio):
         def do_POST(self):
             if not self.allowed(mutation=True):
                 return
-            if self.path != '/api/jobs':
+            path = urlsplit(self.path).path
+            if path == '/api/chat/conversations':
+                try:
+                    length = int(self.headers.get('Content-Length', '0'))
+                    raw = self.rfile.read(min(length, 65536)) if length > 0 else b'{}'
+                    payload = json.loads(raw.decode('utf-8') or '{}')
+                    job_id = str(payload.get('job_id') or '').strip() or None
+                    if job_id and job_id not in studio.jobs:
+                        job_id = None
+                    self.send_data(studio.editor_chat.create_conversation(job_id=job_id), 201)
+                except (ValueError, json.JSONDecodeError) as error:
+                    self.send_data({'error': str(error)}, 400)
+                return
+            if path == '/api/chat/send':
+                try:
+                    length = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < length <= 65536:
+                        raise ValueError('Некорректный размер сообщения')
+                    payload = json.loads(self.rfile.read(length).decode('utf-8'))
+                    conversation_id = str(payload.get('conversation_id') or '').strip()
+                    message = str(payload.get('message') or '').strip()
+                    job_id = str(payload.get('job_id') or '').strip() or None
+                    result = studio.editor_chat.send(conversation_id, message, job_context=studio.chat_job_context(job_id))
+                    self.send_data(result)
+                except (ValueError, json.JSONDecodeError, RuntimeError) as error:
+                    self.send_data({'error': str(error)}, 400)
+                return
+            if path != '/api/jobs':
                 self.send_data({'error': 'Не найдено'}, 404)
                 return
             try:
