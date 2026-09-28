@@ -69,6 +69,12 @@ class Studio:
                 'dynamic',
             ])
 
+        elif job.get('style') == 'style5':
+            steps[1][1].extend([
+                '--editing-style',
+                'style5',
+            ])
+
         elif job.get('style') == 'viral':
 
             steps[0][1].extend([
@@ -229,6 +235,7 @@ def make_handler(studio):
                 'story',
                 'dynamic',
                 'viral',
+                'style5',
             ):
                 self.send_data({'error': 'Неизвестный стиль'}, 400)
                 return
