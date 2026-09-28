@@ -106,11 +106,24 @@ class QwenClient(GeminiClient):
         ).strip()
 
         preferred = (model or os.getenv("QWEN_MODEL", "")).strip()
-        fallback = os.getenv(
+        fallback_1 = os.getenv(
             "QWEN_FALLBACK_MODEL",
-            "qwen/qwen3.6-plus:free",
+            "qwen/qwen2.5-vl-32b-instruct:free",
         ).strip()
-        candidates = [preferred or "qwen/qwen3.8-27b:free", fallback]
+        fallback_2 = os.getenv(
+            "QWEN_FALLBACK_MODEL_2",
+            "qwen/qwen2.5-vl-72b-instruct:free",
+        ).strip()
+        fallback_3 = os.getenv(
+            "QWEN_FALLBACK_MODEL_3",
+            "qwen/qwen-2.5-vl-7b-instruct:free",
+        ).strip()
+        candidates = [
+            preferred or "qwen/qwen3.8-27b:free",
+            fallback_1,
+            fallback_2,
+            fallback_3,
+        ]
         self.models = []
         for name in candidates:
             if name and name not in self.models:
