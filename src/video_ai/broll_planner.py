@@ -96,6 +96,24 @@ def build_donor_shot_plan(
         else beat_rule
     )
 
+    schema_meme_field = (
+        ""
+        if style5
+        else ',\n      "meme_filename": ""'
+    )
+    query_schema = (
+        "2-6 English search words describing the visible action/reaction"
+        if style5
+        else "2-5 concrete English stock-search words"
+    )
+    media_preference_rule = (
+        "- Choose VIDEO for literal physical actions/environments that stock can show specifically. "
+        "Choose MEME for ironic/social/internal reactions or punchlines when stock would be generic or misleading. "
+        "Choose IMAGE only for honest still-only material."
+        if style5
+        else "- Prefer VIDEO for actions, reactions, environments and modern generic concepts."
+    )
+
     prompt = f"""
 You are a senior short-form video editor planning the COMPLETE visual timeline
 for a vertical YouTube Short. There is only voiceover underneath: every moment
@@ -115,11 +133,10 @@ Return ONLY JSON:
       "start_idx": 0,
       "end_idx": 8,
       "kind": "video|image|meme",
-      "query": "2-5 concrete English stock-search words",
+      "query": "{query_schema}",
       "alternatives": ["different concrete query", "another different query"],
       "visual_description": "what the viewer should literally see",
-      "reason": "why this visual fits this exact narration beat",
-      "meme_filename": ""
+      "reason": "why this visual fits this exact narration beat"{schema_meme_field}
     }}
   ]
 }}
@@ -128,7 +145,7 @@ EDITING RULES:
 - Plan the WHOLE story before choosing any beat.
 - Cover the transcript from first word to last word in chronological order.
 {style5_beat_rule}
-- Prefer VIDEO for actions, reactions, environments and modern generic concepts.
+{media_preference_rule}
 - Prefer IMAGE only for exact historical portraits/maps/documents, still artwork,
   or when motion footage would be dishonest.
 {meme_rule}
@@ -188,17 +205,17 @@ EDITING RULES:
             "- Do NOT use a meme just because it is funny. Use it when it is a BETTER semantic match than stock.\n"
             "- There is NO meme quota. Clean stock-only stretches are good. Several meme beats are allowed "
             "when several consecutive phrases genuinely cannot be represented precisely with stock.\n"
-            "- THIS PASS DECIDES ONLY WHETHER A BEAT SHOULD BE MEME OR STOCK. Do not choose a meme file here. "
-            "For every Style 5 MEME beat, always leave meme_filename empty.\n"
-            "- After this plan is returned, the material engine separately searches the local meme library and Giphy, "
-            "then Gemini visually judges the actual candidates.\n"
+            "- THIS PASS DECIDES ONLY THE EDIT: scene boundaries, media type, and what should be visible. "
+            "Do not choose or name any media file.\n"
+            "- After this plan is returned, the material engine will search real candidates and ask you to visually rank them.\n"
             "- For MEME beats, query must be a concise English reaction/search phrase suitable for meme search, and "
             "visual_description must describe the exact emotion/joke that should be visible.\n"
             "- Emoji/sticker reactions are handled later and are NOT part of this base-track decision."
         )
     data = client._generate_json([{"text": prompt}], temperature=0.08)
     raw_beats = data.get("beats", []) if isinstance(data, dict) else []
-    if not isinstance(raw_beats, list) or len(raw_beats) < 2:
+    minimum_beats = 1 if style5 else 2
+    if not isinstance(raw_beats, list) or len(raw_beats) < minimum_beats:
         raise RuntimeError("Gemini donor planner returned too few beats")
 
     planned = _sanitize_beats(raw_beats, len(words))
@@ -213,7 +230,7 @@ EDITING RULES:
             max_gap_seconds=max_gap_seconds,
         )
     )
-    if len(starts) < 2:
+    if len(starts) < minimum_beats:
         raise RuntimeError("Donor planner could not build a useful timeline")
 
     by_start = {int(item["start_idx"]): item for item in planned}
