@@ -157,7 +157,6 @@ def setup_chat(endpoint: str = DEFAULT_CDP_ENDPOINT) -> int:
         url = page.url
         if "gemini.google.com" not in url:
             print("Ошибка: сейчас открыт не Gemini.")
-            browser.close()
             return 2
 
         if "gemini.google.com/app/" not in url:
@@ -174,12 +173,10 @@ def setup_chat(endpoint: str = DEFAULT_CDP_ENDPOINT) -> int:
                 url = page.url
             except Exception as exc:
                 print(f"Не удалось закрепить чат: {exc}")
-                browser.close()
                 return 4
 
         if "gemini.google.com/app/" not in url:
             print(f"Не удалось получить URL конкретного чата: {url}")
-            browser.close()
             return 5
 
         state = _read_state()
@@ -187,7 +184,6 @@ def setup_chat(endpoint: str = DEFAULT_CDP_ENDPOINT) -> int:
         state["cdp_endpoint"] = endpoint
         _write_state(state)
         print(f"Чат сохранён: {url}")
-        browser.close()
     return 0
 
 
@@ -211,7 +207,6 @@ def test_chat(message: str, endpoint: str | None = None) -> int:
             answer = send_message(page, message)
         except PlaywrightTimeoutError as exc:
             print(f"Playwright timeout: {exc}")
-            browser.close()
             return 3
         except Exception as exc:
             print(f"Gemini browser bridge error: {exc}")
@@ -221,7 +216,6 @@ def test_chat(message: str, endpoint: str | None = None) -> int:
         print("\n===== GEMINI ANSWER =====")
         print(answer)
         print("=========================\n")
-        browser.close()
     return 0
 
 
