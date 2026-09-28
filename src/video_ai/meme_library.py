@@ -8,8 +8,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".gif"}
+_IMAGE_EXTS = {".jpg", ".jpeg", ".jfif", ".png", ".webp"}
 _TOKEN_RE = re.compile(r"[\w-]+", flags=re.UNICODE)
 
 
