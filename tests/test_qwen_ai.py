@@ -25,7 +25,7 @@ def test_provider_switch_returns_qwen(monkeypatch):
 
 def test_qwen_json_request_uses_fast_non_thinking_mode(monkeypatch):
     monkeypatch.setenv("QWEN_API_KEY", "test-qwen")
-    monkeypatch.setenv("QWEN_MODEL", "qwen3.5-flash")
+    monkeypatch.setenv("QWEN_MODEL", "qwen/qwen3.8-27b:free")
     captured = {}
 
     class Response:
@@ -63,7 +63,7 @@ def test_qwen_json_request_uses_fast_non_thinking_mode(monkeypatch):
     result = client._generate_json([{"text": "return json"}], temperature=0.01)
 
     assert result == {"ok": True}
-    assert captured["body"]["model"] == "qwen3.5-flash"
+    assert captured["body"]["model"] == "qwen/qwen3.8-27b:free"
     assert captured["body"]["enable_thinking"] is False
     assert captured["body"]["stream"] is False
     assert captured["authorization"] == "Bearer test-qwen"
