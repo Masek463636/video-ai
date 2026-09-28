@@ -91,6 +91,17 @@ class Studio:
             if not job['effects']:
                 command.append('--no-effects')
             steps = [('Истории и мемы: подготовка материалов', command)]
+        if job.get('style', 'classic') == 'classic':
+            # Frozen original engine: later styles cannot alter classic retrieval or rendering.
+            original = [sys.executable, '-u', '-m', 'video_ai_classic_original.cli']
+            steps = [
+                ('Классический: исходный подбор кадров', original + ['create', str(folder / 'voice.mp3'), '-o', str(folder / 'base.mp4'), '--work-dir', str(work), '--language', 'ru', '--material-v2', '--reference-framing', '--select-moments', '--no-sfx']),
+                ('Классический: исходный монтаж', original + ['render', str(work / 'shot_plan.materialized.json'), '--transcript', str(work / 'transcript.json'), '--editing-polish', '--reference-framing', '-o', str(folder / 'final.mp4'), '--work-dir', str(folder / 'final-work')]),
+            ]
+            if job['effects']:
+                # Allow roughly one reaction per five seconds, without requiring that many.
+                reaction_budget = max(3, min(8, round(float(job['duration']) / 5)))
+                steps[1][1].extend(['--shorts-fx', '--sticker-dir', str(self.root / 'stickers'), '--max-overlays', str(reaction_budget)])
         try:
             for index, (stage, command) in enumerate(steps):
                 if self.stopping.is_set():

@@ -111,6 +111,13 @@ def test_upload_pipeline_history_and_download(app, monkeypatch, tmp_path, style,
         style == 'viral'
     )
 
+    if style == 'classic':
+        assert commands[0][commands[0].index('-m')+1] == 'video_ai_classic_original.cli'
+        assert '--composition-review' not in commands[1]
+        assert commands[1][commands[1].index('--max-overlays')+1] == '3'
+    else:
+        assert commands[0][commands[0].index('-m')+1] == 'video_ai.cli'
+
     assert job['style'] == style
     assert b'test-giphy-secret' not in request(url + '/api/state')[1]
     assert request(url + '/download/' + job_id) == (200, b'test-video')
