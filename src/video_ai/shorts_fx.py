@@ -34,12 +34,19 @@ def build_shorts_overlays(
             base_video=base_video,
         )
 
-    if editing_style == "dynamic":
+    if editing_style in {"dynamic", "style5"}:
         from .dynamic_reactions import build_reactions
     else:
         from .classic_reactions import build_reactions
 
     return build_reactions(
+        plan,
+        out_dir,
+        max_overlays=max_overlays,
+        use_gemini=use_gemini,
+        sticker_dir=sticker_dir,
+        montage=(editing_style == "style5"),
+    ) if editing_style in {"dynamic", "style5"} else build_reactions(
         plan,
         out_dir,
         max_overlays=max_overlays,
