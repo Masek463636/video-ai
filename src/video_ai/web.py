@@ -16,6 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 import webbrowser
 
+from .editor_chat import EditorChat
+
 KEYS = ('GEMINI_API_KEY', 'PEXELS_API_KEY', 'PIXABAY_API_KEY')
 OPTIONAL_KEYS = ('GIPHY_API_KEY',)
 MAX_UPLOAD = 100 * 1024 * 1024
@@ -31,6 +33,7 @@ class Studio:
         self.jobs = {}
         self.process = None
         self.stopping = threading.Event()
+        self.editor_chat = EditorChat(self.storage / 'editor-chat.sqlite3')
         for file in self.storage.glob('*/job.json'):
             try:
                 job = json.loads(file.read_text(encoding='utf-8'))
@@ -179,7 +182,7 @@ def make_handler(studio):
                 with studio.lock:
                     jobs = sorted(studio.jobs.values(), key=lambda j: j['created'], reverse=True)
                     snapshot = json.loads(json.dumps(jobs))
-                self.send_data({'jobs': snapshot, 'busy': studio.busy.locked(), 'keys': {k: bool(os.environ.get(k)) for k in KEYS + OPTIONAL_KEYS}, 'tools': {x: bool(shutil.which(x)) for x in ('ffmpeg', 'ffprobe')}})
+                self.send_data({'jobs': snapshot, 'busy': studio.busy.locked(), 'keys': {k: bool(os.environ.get(k)) for k in KEYS + OPTIONAL_KEYS}, 'tools': {x: bool(shutil.which(x)) for x in ('ffmpeg', 'ffprobe')}, 'chat': {'available': studio.editor_chat.available}})
             elif path.startswith('/download/'):
                 job_id = path.removeprefix('/download/')
                 job = studio.jobs.get(job_id)
