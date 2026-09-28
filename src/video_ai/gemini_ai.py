@@ -41,6 +41,7 @@ class GeminiClient:
         self.models = [m for m in candidates if m]
         self.last_model: str | None = None
         self.last_error: str | None = None
+        self.telemetry: dict | None = None
 
     @property
     def available(self) -> bool:
@@ -663,14 +664,22 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
                     "x-goog-api-key": self.api_key,
                     "User-Agent": "video-ai/2.0.0",
                 })
+                if self.telemetry is not None:
+                    self.telemetry['network_attempts'] += 1
                 try:
                     with urllib.request.urlopen(req, timeout=60) as response:
                         response_data = json.load(response)
+                    if self.telemetry is not None:
+                        usage = response_data.get('usageMetadata') or {}
+                        for target, source in [('input_tokens','promptTokenCount'), ('output_tokens','candidatesTokenCount'), ('cached_input_tokens','cachedContentTokenCount')]:
+                            self.telemetry[target] += int(usage.get(source, 0) or 0)
                     parsed = _parse_json_text(_extract_text(response_data))
                     self.last_model = model
                     self.last_error = None
                     return parsed
                 except urllib.error.HTTPError as exc:
+                    if self.telemetry is not None and exc.code == 429:
+                        self.telemetry['rate_limits'] += 1
                     detail = ""
                     try:
                         detail = exc.read().decode("utf-8", errors="ignore")[:2000]
@@ -695,6 +704,8 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
                                 f"[gemini] rate limited on {model}; waiting {delay:.2f}s and retrying once",
                                 flush=True,
                             )
+                            if self.telemetry is not None:
+                                self.telemetry['retry_wait_seconds'] += delay
                             time.sleep(delay)
                             continue
 

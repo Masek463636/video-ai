@@ -409,6 +409,10 @@ def main() -> None:
         action="store_true",
         help="Fast Viral/Darwin storyboard",
     )
+    p_fifth = sub.add_parser("fifth-plan", help="Experimental fifth-style unified story plan; does not render video yet")
+    p_fifth.add_argument("transcript")
+    p_fifth.add_argument("--work-dir", required=True)
+    p_fifth.add_argument("--cache-dir", default=".video-ai-index/fifth/gemini")
     p_assets = sub.add_parser("assets", help="Find, rank and download images/videos/memes for a ShotPlan")
     p_assets.add_argument("plan")
     p_assets.add_argument("-o", "--output", required=True)
@@ -503,6 +507,14 @@ def main() -> None:
     p_story_render.add_argument("--work-dir", default=None, help="Optional separate directory for render intermediates")
     p_story_render.add_argument("--no-effects", action="store_true", help="Disable generated effect sounds on this render")
     args = parser.parse_args()
+
+    if args.command == "fifth-plan":
+        from .fifth_plan import plan_story
+        result = plan_story(load_transcript(args.transcript), args.work_dir, cache_dir=args.cache_dir)
+        print(json.dumps({"ok": True, "stage": "director_plan_only", "beats": len(result["beats"]),
+                          "plan": str(Path(args.work_dir) / "director-plan.json"),
+                          "metrics": str(Path(args.work_dir) / "gemini-metrics.json")}, ensure_ascii=False, indent=2))
+        return
 
     if args.command == "story-render":
         from .story_render import rerender_story
