@@ -35,6 +35,10 @@ RESPONSE_SELECTORS = [
     'message-content',
 ]
 
+FILE_INPUT_SELECTORS = [
+    'input[type="file"]',
+]
+
 
 def _read_state() -> dict:
     if not STATE_FILE.is_file():
@@ -109,9 +113,60 @@ def wait_for_answer(page, before: str, timeout_s: float = 120.0) -> str:
     raise RuntimeError("Timed out waiting for Gemini response")
 
 
-def send_message(page, message: str) -> str:
+def _attach_files(page, file_paths: list[str] | None) -> None:
+    paths = [str(Path(p).resolve()) for p in (file_paths or []) if Path(p).is_file()]
+    if not paths:
+        return
+
+    # Gemini usually keeps a hidden file input in the composer. This is more
+    # stable than relying on translated button labels.
+    for selector in FILE_INPUT_SELECTORS:
+        try:
+            locator = page.locator(selector)
+            if locator.count():
+                locator.last.set_input_files(paths)
+                page.wait_for_timeout(1200)
+                return
+        except Exception:
+            continue
+
+    # Fallback for layouts where the file input appears only after opening the
+    # add/attach menu.
+    for pattern in (
+        r"upload",
+        r"attach",
+        r"add file",
+        r"files",
+        r"загруз",
+        r"прикреп",
+        r"добав",
+    ):
+        try:
+            button = page.get_by_role("button", name=re.compile(pattern, re.I))
+            if not button.count():
+                continue
+            button.last.click()
+            page.wait_for_timeout(500)
+            locator = page.locator('input[type="file"]')
+            if locator.count():
+                locator.last.set_input_files(paths)
+                page.wait_for_timeout(1200)
+                return
+        except Exception:
+            continue
+
+    raise RuntimeError("Не удалось найти загрузку файлов в интерфейсе Gemini")
+
+
+def send_message(
+    page,
+    message: str,
+    *,
+    file_paths: list[str] | None = None,
+) -> str:
     box = _first_visible(page, PROMPT_SELECTORS, timeout_ms=20000)
     before = _last_response_text(page)
+    _attach_files(page, file_paths)
     box.click()
     try:
         box.fill(message)
