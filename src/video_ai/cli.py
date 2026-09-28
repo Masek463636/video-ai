@@ -517,7 +517,28 @@ def main() -> None:
     p_select.add_argument("--cache-dir", default=".video-ai-index/fifth")
     p_select.add_argument("--semantic", action="store_true", help="Use local CLIP; may download model weights")
     p_select.add_argument("--max-calls", type=int, default=12)
+    p_fifth_render = sub.add_parser("fifth-render", help="Render a complete fifth-style selection without Gemini")
+    p_fifth_render.add_argument("audio")
+    p_fifth_render.add_argument("--plan", required=True)
+    p_fifth_render.add_argument("--selection", required=True)
+    p_fifth_render.add_argument("--transcript", required=True)
+    p_fifth_render.add_argument("--work-dir", required=True)
+    p_fifth_render.add_argument("--cache-dir", default=".video-ai-index/fifth")
+    p_fifth_render.add_argument("--no-effects", action="store_true")
+    p_fifth_render.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
+
+    if args.command == "fifth-render":
+        from .fifth_render import render_fifth
+        read_json = lambda p: json.loads(Path(p).read_text(encoding="utf-8"))
+        cache = Path(args.cache_dir)
+        catalog_path = cache / "assets" / "catalog.json"
+        result = render_fifth(read_json(args.plan), read_json(args.selection), load_transcript(args.transcript),
+                              args.audio, args.output, args.work_dir, cache=cache / "media",
+                              catalog=read_json(catalog_path) if catalog_path.is_file() else None,
+                              effects=not args.no_effects)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
 
     if args.command in ("fifth-index", "fifth-select"):
         from .fifth_session import FifthSession
