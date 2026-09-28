@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .meme_library import search_memes
+from .meme_library import search_giphy_memes, search_memes
 from .models import Scene, ShotPlan
 from .openverse import search_openverse
 from .quality_guard import infer_tone, local_quality_guard
@@ -1261,7 +1261,8 @@ def _build_ranked_pool(
     variants = list(_query_variants(scene))
 
     if (scene.visual_mode == "meme" or scene.source_mode == "meme_library") and not scene.semantic_lock:
-        memes = search_memes(meme_dir, scene.visual_description or scene.query, limit=20)
+        meme_query = scene.query or scene.visual_description or scene.caption or "reaction"
+        memes = search_memes(meme_dir, scene.visual_description or meme_query, limit=20)
         if scene.meme_filename:
             memes.sort(key=lambda m: 0 if m.path.name == scene.meme_filename else 1)
         for meme in memes:
@@ -1276,6 +1277,26 @@ def _build_ranked_pool(
                 ),
                 "local meme library",
             )
+
+        for meme in search_giphy_memes(meme_query, limit=min(10, max(4, limit // 2))):
+            if meme.download_url in used_urls:
+                continue
+            candidate = AssetCandidate(
+                meme.title,
+                meme.page_url,
+                meme.download_url,
+                "video/mp4",
+                0,
+                0,
+                0,
+                "video",
+                "Giphy",
+                source="giphy_meme",
+                preview_url=meme.preview_url,
+                score=38.0 + meme.score,
+                description=scene.visual_description or meme_query,
+            )
+            pool.setdefault(meme.download_url, (candidate, f"Giphy: {meme_query}"))
 
     archive_only = scene.semantic_lock or scene.source_mode == "historical_archive"
     include_stock = (
@@ -1652,7 +1673,7 @@ def _source_allowed(scene: Scene, candidate: AssetCandidate) -> bool:
             or (candidate.kind == "image" and candidate.source in {"commons", "openverse", "pexels", "pixabay"})
         )
     if scene.source_mode == "meme_library":
-        return candidate.source == "local_meme"
+        return candidate.source in {"local_meme", "giphy_meme"}
     if scene.source_mode == "generic_image":
         return candidate.kind == "image"
     return True
@@ -1751,7 +1772,11 @@ def _source_mode_bonus(scene: Scene, candidate: AssetCandidate) -> float:
     if scene.source_mode == "stock_video":
         return 22.0 if candidate.source in {"pexels", "pixabay"} and candidate.kind == "video" else 2.0
     if scene.source_mode == "meme_library":
-        return 100.0 if candidate.source == "local_meme" else -100.0
+        if candidate.source == "local_meme":
+            return 100.0
+        if candidate.source == "giphy_meme":
+            return 88.0
+        return -100.0
     if scene.source_mode == "generic_image":
         return 8.0 if candidate.kind == "image" else -10.0
     return 0.0
@@ -1763,7 +1788,11 @@ def _visual_mode_bonus(scene: Scene, candidate: AssetCandidate) -> float:
     if scene.visual_mode == "image":
         return 4.0 if candidate.kind == "image" else -1.0
     if scene.visual_mode == "meme":
-        return 30.0 if candidate.source == "local_meme" else -10.0
+        if candidate.source == "local_meme":
+            return 30.0
+        if candidate.source == "giphy_meme":
+            return 26.0
+        return -10.0
     return 0.0
 
 
