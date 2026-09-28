@@ -56,6 +56,8 @@ class Studio:
     def run(self, job, env):
         folder = self.storage / job['id']
         work = folder / 'base-work'
+        env = dict(env)
+        env['VIDEO_AI_GEMINI_PROVIDER'] = 'browser'
         common = [sys.executable, '-u', '-m', 'video_ai.cli']
         steps = [
             ('Подбор кадров и сборка основы', common + ['create', str(folder / 'voice.mp3'), '-o', str(folder / 'base.mp4'), '--work-dir', str(work), '--language', 'ru', '--material-v2', '--reference-framing', '--select-moments', '--no-sfx']),
