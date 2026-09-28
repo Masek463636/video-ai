@@ -94,3 +94,144 @@ $('style').addEventListener('change', () => {
   $('style-note').textContent = story ? 'Фото, видео и сравнения по смыслу. Использует папки memes и elements; первый раз разбор паков займёт больше времени.' : dynamic ? 'Крупные реакции по центру и пружинящие субтитры. На основе твоего удачного варианта Shorts.' : viral ? 'Стоки и мемы сменяют друг друга отдельными кадрами. Без зумов; смайлики — поверх видео.' : 'Знакомый монтаж, как в предыдущих роликах.';
   $('effects-note').textContent = story ? 'Реакции и элементы из твоих паков по смыслу истории' : dynamic ? 'По смыслу примерно каждые 3–4 секунды. Сначала твои паки; Giphy — если подключён. Без текстовых плашек.' : viral ? 'Мемы — отдельными кадрами по смыслу фразы. Смайлики — короткими реакциями поверх видео.' : 'Количество реакций — по смыслу, без текстовых плашек';
 });
+
+
+let chatConversationId = null;
+let chatSending = false;
+
+function chatHeaders() {
+  return {'Content-Type':'application/json','X-Studio-Request':'1'};
+}
+
+function renderChatMessages(messages) {
+  const box = $('chat-messages');
+  box.replaceChildren();
+  if (!messages.length) {
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.textContent = 'Начни разговор. Монтажёр будет помнить историю локально.';
+    box.append(p);
+    return;
+  }
+  for (const item of messages) {
+    const row = document.createElement('div');
+    row.className = 'chat-bubble ' + (item.role === 'assistant' ? 'assistant' : 'user');
+    const who = document.createElement('strong');
+    who.textContent = item.role === 'assistant' ? 'AI монтажёр' : 'Ты';
+    const text = document.createElement('div');
+    text.textContent = item.content;
+    row.append(who, text);
+    box.append(row);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderMemories(memories) {
+  const box = $('chat-memory');
+  box.replaceChildren();
+  if (!memories.length) {
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.textContent = 'Пока пусто.';
+    box.append(p);
+    return;
+  }
+  for (const item of memories) {
+    const p = document.createElement('p');
+    p.textContent = '• ' + item;
+    box.append(p);
+  }
+}
+
+async function loadChatMessages() {
+  if (!chatConversationId) return;
+  const response = await fetch('/api/chat/messages/' + chatConversationId);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Не удалось загрузить чат');
+  renderChatMessages(data.messages || []);
+}
+
+async function refreshChats(preferId = null) {
+  try {
+    const response = await fetch('/api/chat/conversations');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Не удалось загрузить чаты');
+    const list = data.conversations || [];
+    renderMemories(data.memories || []);
+    const select = $('chat-conversation');
+    select.replaceChildren();
+    for (const item of list) {
+      const option = document.createElement('option');
+      option.value = item.id;
+      option.textContent = item.title + (item.job_id ? ' · ролик' : '');
+      select.append(option);
+    }
+    chatConversationId = preferId || chatConversationId || (list[0] && list[0].id) || null;
+    if (chatConversationId && list.some(x => x.id === chatConversationId)) {
+      select.value = chatConversationId;
+      await loadChatMessages();
+    } else {
+      renderChatMessages([]);
+    }
+  } catch (error) {
+    $('chat-status').textContent = error.message;
+  }
+}
+
+async function createChat() {
+  $('chat-status').textContent = '';
+  const response = await fetch('/api/chat/conversations', {
+    method:'POST',
+    headers:chatHeaders(),
+    body:JSON.stringify({job_id:selectedJob || null})
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Не удалось создать чат');
+  chatConversationId = data.id;
+  await refreshChats(chatConversationId);
+}
+
+$('chat-new').addEventListener('click', async () => {
+  try { await createChat(); } catch (error) { $('chat-status').textContent = error.message; }
+});
+
+$('chat-conversation').addEventListener('change', async e => {
+  chatConversationId = e.target.value || null;
+  try { await loadChatMessages(); } catch (error) { $('chat-status').textContent = error.message; }
+});
+
+$('chat-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (chatSending) return;
+  const message = $('chat-input').value.trim();
+  if (!message) return;
+  try {
+    chatSending = true;
+    $('chat-send').disabled = true;
+    $('chat-status').textContent = 'Монтажёр думает…';
+    if (!chatConversationId) await createChat();
+    const response = await fetch('/api/chat/send', {
+      method:'POST',
+      headers:chatHeaders(),
+      body:JSON.stringify({
+        conversation_id:chatConversationId,
+        message,
+        job_id:selectedJob || null
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Ошибка Gemini');
+    $('chat-input').value = '';
+    $('chat-model').textContent = data.model || 'Gemini';
+    $('chat-status').textContent = '';
+    renderMemories(data.memories || []);
+    await refreshChats(chatConversationId);
+  } catch (error) {
+    $('chat-status').textContent = error.message;
+  } finally {
+    chatSending = false;
+    $('chat-send').disabled = false;
+  }
+});
+
+refreshChats();
