@@ -186,6 +186,14 @@ RULES:
             else
             "Exact action is not required. Preserve the main topic/object/place and choose honest contextual B-roll."
         )
+        media_rule = (
+            "THIS IS A MEME/REACTION SCENE. Rank by whether the visible expression/action instantly communicates "
+            "the director's intended emotion, irony or punchline. Do not demand a literal reenactment of the narration. "
+            "Reject a funny but semantically unrelated reaction."
+            if scene.visual_mode == "meme"
+            else
+            "THIS IS NORMAL B-ROLL. Prefer visible evidence of the requested real action/subject."
+        )
         parts: list[dict[str, Any]] = [{
             "text": f"""
 You are the Visual Director for a fast-paced vertical YouTube Short.
@@ -202,6 +210,7 @@ TONE:
 
 SELECTION MODE: {mode.upper()}
 {mode_rule}
+{media_rule}
 
 IMPORTANT:
 - Pick visuals that actually contain the core subject/topic. Do not reward a pretty unrelated frame.
