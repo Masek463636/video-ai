@@ -14,6 +14,7 @@ def build_donor_shot_plan(
     *,
     meme_dir: str | Path | None = None,
     viral_style: bool = False,
+    style5: bool = False,
 ) -> ShotPlan:
     """Whole-transcript storyboard planner inspired by AutoBroll/MoneyPrinterTurbo.
 
@@ -142,6 +143,28 @@ EDITING RULES:
                    "browsing titles, discussing a choice or using a remote, not an unrelated comic face. "
                    "Fast cuts must still explain the action. A short fragment such as 'not yet' "
                    "inherits its meaning from the surrounding sentence.")
+    elif style5:
+        prompt += (
+            "\nSTYLE 5 BASE-TRACK RULES:\n"
+            "- MEMES ARE NOT OVERLAYS. A meme is a PRIMARY visual beat that replaces stock footage "
+            "for that beat on the main timeline.\n"
+            "- First ask: can stock footage show this phrase LITERALLY and SPECIFICALLY? "
+            "If yes, use VIDEO.\n"
+            "- If the phrase is abstract, social, ironic, exaggerated, internal/emotional, a punchline, "
+            "or would force a generic/weak stock metaphor, prefer MEME instead.\n"
+            "- Examples that often deserve MEME: awkward internal thoughts, 'me pretending everything is fine', "
+            "sarcastic reactions, absurd comparisons, embarrassment, disbelief, 'I am done', social anxiety, "
+            "or a joke whose exact action is not realistically searchable.\n"
+            "- Examples that should stay VIDEO: opening a fridge, checking a phone, walking into a room, "
+            "drinking water, driving, shopping, cooking, opening a package, or any other literal visible action.\n"
+            "- Do NOT use a meme just because it is funny. Use it when it is a BETTER semantic match than stock.\n"
+            "- There is NO meme quota. Clean stock-only stretches are good. Several meme beats are allowed "
+            "when several consecutive phrases genuinely cannot be represented precisely with stock.\n"
+            "- For every MEME beat choose one exact meme_filename from AVAILABLE LOCAL MEMES. Never invent a filename.\n"
+            "- For MEME beats, query/visual_description should describe the intended reaction/meaning so the "
+            "local meme library can verify the selected file.\n"
+            "- Emoji/sticker reactions are handled later and are NOT part of this base-track decision."
+        )
     data = client._generate_json([{"text": prompt}], temperature=0.08)
     raw_beats = data.get("beats", []) if isinstance(data, dict) else []
     if not isinstance(raw_beats, list) or len(raw_beats) < 2:
