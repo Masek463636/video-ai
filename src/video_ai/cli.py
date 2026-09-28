@@ -506,7 +506,59 @@ def main() -> None:
     p_story_render.add_argument("-o", "--output", required=True)
     p_story_render.add_argument("--work-dir", default=None, help="Optional separate directory for render intermediates")
     p_story_render.add_argument("--no-effects", action="store_true", help="Disable generated effect sounds on this render")
+    p_index = sub.add_parser("fifth-index", help="Experimental persistent meme/emoji catalog")
+    p_index.add_argument("--meme-dir", default="memes")
+    p_index.add_argument("--sticker-dir", default="stickers")
+    p_index.add_argument("--cache-dir", default=".video-ai-index/fifth")
+    p_index.add_argument("--max-new", type=int, default=24)
+    p_select = sub.add_parser("fifth-select", help="Experimental batched shot selection; no render yet")
+    p_select.add_argument("plan")
+    p_select.add_argument("--work-dir", required=True)
+    p_select.add_argument("--cache-dir", default=".video-ai-index/fifth")
+    p_select.add_argument("--semantic", action="store_true", help="Use local CLIP; may download model weights")
+    p_select.add_argument("--max-calls", type=int, default=12)
     args = parser.parse_args()
+
+    if args.command in ("fifth-index", "fifth-select"):
+        from .fifth_session import FifthSession
+        from .gemini_ai import get_gemini_client
+        cache = Path(args.cache_dir)
+        client = get_gemini_client()
+        if client is None:
+            raise RuntimeError("Для экспериментального пятого стиля нужен GEMINI_API_KEY")
+        if args.command == "fifth-index":
+            from .fifth_catalog import describe_pack
+            session = FifthSession(client, cache / "gemini", cache / "index-metrics.json",
+                                   max_calls=max(0, (args.max_new + 5) // 6))
+            report = describe_pack([args.meme_dir, args.sticker_dir], cache / "assets", session,
+                                   max_new=args.max_new)
+            session.save()
+            print(json.dumps({k: report[k] for k in ("ready", "pending", "errors")}, ensure_ascii=False, indent=2))
+        else:
+            from .fifth_materials import prepare_candidates, choose_batches
+            plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+            if plan.get("schema") != "fifth-director-v1" or not plan.get("beats"):
+                raise ValueError("Ожидается director-plan.json, созданный fifth-plan")
+            catalog_path = cache / "assets" / "catalog.json"
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8")) if catalog_path.exists() else {"assets": []}
+            ranker = None
+            if args.semantic:
+                from .multimodal import get_clip_ranker
+                try:
+                    ranker = get_clip_ranker()
+                except Exception:
+                    ranker = None
+                if ranker is None:
+                    print("[fifth] CLIP unavailable; using retrieval order", flush=True)
+            work = Path(args.work_dir)
+            session = FifthSession(client, cache / "gemini", work / "selection-metrics.json",
+                                   max_calls=max(0, args.max_calls))
+            candidates = prepare_candidates(plan, catalog, cache / "media", ranker=ranker)
+            report = choose_batches(plan, candidates, session, work / "selection.json")
+            session.save()
+            print(json.dumps(dict(stage="selection_only", selected=len(report["selections"]),
+                                  unresolved=report["unresolved"], errors=report["errors"]), ensure_ascii=False, indent=2))
+        return
 
     if args.command == "fifth-plan":
         from .fifth_plan import plan_story
