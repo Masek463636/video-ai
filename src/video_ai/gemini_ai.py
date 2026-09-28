@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Scene
+from .gemini_session import GeminiEditorSession
 
 _API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 _JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", flags=re.IGNORECASE)
@@ -645,8 +646,13 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
     def _generate_json(self, parts: list[dict[str, Any]], *, temperature: float) -> Any:
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is not configured")
+        session = GeminiEditorSession.from_env()
+        contents = []
+        if session is not None:
+            contents.extend(session.prior_contents())
+        contents.append({"role": "user", "parts": parts})
         payload = {
-            "contents": [{"role": "user", "parts": parts}],
+            "contents": contents,
             "generationConfig": {
                 "responseMimeType": "application/json",
                 "temperature": temperature,
@@ -669,6 +675,11 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
                     parsed = _parse_json_text(_extract_text(response_data))
                     self.last_model = model
                     self.last_error = None
+                    if session is not None:
+                        try:
+                            session.record(parts, parsed, model=model)
+                        except Exception as exc:
+                            print(f"[gemini-session] memory write skipped: {exc}", flush=True)
                     return parsed
                 except urllib.error.HTTPError as exc:
                     detail = ""
