@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import secrets
+import struct
 import sys
 import tempfile
 import time
@@ -161,10 +163,6 @@ def _click_and_choose_files(page, locator, paths: list[str], *, timeout: int = 5
 def _attach_files(page, file_paths: list[str] | None) -> None:
     paths = [str(Path(p).resolve()) for p in (file_paths or []) if Path(p).is_file()]
     if not paths:
-        return
-
-    # Fast path: sometimes Gemini keeps a hidden input in the composer.
-    if _try_set_file_input(page, paths):
         return
 
     # Current Gemini UI (2026) commonly calls the plus button "Upload & tools".
@@ -360,7 +358,55 @@ def setup_chat(endpoint: str = DEFAULT_CDP_ENDPOINT) -> int:
     return 0
 
 
-def test_chat(message: str, endpoint: str | None = None, file_paths: list[str] | None = None) -> int:
+def _make_upload_probe_bmp(path: Path) -> str:
+    """Create a 3x3 random color grid whose answer cannot be guessed from prompt."""
+    palette = [
+        ("red", (255, 0, 0)),
+        ("green", (0, 190, 0)),
+        ("blue", (0, 80, 255)),
+        ("yellow", (255, 220, 0)),
+        ("magenta", (230, 0, 210)),
+        ("cyan", (0, 210, 220)),
+    ]
+    names = []
+    colors = []
+    last = None
+    for _ in range(9):
+        choices = [item for item in palette if item[0] != last]
+        name, rgb = secrets.choice(choices)
+        names.append(name)
+        colors.append(rgb)
+        last = name
+
+    width = height = 600
+    cell = 200
+    row_pad = (4 - ((width * 3) % 4)) % 4
+    pixel_rows = bytearray()
+
+    # BMP stores rows bottom-up.
+    for y in range(height - 1, -1, -1):
+        grid_y = y // cell
+        for x in range(width):
+            grid_x = x // cell
+            r, g, b = colors[grid_y * 3 + grid_x]
+            pixel_rows.extend((b, g, r))
+        if row_pad:
+            pixel_rows.extend(b"\x00" * row_pad)
+
+    file_size = 14 + 40 + len(pixel_rows)
+    header = bytearray()
+    header.extend(b"BM")
+    header.extend(struct.pack("<IHHI", file_size, 0, 0, 54))
+    header.extend(struct.pack(
+        "<IIIHHIIIIII",
+        40, width, height, 1, 24, 0, len(pixel_rows),
+        2835, 2835, 0, 0,
+    ))
+    path.write_bytes(header + pixel_rows)
+    return ",".join(names)
+
+
+def test_chat(message: str, endpoint: str | None = None, file_paths: list[str] | None = None, expected: str | None = None) -> int:
     state = _read_state()
     chat_url = str(state.get("chat_url") or "").strip()
     if not chat_url:
@@ -389,6 +435,14 @@ def test_chat(message: str, endpoint: str | None = None, file_paths: list[str] |
         print("\n===== GEMINI ANSWER =====")
         print(answer)
         print("=========================\n")
+        if expected is not None:
+            got = re.sub(r"\s+", "", answer.lower())
+            want = re.sub(r"\s+", "", expected.lower())
+            if want not in got:
+                print("UPLOAD VERIFY FAILED")
+                print("Expected visual code:", expected)
+                return 6
+            print("UPLOAD VERIFY PASSED")
     return 0
 
 
@@ -414,23 +468,23 @@ def main() -> None:
     if args.command == "setup":
         raise SystemExit(setup_chat(args.cdp_endpoint))
     if args.command == "test-upload":
-        # 1x1 PNG, only to verify that Gemini's file uploader is being driven.
-        test_png = Path(tempfile.gettempdir()) / "video-ai-upload-test.png"
-        test_png.write_bytes(
-            bytes.fromhex(
-                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-                "0000000d49444154789c6360f8cfc000000301010018dd8db10000000049454e44ae426082"
-            )
-        )
+        test_bmp = Path(tempfile.gettempdir()) / "video-ai-upload-probe.bmp"
+        expected = _make_upload_probe_bmp(test_bmp)
         try:
             raise SystemExit(test_chat(
-                "Если ты видишь прикреплённое изображение, ответь только: IMAGE_UPLOAD_OK",
+                (
+                    "К сообщению должно быть прикреплено изображение: сетка 3x3 из цветных квадратов. "
+                    "Прочитай цвета СЛЕВА НАПРАВО, СВЕРХУ ВНИЗ. "
+                    "Ответь ТОЛЬКО 9 английскими словами через запятую. "
+                    "Разрешённые слова: red, green, blue, yellow, magenta, cyan."
+                ),
                 endpoint=args.cdp_endpoint,
-                file_paths=[str(test_png)],
+                file_paths=[str(test_bmp)],
+                expected=expected,
             ))
         finally:
             try:
-                test_png.unlink(missing_ok=True)
+                test_bmp.unlink(missing_ok=True)
             except OSError:
                 pass
     raise SystemExit(test_chat(args.message, endpoint=args.cdp_endpoint))
