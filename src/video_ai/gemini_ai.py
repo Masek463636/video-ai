@@ -677,10 +677,11 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
                     except Exception:
                         pass
 
-                    # Free-tier 429s commonly include a short "Please retry in
-                    # 16.8s" hint. Waiting once is much better than immediately
-                    # falling through to another model and then hammering the
-                    # next scene/batch.
+                    # Free-tier 429s include Google's own cooldown hint.
+                    # Respect it instead of capping every wait at 30s: the old
+                    # cap caused guaranteed early retries when Google asked for
+                    # e.g. ~59s. A safety cap remains configurable so a single
+                    # request can never sleep forever.
                     if exc.code == 429 and attempt == 0:
                         match = re.search(
                             r"Please retry in\s+([0-9.]+)\s*(ms|s)",
@@ -689,10 +690,26 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
                         )
                         if match:
                             value = float(match.group(1))
-                            delay = value / 1000.0 if match.group(2).lower() == "ms" else value
-                            delay = max(0.25, min(delay + 0.35, 30.0))
+                            requested = (
+                                value / 1000.0
+                                if match.group(2).lower() == "ms"
+                                else value
+                            )
+                            try:
+                                max_wait = float(
+                                    os.getenv("GEMINI_MAX_RETRY_WAIT", "75")
+                                )
+                            except ValueError:
+                                max_wait = 75.0
+                            max_wait = max(1.0, min(max_wait, 180.0))
+                            delay = max(
+                                0.25,
+                                min(requested + 0.75, max_wait),
+                            )
                             print(
-                                f"[gemini] rate limited on {model}; waiting {delay:.2f}s and retrying once",
+                                f"[gemini] rate limited on {model}; "
+                                f"Google asked for {requested:.2f}s, "
+                                f"waiting {delay:.2f}s and retrying once",
                                 flush=True,
                             )
                             time.sleep(delay)
