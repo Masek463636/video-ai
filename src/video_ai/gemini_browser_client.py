@@ -63,6 +63,10 @@ class GeminiBrowserClient(GeminiClient):
             prompt = "\n\n".join(prompt_chunks).strip()
             if not prompt:
                 raise RuntimeError("browser bridge request contains no text")
+            if len(image_paths) > 9:
+                raise RuntimeError(
+                    f"Gemini Web attachment limit guard: {len(image_paths)} images requested; max 9 per message"
+                )
 
             state = _read_state()
             chat_url = str(state.get("chat_url") or "").strip()
