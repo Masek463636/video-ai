@@ -132,6 +132,38 @@ class Studio:
                 self.process = None
             self.busy.release()
 
+    def chat_job_context(self, job_id):
+        if not job_id:
+            return ''
+        job = self.jobs.get(job_id)
+        if not job:
+            return ''
+        folder = self.storage / job_id
+        pieces = [
+            f"JOB ID: {job_id}",
+            f"Стиль: {job.get('style', 'classic')}",
+            f"Статус: {job.get('status', '')}",
+            f"Этап: {job.get('stage', '')}",
+            f"Длительность: {job.get('duration', '')} сек",
+        ]
+        for path in (folder / 'base-work' / 'transcript.json', folder / 'story-work' / 'transcript.json'):
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                text = data.get('text') if isinstance(data, dict) else ''
+                if not text and isinstance(data, dict):
+                    text = ' '.join(str(x.get('text') or '') for x in (data.get('segments') or []) if isinstance(x, dict))
+                if text:
+                    pieces.append('Транскрипт:\n' + str(text)[:7000])
+                    break
+            except Exception:
+                pass
+        logs = job.get('logs') or []
+        if logs:
+            pieces.append('Последние логи:\n' + '\n'.join(str(x) for x in logs[-35:])[:6000])
+        return '\n\n'.join(pieces)
+
     def stop(self):
         self.stopping.set()
         with self.lock:
@@ -183,6 +215,11 @@ def make_handler(studio):
                     jobs = sorted(studio.jobs.values(), key=lambda j: j['created'], reverse=True)
                     snapshot = json.loads(json.dumps(jobs))
                 self.send_data({'jobs': snapshot, 'busy': studio.busy.locked(), 'keys': {k: bool(os.environ.get(k)) for k in KEYS + OPTIONAL_KEYS}, 'tools': {x: bool(shutil.which(x)) for x in ('ffmpeg', 'ffprobe')}, 'chat': {'available': studio.editor_chat.available}})
+            elif path == '/api/chat/conversations':
+                self.send_data({'conversations': studio.editor_chat.list_conversations(), 'memories': studio.editor_chat.memories()})
+            elif path.startswith('/api/chat/messages/'):
+                conversation_id = path.removeprefix('/api/chat/messages/')
+                self.send_data({'messages': studio.editor_chat.messages(conversation_id)})
             elif path.startswith('/download/'):
                 job_id = path.removeprefix('/download/')
                 job = studio.jobs.get(job_id)
