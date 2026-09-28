@@ -1451,7 +1451,7 @@ def _rank_meme_shortlist_with_gemini(
                 if candidate.local_path:
                     shutil.copy2(candidate.local_path, asset)
                 else:
-                    _download(candidate.preview_url or candidate.download_url, asset)
+                    _download(candidate.download_url, asset)
                 temp_assets.append(asset)
                 if candidate.kind == "image":
                     command = [
@@ -2237,9 +2237,9 @@ def _kind_from_mime(mime: str) -> str | None:
 
 def _suffix(candidate: AssetCandidate) -> str:
     suffix = Path(candidate.local_path).suffix.lower() if candidate.local_path else Path(urllib.parse.urlparse(candidate.download_url).path).suffix.lower()
-    if candidate.kind == "image" and suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+    if candidate.kind == "image" and suffix not in {".jpg", ".jpeg", ".jfif", ".png", ".webp"}:
         return ".jpg"
-    if candidate.kind == "video" and suffix not in {".webm", ".mp4", ".ogv", ".ogg", ".mov", ".mkv", ".avi"}:
+    if candidate.kind == "video" and suffix not in {".webm", ".mp4", ".ogv", ".ogg", ".mov", ".mkv", ".avi", ".gif"}:
         return ".mp4"
     return suffix or (".jpg" if candidate.kind == "image" else ".mp4")
 
