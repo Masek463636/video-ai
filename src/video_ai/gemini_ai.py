@@ -708,6 +708,16 @@ For 9:16 Shorts prefer a clear main subject and composition that survives a vert
 
 
 def get_gemini_client() -> GeminiClient | None:
+    provider = os.getenv("VIDEO_AI_GEMINI_PROVIDER", "").strip().lower()
+    if provider == "browser":
+        try:
+            from .gemini_browser_client import get_gemini_browser_client
+            browser_client = get_gemini_browser_client()
+            if browser_client is not None:
+                return browser_client
+        except Exception as exc:
+            print(f"[gemini-browser] unavailable: {exc}", flush=True)
+
     client = GeminiClient()
     return client if client.available else None
 
