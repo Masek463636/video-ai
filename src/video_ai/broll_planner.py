@@ -87,7 +87,7 @@ def build_donor_shot_plan(
         "There is NO target scene count. Cut only when the visual idea, action, reaction, setup, "
         "or punchline genuinely changes; do not create filler cuts just to increase pace."
         if style5
-        else f"{scene_count_rule}"
+        else f"Target roughly {target_beats} visual beats across {duration:.1f}s."
     )
     style5_beat_rule = (
         "- You control the scene boundaries. Avoid useless micro-scenes, but keep a scene longer "
@@ -108,8 +108,7 @@ def build_donor_shot_plan(
     )
     media_preference_rule = (
         "- Choose VIDEO for literal physical actions/environments that stock can show specifically. "
-        "Choose MEME for ironic/social/internal reactions or punchlines when stock would be generic or misleading. "
-        "Choose IMAGE only for honest still-only material."
+        "Choose MEME for ironic/social/internal reactions or punchlines when stock would be generic or misleading."
         if style5
         else "- Prefer VIDEO for actions, reactions, environments and modern generic concepts."
     )
@@ -124,7 +123,7 @@ FULL TRANSCRIPT WITH WORD INDEXES:
 
 {meme_catalog_prompt}
 
-Target roughly {target_beats} visual beats across {duration:.1f}s.
+{scene_count_rule}
 
 Return ONLY JSON:
 {{
