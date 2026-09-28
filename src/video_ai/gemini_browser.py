@@ -165,6 +165,10 @@ def _attach_files(page, file_paths: list[str] | None) -> None:
         'button[aria-label*="Attach" i]',
         'button[aria-label*="Add file" i]',
         'button[aria-label*="Add files" i]',
+        'button[aria-label*="Загруз" i]',
+        'button[aria-label*="Прикреп" i]',
+        'button[aria-label*="Добав" i]',
+        'button[aria-label*="Файл" i]',
     ]
     for selector in menu_selectors:
         try:
@@ -186,8 +190,12 @@ def _attach_files(page, file_paths: list[str] | None) -> None:
         '[data-test-id*="uploader-images-files"]',
         '[role="menuitem"]:has-text("Upload files")',
         '[role="menuitem"]:has-text("Загрузить файлы")',
+        '[role="menuitem"]:has-text("Файлы")',
         'button:has-text("Upload files")',
         'button:has-text("Загрузить файлы")',
+        'button:has-text("Файлы")',
+        'div[role="button"]:has-text("Файлы")',
+        'span:has-text("Файлы")',
     ]
     for selector in direct_upload_selectors:
         try:
@@ -216,6 +224,8 @@ def _attach_files(page, file_paths: list[str] | None) -> None:
         r"загрузить файлы",
         r"загрузить с компьютера",
         r"прикрепить файлы",
+        r"^файлы$",
+        r"файлы",
     ):
         for role in ("menuitem", "button"):
             try:
