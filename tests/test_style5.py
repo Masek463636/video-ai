@@ -141,7 +141,10 @@ def test_style5_director_prompt_has_no_target_count_or_meme_catalog(tmp_path):
     assert len(plan.scenes) == 1
     assert plan.scenes[0].visual_mode == "meme"
     assert plan.scenes[0].meme_filename is None
-    assert "There is NO target scene count" in client.prompt
+    assert "There is no fixed scene-count quota" in client.prompt
+    assert "FAST-PACED 9:16 YouTube Short" in client.prompt
+    assert "every 1.5-2.8 seconds" in client.prompt
+    assert "next start_idx = previous end_idx + 1" in client.prompt
     assert "Target roughly" not in client.prompt
     assert "AVAILABLE LOCAL MEMES" not in client.prompt
     assert "DO_NOT_SEND_THIS_FILENAME" not in client.prompt
