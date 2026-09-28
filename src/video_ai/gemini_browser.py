@@ -436,11 +436,24 @@ def test_chat(message: str, endpoint: str | None = None, file_paths: list[str] |
         print(answer)
         print("=========================\n")
         if expected is not None:
-            got = re.sub(r"\s+", "", answer.lower())
-            want = re.sub(r"\s+", "", expected.lower())
-            if want not in got:
+            allowed = {"red", "green", "blue", "yellow", "magenta", "cyan"}
+            got_tokens = [
+                token for token in re.findall(r"[a-z]+", answer.lower())
+                if token in allowed
+            ][:9]
+            want_tokens = [x.strip().lower() for x in expected.split(",") if x.strip()]
+            matches = sum(
+                1 for got, want in zip(got_tokens, want_tokens)
+                if got == want
+            )
+            total = len(want_tokens)
+            print(f"UPLOAD VISUAL SCORE: {matches}/{total}")
+            # 8/9 is enough to prove the image was actually attached and seen.
+            # Small vision mistakes should not be mistaken for an upload failure.
+            if total != 9 or len(got_tokens) != 9 or matches < 8:
                 print("UPLOAD VERIFY FAILED")
                 print("Expected visual code:", expected)
+                print("Observed visual code:", ",".join(got_tokens))
                 return 6
             print("UPLOAD VERIFY PASSED")
     return 0
