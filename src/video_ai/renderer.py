@@ -113,26 +113,11 @@ def render_plan(
                 flush=True,
             )
 
-        elif editing_style in ("viral", "style5"):
+        elif editing_style == "viral":
             from .viral_montage import compose_meme_shots, emoji_overlays
-            # Style 5 borrows ONLY the primary-track meme-cut mechanism from
-            # Viral. Unlike Viral it keeps Dynamic-style camera motion and
-            # captions. Memes are never overlays; only emoji reactions remain
-            # in the foreground layer.
-            base, meme_shots = compose_meme_shots(
-                base,
-                overlays or [],
-                plan,
-                root,
-                audio_duration,
-                crf=crf,
-            )
-            overlays = emoji_overlays(
-                overlays or [],
-                audio_duration,
-                meme_shots,
-                [(start, end) for _, start, end in spans],
-            )
+            base, meme_shots = compose_meme_shots(base, overlays or [], plan, root, audio_duration, crf=crf)
+            overlays = emoji_overlays(overlays or [], audio_duration, meme_shots,
+                                     [(start, end) for _, start, end in spans])
 
             (root / "overlays.placed.json").write_text(
                 json.dumps(
@@ -143,9 +128,26 @@ def render_plan(
                 encoding="utf-8",
             )
 
-            label = "style5" if editing_style == "style5" else "viral"
             print(
-                f"[{label}] primary meme cuts={len(meme_shots)}; emoji overlays={len(overlays)}",
+                f"[viral] visible accents={len(overlays)}",
+                flush=True,
+            )
+
+        elif editing_style == "style5":
+            from .dynamic_reactions import place_style5_emojis
+            overlays = place_style5_emojis(overlays or [], audio_duration)
+
+            (root / "overlays.placed.json").write_text(
+                json.dumps(
+                    {"overlays": overlays},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            print(
+                f"[style5] base-track memes are already materialized; animated emoji overlays={len(overlays)}",
                 flush=True,
             )
 
