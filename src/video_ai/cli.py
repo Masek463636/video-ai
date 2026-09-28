@@ -655,6 +655,18 @@ def main() -> None:
                     f"[planner] donor whole-transcript storyboard: {len(plan.scenes)} beats",
                     flush=True,
                 )
+                if bool(getattr(args, "style5", False)):
+                    counts = {"video": 0, "image": 0, "meme": 0}
+                    for planned_scene in plan.scenes:
+                        key = str(planned_scene.visual_mode)
+                        if key in counts:
+                            counts[key] += 1
+                    print(
+                        "[style5-director] Gemini chose "
+                        f"{len(plan.scenes)} scene(s): "
+                        f"video={counts['video']} image={counts['image']} meme={counts['meme']}",
+                        flush=True,
+                    )
             except Exception as exc:
                 print(
                     f"[planner] donor planner unavailable -> legacy fallback: {exc}",
