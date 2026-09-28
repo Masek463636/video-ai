@@ -47,7 +47,7 @@ async function refresh() {
     state = await response.json();
     $('create').disabled = state.busy || sending;
     $('create').textContent = state.busy ? 'Ролик обрабатывается…' : 'Создать ролик ↗';
-    const names = {GEMINI_API_KEY:'Gemini',QWEN_API_KEY:'Qwen',PEXELS_API_KEY:'Pexels',PIXABAY_API_KEY:'Pixabay',GIPHY_API_KEY:'Giphy (необязательно)',ffmpeg:'FFmpeg',ffprobe:'Проверка аудио'};
+    const names = {GEMINI_API_KEY:'Gemini',QWEN_API_KEY:'Qwen (legacy)',OPENROUTER_API_KEY:'OpenRouter / Qwen',PEXELS_API_KEY:'Pexels',PIXABAY_API_KEY:'Pixabay',GIPHY_API_KEY:'Giphy (необязательно)',ffmpeg:'FFmpeg',ffprobe:'Проверка аудио'};
     $('connections').replaceChildren();
     for (const [key, ok] of Object.entries({...state.keys,...state.tools})) {
       const row = document.createElement('div'); row.className = 'key';
@@ -55,7 +55,7 @@ async function refresh() {
       const status = document.createElement('span'); status.className = ok ? 'good' : 'missing'; status.textContent = ok ? (key.endsWith('KEY') ? 'Ключ найден' : 'Готово') : 'Не найден';
       row.append(name,status); $('connections').append(row);
     }
-    const aiKey = $('style').value === 'premium_v2' ? 'QWEN_API_KEY' : 'GEMINI_API_KEY';
+    const aiKey = $('style').value === 'premium_v2' ? 'OPENROUTER_API_KEY' : 'GEMINI_API_KEY';
     $('connection-count').textContent = `${[aiKey,'PEXELS_API_KEY','PIXABAY_API_KEY'].filter(k=>state.keys[k]).length}/3 ключей`;
     if (!selectedJob && state.jobs.length) selectedJob = state.jobs[0].id;
     showJob(state.jobs.find(j=>j.id === selectedJob));
@@ -97,7 +97,7 @@ $('style').addEventListener('change', () => {
     dynamic: 'Large reactions and punchy subtitles.',
     viral: 'Fast Viral/Darwin edit: more cuts, snap zooms, reactions, PNGs and verified attention graphics.',
     premium: 'Viral Premium: AI scene composer, kinetic word captions, 2.5D parallax, text behind subjects, split-screen and premium sound design.',
-    premium_v2: 'Premium v2: тот же human-style director, но мозг сейчас Qwen Fast вместо Gemini. Object-aware camera, semantic pacing, scene grammar и quality-gated effects сохранены.'
+    premium_v2: 'Premium v2: тот же human-style director, но мозг сейчас Qwen3.8 Flash через OpenRouter вместо Gemini. Object-aware camera, semantic pacing, scene grammar и quality-gated effects сохранены.'
   };
 
   const effects = {
