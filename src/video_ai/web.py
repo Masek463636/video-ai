@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 import webbrowser
 
 KEYS = ('GEMINI_API_KEY', 'PEXELS_API_KEY', 'PIXABAY_API_KEY')
-OPTIONAL_KEYS = ('GIPHY_API_KEY', 'QWEN_API_KEY')
+OPTIONAL_KEYS = ('GIPHY_API_KEY', 'QWEN_API_KEY', 'OPENROUTER_API_KEY')
 MAX_UPLOAD = 100 * 1024 * 1024
 
 
@@ -343,10 +343,10 @@ def make_handler(studio):
             ):
                 self.send_data({'error': 'Неизвестный стиль'}, 400)
                 return
-            ai_key_ok = bool(os.environ.get('QWEN_API_KEY')) if style == 'premium_v2' else bool(os.environ.get('GEMINI_API_KEY'))
+            ai_key_ok = bool(os.environ.get('OPENROUTER_API_KEY')) if style == 'premium_v2' else bool(os.environ.get('GEMINI_API_KEY'))
             if not ai_key_ok or (style != 'story' and not any(os.environ.get(k) for k in KEYS[1:])):
                 if style == 'premium_v2':
-                    required = 'Для Premium v2 нужен сохранённый ключ Qwen и хотя бы один ключ Pexels или Pixabay.'
+                    required = 'Для Premium v2 нужен сохранённый ключ OpenRouter (Qwen) и хотя бы один ключ Pexels или Pixabay.'
                 elif style == 'story':
                     required = 'Нужен сохранённый ключ Gemini.'
                 else:
