@@ -15,11 +15,7 @@ except ImportError:  # pragma: no cover
 
 
 class GeminiBrowserClient(GeminiClient):
-    """Use the user's normal Gemini web chat for text-only reasoning.
-
-    Multimodal requests still fall back to the regular Gemini API because the
-    browser bridge currently does not attach image files yet.
-    """
+    """Use the user's normal Gemini web chat for text and image reasoning."""
 
     provider_name = "gemini_browser"
 
@@ -41,51 +37,68 @@ class GeminiBrowserClient(GeminiClient):
         if sync_playwright is None:
             raise RuntimeError("Playwright is not installed")
 
-        if any(isinstance(p, dict) and p.get("inline_data") for p in parts):
-            raise RuntimeError("browser bridge image upload is not enabled yet")
-
         prompt_chunks: list[str] = []
-        for part in parts:
-            if isinstance(part, dict) and part.get("text"):
-                prompt_chunks.append(str(part["text"]))
-        prompt = "\n\n".join(prompt_chunks).strip()
-        if not prompt:
-            raise RuntimeError("browser bridge request contains no text")
+        image_paths: list[str] = []
+        temp_files: list[str] = []
 
-        state = _read_state()
-        chat_url = str(state.get("chat_url") or "").strip()
-        endpoint = str(state.get("cdp_endpoint") or DEFAULT_CDP_ENDPOINT)
-        if not chat_url or "gemini.google.com/app/" not in chat_url:
-            raise RuntimeError(
-                "Gemini browser chat is not pinned. Run: "
-                "python -m video_ai.gemini_browser setup"
-            )
+        import base64
+        import tempfile
+        from pathlib import Path
 
-        with sync_playwright() as p:
-            browser, context, page = _connect_existing_chrome(p, endpoint)
-            if page.url != chat_url:
-                page.goto(chat_url, wait_until="domcontentloaded")
-            answer = send_message(page, prompt)
+        try:
+            for index, part in enumerate(parts):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("text"):
+                    prompt_chunks.append(str(part["text"]))
+                inline = part.get("inline_data")
+                if isinstance(inline, dict) and inline.get("data"):
+                    mime = str(inline.get("mime_type") or "image/jpeg").lower()
+                    suffix = ".png" if "png" in mime else ".webp" if "webp" in mime else ".jpg"
+                    target = Path(tempfile.gettempdir()) / f"video-ai-gemini-{os.getpid()}-{index}{suffix}"
+                    target.write_bytes(base64.b64decode(str(inline["data"])))
+                    image_paths.append(str(target))
+                    temp_files.append(str(target))
 
-        parsed = _parse_json_text(answer)
-        self.last_model = "gemini-web"
-        self.last_error = None
-        return parsed
+            prompt = "\n\n".join(prompt_chunks).strip()
+            if not prompt:
+                raise RuntimeError("browser bridge request contains no text")
+
+            state = _read_state()
+            chat_url = str(state.get("chat_url") or "").strip()
+            endpoint = str(state.get("cdp_endpoint") or DEFAULT_CDP_ENDPOINT)
+            if not chat_url or "gemini.google.com/app/" not in chat_url:
+                raise RuntimeError(
+                    "Gemini browser chat is not pinned. Run: "
+                    "python -m video_ai.gemini_browser setup"
+                )
+
+            with sync_playwright() as p:
+                browser, context, page = _connect_existing_chrome(p, endpoint)
+                if page.url != chat_url:
+                    page.goto(chat_url, wait_until="domcontentloaded")
+                answer = send_message(page, prompt, file_paths=image_paths)
+
+            parsed = _parse_json_text(answer)
+            self.last_model = "gemini-web"
+            self.last_error = None
+            return parsed
+        finally:
+            for value in temp_files:
+                try:
+                    Path(value).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _generate_json(self, parts: list[dict[str, Any]], *, temperature: float) -> Any:
-        # Text-only planning/search/reasoning goes through the persistent browser
-        # chat. Visual judging remains on the API until browser file attachments
-        # are implemented.
-        if not any(isinstance(p, dict) and p.get("inline_data") for p in parts):
-            try:
-                return self._browser_json(parts)
-            except Exception as exc:
-                self.last_error = str(exc)
-                if os.getenv("VIDEO_AI_BROWSER_STRICT", "0") == "1":
-                    raise
-                print(f"[gemini-browser] text request fallback to API: {exc}", flush=True)
-
-        return super()._generate_json(parts, temperature=temperature)
+        try:
+            return self._browser_json(parts)
+        except Exception as exc:
+            self.last_error = str(exc)
+            if os.getenv("VIDEO_AI_BROWSER_STRICT", "0") == "1":
+                raise
+            print(f"[gemini-browser] browser request fallback to API: {exc}", flush=True)
+            return super()._generate_json(parts, temperature=temperature)
 
 
 def get_gemini_browser_client() -> GeminiBrowserClient | None:
