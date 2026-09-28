@@ -75,45 +75,86 @@ def build_donor_shot_plan(
         min_shot_seconds = 0.85
         max_gap_seconds = 3.50
 
-    meme_rule = (
-        "- For Style 5, use MEME whenever it is a better semantic match than stock. "
-        "There is no meme quota; do not force memes, but do not artificially limit them either. "
-        "Never repeat the same meme."
-        if style5
-        else "- Use MEME rarely: maximum 1 meme per ~15-20s, never repeat the same meme."
-    )
-    scene_count_rule = (
-        "Choose the number of visual scenes yourself from the story's meaning and rhythm. "
-        "There is NO target scene count. Cut only when the visual idea, action, reaction, setup, "
-        "or punchline genuinely changes; do not create filler cuts just to increase pace."
-        if style5
-        else f"Target roughly {target_beats} visual beats across {duration:.1f}s."
-    )
-    style5_beat_rule = (
-        "- You control the scene boundaries. Avoid useless micro-scenes, but keep a scene longer "
-        "when one continuous visual idea genuinely covers the narration."
-        if style5
-        else beat_rule
-    )
+    if style5:
+        prompt = f"""
+You are the senior visual director for a FAST-PACED 9:16 YouTube Short.
+There is only voiceover underneath, so the complete narration must be covered by
+useful visuals. You decide the edit from the story itself.
 
-    schema_meme_field = (
-        ""
-        if style5
-        else ',\n      "meme_filename": ""'
-    )
-    query_schema = (
-        "2-6 English search words describing the visible action/reaction"
-        if style5
-        else "2-5 concrete English stock-search words"
-    )
-    media_preference_rule = (
-        "- Choose VIDEO for literal physical actions/environments that stock can show specifically. "
-        "Choose MEME for ironic/social/internal reactions or punchlines when stock would be generic or misleading."
-        if style5
-        else "- Prefer VIDEO for actions, reactions, environments and modern generic concepts."
-    )
+VOICEOVER DURATION: {duration:.1f}s
 
-    prompt = f"""
+FULL TRANSCRIPT WITH WORD INDEXES:
+{indexed}
+
+Return ONLY JSON:
+{{
+  "beats": [
+    {{
+      "start_idx": 0,
+      "end_idx": 8,
+      "kind": "video|image|meme",
+      "query": "2-6 English search words for the visible action/reaction",
+      "alternatives": ["different concrete search", "another concrete search"],
+      "visual_description": "what should literally be visible and what misleading near-match to avoid",
+      "reason": "why this visual tells this exact narration beat"
+    }}
+  ]
+}}
+
+TIMELINE RULES:
+- Plan the WHOLE story before writing beats.
+- YOU choose the number of scenes. There is no fixed scene-count quota.
+- This is a dynamic Short, not a slow video essay. The main visual should usually
+  change or clearly evolve about every 1.5-2.8 seconds.
+- A scene may last longer than about 3.2 seconds only when visible action is still
+  developing and holding attention. Do not make filler cuts merely to hit a number.
+- A new action, reaction, reveal, punchline, change of thought, or important setup
+  often deserves its own visual beat.
+- Avoid useless micro-scenes that split one visual idea into fragments.
+- start_idx and end_idx are INCLUSIVE.
+- The first beat starts at word 0. The final beat ends at the final word.
+- Beats must be continuous: next start_idx = previous end_idx + 1.
+  No gaps and no overlaps.
+- Do not cut inside punctuation/clitic fragments such as "-то"; keep them with the
+  neighboring spoken word.
+
+MEDIA DECISION:
+- VIDEO: use when real stock footage can show the action/object/place literally
+  and specifically (opening a fridge, checking a phone, walking, drinking, eating,
+  opening a package, driving, shopping, etc.).
+- MEME: use when a reaction/irony/internal feeling/social awkwardness/exaggeration
+  or punchline communicates the meaning better than literal stock would.
+- IMAGE: use only when a still is honestly the right medium, such as a historical
+  portrait/document/map/artwork or another truly still-only visual.
+- There is NO meme quota. Use zero, one, or several memes according to meaning.
+- Never choose or name a media file in this pass. The material engine will later
+  search real candidates and ask you to visually rank them.
+- Meme beats are PRIMARY timeline visuals, never foreground overlays.
+- Emoji/sticker accents are handled later and are not part of this decision.
+
+VISUAL QUALITY:
+- query must describe something visually searchable, not an abstract concept.
+- For VIDEO, describe the visible subject + action. For MEME, describe the exact
+  reaction/emotion/joke the viewer should immediately understand.
+- Show what is HAPPENING, not merely a noun mentioned in narration.
+- Preserve actor roles and cause -> action -> consequence. Do not swap who acts
+  and who reacts.
+- Preserve recurring subject/object/location when connected beats depend on it.
+  Different stock actors must not be implied to be the same identifiable person.
+- Avoid redundant footage. Reusing the same subject with a genuinely new action
+  is continuity, not repetition.
+- Do not invent an unrelated visual metaphor just because exact stock is hard to find.
+  If stock would be generic or misleading, MEME can be the more honest choice.
+- For a final call-to-action such as "send this to..." or "share this with...",
+  prefer a literal visible send/share/phone action OR a semantically fitting meme;
+  do not invent an unrelated security/checkpoint metaphor.
+- If the narration contains named historical people/events, keep them historically accurate.
+- Do not use text overlays, watermarks, logos, UI screenshots or posters as the visual itself.
+""".strip()
+    else:
+        meme_rule = "- Use MEME rarely: maximum 1 meme per ~15-20s, never repeat the same meme."
+        scene_count_rule = f"Target roughly {target_beats} visual beats across {duration:.1f}s."
+        prompt = f"""
 You are a senior short-form video editor planning the COMPLETE visual timeline
 for a vertical YouTube Short. There is only voiceover underneath: every moment
 must have a useful visual.
@@ -132,10 +173,11 @@ Return ONLY JSON:
       "start_idx": 0,
       "end_idx": 8,
       "kind": "video|image|meme",
-      "query": "{query_schema}",
+      "query": "2-5 concrete English stock-search words",
       "alternatives": ["different concrete query", "another different query"],
       "visual_description": "what the viewer should literally see",
-      "reason": "why this visual fits this exact narration beat"{schema_meme_field}
+      "reason": "why this visual fits this exact narration beat",
+      "meme_filename": ""
     }}
   ]
 }}
@@ -143,8 +185,8 @@ Return ONLY JSON:
 EDITING RULES:
 - Plan the WHOLE story before choosing any beat.
 - Cover the transcript from first word to last word in chronological order.
-{style5_beat_rule}
-{media_preference_rule}
+{beat_rule}
+- Prefer VIDEO for actions, reactions, environments and modern generic concepts.
 - Prefer IMAGE only for exact historical portraits/maps/documents, still artwork,
   or when motion footage would be dishonest.
 {meme_rule}
@@ -153,64 +195,22 @@ EDITING RULES:
 - Build cause -> action -> consequence across connected beats. Resolve who acts
   and who reacts before writing queries; do not exchange their roles.
 - In visual_description specify the observable action and a misleading near-match
-  to avoid. Example: ignoring an incoming call requires noticing/rejecting it;
-  scrolling a phone only illustrates phone use, not ignoring a call.
-- Prefer feasible stock actions with short literal queries. Do not prepend
-  "person interacting with" to every object or requested action.
-- Preserve recurring roles via compatible setting/clothing or object close-ups;
-  do not imply unrelated stock actors are the same identifiable person.
-
-- Preserve the same subject/object/location when consecutive beats explain it.
-  A product comparison needs the same product; a reaction needs its cause.
-  Vary the action or framing, not the subject merely for variety.
-- Avoid duplicate footage and redundant shots. Reusing the subject with a new
-  informative action is useful continuity, not repetition.
-- Plan visible evidence: what does this shot teach beyond the subtitle?
-  For a comparison show both states; for a quantity show its label/measurement;
-  for an action show the event, not just an unrelated shot of the same animal.
-- Specify this observable evidence in visual_description and carry the concrete
-  subject into queries even when the current words only say 'it' or 'the same'.
-- Do not invent a different subject or a visual metaphor to fill a difficult beat.
-- Never use abstract sky/clouds/light/glow in two adjacent beats. After one atmospheric abstract shot, the next beat must use a grounded human action, object, place, document, or event.
-- Spiritual/religious narration does NOT automatically mean clouds or light rays; prefer concrete visible actions such as praying hands, a church/temple interior, candles, a historical religious image, or a person reacting when context allows.
-- For a price/money beat, do not repeatedly use a rich-man reaction meme.
-- For phone/computer/store examples, vary subject, angle and action.
+  to avoid.
+- Prefer feasible stock actions with short literal queries.
+- Preserve recurring roles, connected subjects/objects/locations, and continuity.
+- Avoid duplicate footage and redundant shots.
 - Historical named people/events must stay historically accurate.
 - No text overlays, watermarks, logos or screenshots as the visual itself.
 - start_idx/end_idx are word indexes from the transcript above.
 """.strip()
 
-    if viral_style:
-        prompt += ("\nVIRAL BASE FOOTAGE: use grounded story footage; memes are added separately. "
-                   "Do not choose meme beats or generic screaming/grimacing stock actors. "
-                   "Keep everyday situations emotionally proportionate. For choosing a film show "
-                   "browsing titles, discussing a choice or using a remote, not an unrelated comic face. "
-                   "Fast cuts must still explain the action. A short fragment such as 'not yet' "
-                   "inherits its meaning from the surrounding sentence.")
-    elif style5:
-        prompt += (
-            "\nSTYLE 5 BASE-TRACK RULES:\n"
-            "- MEMES ARE NOT OVERLAYS. A meme is a PRIMARY visual beat that replaces stock footage "
-            "for that beat on the main timeline.\n"
-            "- First ask: can stock footage show this phrase LITERALLY and SPECIFICALLY? "
-            "If yes, use VIDEO.\n"
-            "- If the phrase is abstract, social, ironic, exaggerated, internal/emotional, a punchline, "
-            "or would force a generic/weak stock metaphor, prefer MEME instead.\n"
-            "- Examples that often deserve MEME: awkward internal thoughts, 'me pretending everything is fine', "
-            "sarcastic reactions, absurd comparisons, embarrassment, disbelief, 'I am done', social anxiety, "
-            "or a joke whose exact action is not realistically searchable.\n"
-            "- Examples that should stay VIDEO: opening a fridge, checking a phone, walking into a room, "
-            "drinking water, driving, shopping, cooking, opening a package, or any other literal visible action.\n"
-            "- Do NOT use a meme just because it is funny. Use it when it is a BETTER semantic match than stock.\n"
-            "- There is NO meme quota. Clean stock-only stretches are good. Several meme beats are allowed "
-            "when several consecutive phrases genuinely cannot be represented precisely with stock.\n"
-            "- THIS PASS DECIDES ONLY THE EDIT: scene boundaries, media type, and what should be visible. "
-            "Do not choose or name any media file.\n"
-            "- After this plan is returned, the material engine will search real candidates and ask you to visually rank them.\n"
-            "- For MEME beats, query must be a concise English reaction/search phrase suitable for meme search, and "
-            "visual_description must describe the exact emotion/joke that should be visible.\n"
-            "- Emoji/sticker reactions are handled later and are NOT part of this base-track decision."
-        )
+        if viral_style:
+            prompt += (
+                "\nVIRAL BASE FOOTAGE: use grounded story footage; memes are added separately. "
+                "Do not choose meme beats or generic screaming/grimacing stock actors. "
+                "Keep everyday situations emotionally proportionate. Fast cuts must still explain the action."
+            )
+
     data = client._generate_json([{"text": prompt}], temperature=0.08)
     raw_beats = data.get("beats", []) if isinstance(data, dict) else []
     minimum_beats = 1 if style5 else 2
