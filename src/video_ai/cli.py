@@ -440,6 +440,7 @@ def main() -> None:
             "classic",
             "dynamic",
             "viral",
+            "style5",
         ),
         default="classic",
         help="Viral: fast Darwin-style accents and captions",
