@@ -34,7 +34,16 @@ def build_donor_shot_plan(
 
     indexed = " ".join(f"{i}:{word.text}" for i, word in enumerate(words))
     # Viral reactions are a separate timed foreground layer, not random base shots.
-    meme_names = [] if viral_style else _meme_names(meme_dir)
+    meme_names = [] if (viral_style or style5) else _meme_names(meme_dir)
+    meme_catalog_prompt = (
+        "LOCAL MEME LIBRARY: available to the downstream material picker. "
+        "Do not choose filenames during this planning pass."
+        if style5
+        else (
+            "AVAILABLE LOCAL MEMES (exact filenames; optional):\n"
+            + str(meme_names if meme_names else "(none)")
+        )
+    )
     duration = transcript.duration
 
     if viral_style:
@@ -83,8 +92,7 @@ must have a useful visual.
 FULL TRANSCRIPT WITH WORD INDEXES:
 {indexed}
 
-AVAILABLE LOCAL MEMES (exact filenames; optional):
-{meme_names if meme_names else "(none)"}
+{meme_catalog_prompt}
 
 Target roughly {target_beats} visual beats across {duration:.1f}s.
 
@@ -168,9 +176,11 @@ EDITING RULES:
             "- Do NOT use a meme just because it is funny. Use it when it is a BETTER semantic match than stock.\n"
             "- There is NO meme quota. Clean stock-only stretches are good. Several meme beats are allowed "
             "when several consecutive phrases genuinely cannot be represented precisely with stock.\n"
-            "- For a MEME beat: if one AVAILABLE LOCAL MEME is an exact fit, put its exact filename in meme_filename. "
-            "Otherwise leave meme_filename empty; the engine will search the internet for a meme using query. Never invent a filename.\n"
-            "- For MEME beats, query must be a concise English reaction/search phrase suitable for Giphy, and "
+            "- THIS PASS DECIDES ONLY WHETHER A BEAT SHOULD BE MEME OR STOCK. Do not choose a meme file here. "
+            "For every Style 5 MEME beat, always leave meme_filename empty.\n"
+            "- After this plan is returned, the material engine separately searches the local meme library and Giphy, "
+            "then Gemini visually judges the actual candidates.\n"
+            "- For MEME beats, query must be a concise English reaction/search phrase suitable for meme search, and "
             "visual_description must describe the exact emotion/joke that should be visible.\n"
             "- Emoji/sticker reactions are handled later and are NOT part of this base-track decision."
         )
@@ -209,8 +219,9 @@ EDITING RULES:
         meme_filename = str(beat.get("meme_filename", "") or "").strip() or None
         if kind == "meme":
             if style5:
-                if meme_filename and meme_filename not in meme_names:
-                    meme_filename = None
+                # Style 5 is two-stage: planner decides MEME vs stock only.
+                # Asset selection happens later from local memes + internet candidates.
+                meme_filename = None
             elif not meme_filename or meme_filename not in meme_names:
                 kind = "video"
                 meme_filename = None
