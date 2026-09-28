@@ -160,9 +160,10 @@ EDITING RULES:
             "- Do NOT use a meme just because it is funny. Use it when it is a BETTER semantic match than stock.\n"
             "- There is NO meme quota. Clean stock-only stretches are good. Several meme beats are allowed "
             "when several consecutive phrases genuinely cannot be represented precisely with stock.\n"
-            "- For every MEME beat choose one exact meme_filename from AVAILABLE LOCAL MEMES. Never invent a filename.\n"
-            "- For MEME beats, query/visual_description should describe the intended reaction/meaning so the "
-            "local meme library can verify the selected file.\n"
+            "- For a MEME beat: if one AVAILABLE LOCAL MEME is an exact fit, put its exact filename in meme_filename. "
+            "Otherwise leave meme_filename empty; the engine will search the internet for a meme using query. Never invent a filename.\n"
+            "- For MEME beats, query must be a concise English reaction/search phrase suitable for Giphy, and "
+            "visual_description must describe the exact emotion/joke that should be visible.\n"
             "- Emoji/sticker reactions are handled later and are NOT part of this base-track decision."
         )
     data = client._generate_json([{"text": prompt}], temperature=0.08)
@@ -198,9 +199,13 @@ EDITING RULES:
             kind = "video"
 
         meme_filename = str(beat.get("meme_filename", "") or "").strip() or None
-        if kind == "meme" and (not meme_filename or meme_filename not in meme_names):
-            kind = "video"
-            meme_filename = None
+        if kind == "meme":
+            if style5:
+                if meme_filename and meme_filename not in meme_names:
+                    meme_filename = None
+            elif not meme_filename or meme_filename not in meme_names:
+                kind = "video"
+                meme_filename = None
 
         if lock:
             visual_mode = "image"
