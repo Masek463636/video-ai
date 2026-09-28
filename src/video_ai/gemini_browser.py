@@ -274,6 +274,51 @@ def _attach_files(page, file_paths: list[str] | None) -> None:
         "Не удалось найти загрузку файлов в интерфейсе Gemini "
         "(искал Upload & tools / Upload files / uploader-images-files)"
     )
+def _click_send(page, *, timeout_s: float = 35.0) -> None:
+    """Wait until Gemini enables Send, then click it.
+
+    Enter is intentionally only a fallback because after file uploads Gemini can
+    leave the composer focused while the send action is still disabled.
+    """
+    selectors = [
+        'button[aria-label="Send message"]',
+        'button[aria-label*="Send" i]',
+        'button[aria-label="Отправить сообщение"]',
+        'button[aria-label*="Отправ" i]',
+        'button[data-test-id="send-button"]',
+        '[data-test-id="send-button"] button',
+    ]
+    deadline = time.monotonic() + timeout_s
+    saw_button = False
+
+    while time.monotonic() < deadline:
+        for selector in selectors:
+            try:
+                buttons = page.locator(selector)
+                if not buttons.count():
+                    continue
+                saw_button = True
+                button = buttons.last
+                if not button.is_visible():
+                    continue
+                disabled = button.get_attribute("disabled")
+                aria_disabled = (button.get_attribute("aria-disabled") or "").lower()
+                if disabled is not None or aria_disabled == "true":
+                    continue
+                button.click(force=True)
+                return
+            except Exception:
+                continue
+        page.wait_for_timeout(300)
+
+    # Text-only Gemini often submits with Enter even if the accessible name of
+    # the send button changed. Keep this as the last resort only.
+    if not saw_button:
+        page.keyboard.press("Enter")
+        return
+    raise RuntimeError("Кнопка отправки Gemini так и не стала активной после загрузки файлов")
+
+
 def send_message(
     page,
     message: str,
@@ -283,12 +328,19 @@ def send_message(
     box = _first_visible(page, PROMPT_SELECTORS, timeout_ms=20000)
     before = _last_response_text(page)
     _attach_files(page, file_paths)
+
+    # Give Gemini a moment to finish creating attachment chips/previews. The
+    # send button may stay disabled while uploaded images are still processing.
+    if file_paths:
+        page.wait_for_timeout(1200)
+
     box.click()
     try:
         box.fill(message)
     except Exception:
         page.keyboard.insert_text(message)
-    page.keyboard.press("Enter")
+
+    _click_send(page)
     return wait_for_answer(page, before)
 
 
