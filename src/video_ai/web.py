@@ -87,6 +87,63 @@ class Studio:
                 str(folder / 'base.mp4'),
             ])
 
+        elif job.get('style') == 'premium_v3':
+
+            premium = [sys.executable, '-u', '-m', 'video_ai.premium_v3_cli']
+
+            steps = [
+                (
+                    'Premium v3 · план всей истории и подбор',
+                    premium + [
+                        'base',
+                        str(folder / 'voice.mp3'),
+                        '-o',
+                        str(folder / 'base.mp4'),
+                        '--work-dir',
+                        str(work),
+                        '--language',
+                        'ru',
+                        '--reference-framing',
+                        '--select-moments',
+                        '--meme-dir',
+                        str(self.root / 'memes'),
+                    ],
+                ),
+                (
+                    'Premium v3 · финальная сборка',
+                    premium + [
+                        'final',
+                        str(work / 'shot_plan.materialized.json'),
+                        '--transcript',
+                        str(work / 'transcript.json'),
+                        '--reference-framing',
+                        '-o',
+                        str(folder / 'final.mp4'),
+                        '--work-dir',
+                        str(folder / 'final-work'),
+                        '--base-video',
+                        str(folder / 'base.mp4'),
+                        '--premium-audio',
+                    ],
+                ),
+            ]
+
+            music_candidates = sorted(
+                [
+                    path
+                    for path in self.music.iterdir()
+                    if path.suffix.lower() in {
+                        '.mp3',
+                        '.wav',
+                        '.m4a',
+                        '.aac',
+                        '.ogg',
+                    }
+                ]
+            )
+            if music_candidates:
+                steps[1][1].extend(['--music', str(music_candidates[0])])
+
         elif job.get('style') == 'premium_v2':
 
             premium = [sys.executable, '-u', '-m', 'video_ai.premium_v2_cli']
@@ -340,6 +397,7 @@ def make_handler(studio):
                 'viral',
                 'premium',
                 'premium_v2',
+                'premium_v3',
             ):
                 self.send_data({'error': 'Неизвестный стиль'}, 400)
                 return
