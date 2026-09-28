@@ -28,7 +28,7 @@ def render_plan(
     base_video: str | Path | None = None,
     editing_style: str = "classic",
 ) -> Path:
-    if editing_style not in ("classic", "dynamic", "viral"):
+    if editing_style not in ("classic", "dynamic", "viral", "style5"):
         raise ValueError("Unknown editing style")
     _require("ffmpeg")
     _require("ffprobe")
@@ -113,11 +113,26 @@ def render_plan(
                 flush=True,
             )
 
-        elif editing_style == "viral":
+        elif editing_style in ("viral", "style5"):
             from .viral_montage import compose_meme_shots, emoji_overlays
-            base, meme_shots = compose_meme_shots(base, overlays or [], plan, root, audio_duration, crf=crf)
-            overlays = emoji_overlays(overlays or [], audio_duration, meme_shots,
-                                     [(start, end) for _, start, end in spans])
+            # Style 5 borrows ONLY the primary-track meme-cut mechanism from
+            # Viral. Unlike Viral it keeps Dynamic-style camera motion and
+            # captions. Memes are never overlays; only emoji reactions remain
+            # in the foreground layer.
+            base, meme_shots = compose_meme_shots(
+                base,
+                overlays or [],
+                plan,
+                root,
+                audio_duration,
+                crf=crf,
+            )
+            overlays = emoji_overlays(
+                overlays or [],
+                audio_duration,
+                meme_shots,
+                [(start, end) for _, start, end in spans],
+            )
 
             (root / "overlays.placed.json").write_text(
                 json.dumps(
@@ -128,13 +143,14 @@ def render_plan(
                 encoding="utf-8",
             )
 
+            label = "style5" if editing_style == "style5" else "viral"
             print(
-                f"[viral] visible accents={len(overlays)}",
+                f"[{label}] primary meme cuts={len(meme_shots)}; emoji overlays={len(overlays)}",
                 flush=True,
             )
 
         if reviewer is not None:
-            if editing_style not in ("dynamic", "viral"):
+            if editing_style not in ("dynamic", "viral", "style5"):
                 overlays = reviewer.overlays(
                     base,
                     overlays or [],
@@ -555,7 +571,7 @@ def _apply_overlays(base: Path, overlays: list[dict], plan: ShotPlan, output: Pa
         else:
             x = settled_x
 
-        if editing_style in {"dynamic", "viral"} and layout is not None:
+        if editing_style in {"dynamic", "viral", "style5"} and layout is not None:
             # Preserve approved stable-branch centring without animated resize
             # (which previously made GIF/MP4 reactions collapse).
             x = f"({x})+({width}-overlay_w)/2"
@@ -1104,7 +1120,7 @@ def _ass_text_plain(text: str) -> str:
 
 def _ass_text(text: str, *, editing_polish: bool = False, editing_style: str = "classic") -> str:
     safe = text.replace("{", "(").replace("}", ")")
-    if editing_style == "dynamic":
+    if editing_style in {"dynamic", "style5"}:
         return (
             r"{\fscx40\fscy40"
             r"\t(0,60,\fscx115\fscy115)"
