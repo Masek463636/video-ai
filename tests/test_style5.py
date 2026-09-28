@@ -47,3 +47,39 @@ def test_style5_emoji_placement_preserves_directional_entry(tmp_path):
     assert placed[0]["animation"] == "fly"
     assert placed[0]["position"] == "center"
     assert "layout_box" not in placed[0]
+
+
+def test_style5_internet_meme_candidate_enters_primary_pool(tmp_path):
+    from video_ai.assets import _build_ranked_pool
+    from video_ai.meme_library import GiphyMemeAsset
+
+    scene = Scene(
+        0,
+        2,
+        "awkward excuse reaction",
+        caption="Не, я недавно ел",
+        visual_mode="meme",
+        source_mode="meme_library",
+        visual_description="awkward lying excuse reaction",
+    )
+    fake = GiphyMemeAsset(
+        title="awkward reaction",
+        download_url="https://example.invalid/reaction.mp4",
+        page_url="https://giphy.com/gifs/example",
+        preview_url="https://example.invalid/reaction.gif",
+        score=10.0,
+    )
+    with patch("video_ai.assets.search_giphy_memes", return_value=[fake]):
+        ranked, _ = _build_ranked_pool(
+            scene,
+            limit=20,
+            meme_dir=tmp_path / "missing-memes",
+            used_urls=set(),
+            used_titles=[],
+            semantic=False,
+            semantic_top_k=6,
+        )
+
+    assert ranked
+    assert ranked[0][0].source == "giphy_meme"
+    assert ranked[0][0].kind == "video"
